@@ -982,12 +982,24 @@ struct Router2
             }
             if (cursor == src)
                 break;
+            // Ambiguity is about distinct PREDECESSOR WIRES, not about the
+            // number of pips. Several pips routinely connect the same pair of
+            // wires -- a site mux reached through both its true and inverted
+            // input, and once more for every site variant -- and counting them
+            // separately makes a chain with exactly one predecessor look
+            // ambiguous, so the walk gives up at the first hop.
+            //
+            // ILOGICE3 is the extreme case: DINV_OUT has six uphill pips and
+            // all six come from the same wire D (D and D_B, times three site
+            // variants). SLICE control inputs behave the same way at
+            // CEUSEDMUX_OUT. General interconnect rarely does, which is why
+            // this only ever bit inside sites.
             WireId next_cursor;
             for (auto uh : ctx->getPipsUphill(cursor)) {
                 WireId w = ctx->getPipSrcWire(uh);
                 if (is_wire_undriveable(w, net))
                     continue;
-                if (next_cursor != WireId()) {
+                if (next_cursor != WireId() && w != next_cursor) {
                     done = true;
                     break;
                 }
