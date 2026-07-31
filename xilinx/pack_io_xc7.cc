@@ -1174,8 +1174,39 @@ void XC7Packer::pack_idelayctrl()
             idelayctrl_map[group_name] = ci;
         }
     }
-    if (idelayctrl_map.empty())
+    if (idelayctrl_map.empty()) {
+        // An IDELAYE2 with no IDELAYCTRL is not a design that runs slightly
+        // wrong -- it is a design whose delayed inputs are DEAD. IDELAYCTRL
+        // continuously calibrates the tap chain against a 200 MHz reference and
+        // its RDY gates the delay line; with no controller the taps never
+        // calibrate and the output sits static.
+        //
+        // Nothing downstream notices. Packing succeeds, the emitted FASM is
+        // completely correct and every feature in it resolves in prjxray, the
+        // bitstream loads, and the fabric around it runs. Measured on a
+        // xc7z020: seven IDELAYE2 on an LVDS receive bus, eight different tap
+        // values, and all 1024 captured words read exactly zero on every tap
+        // while the one undelayed lane ran at its expected 16.16 MHz.
+        //
+        // Vivado refuses this design. So does this, now, for the same reason
+        // the "IDELAYCTRL but no I/ODELAYs" check below exists -- the two are
+        // the same mistake seen from opposite ends.
+        std::vector<std::string> orphans;
+        for (auto cell : sorted(ctx->cells)) {
+            CellInfo *ci = cell.second;
+            if (ci->type == ctx->id("IDELAYE2_IDELAYE2") || ci->type == ctx->id("ODELAYE2_ODELAYE2"))
+                orphans.push_back(ctx->nameOf(ci));
+        }
+        if (!orphans.empty()) {
+            std::string sample = orphans.front();
+            log_error("Found %d I/ODELAY cell%s but no IDELAYCTRL (e.g. '%s'). An I/ODELAY without an "
+                      "IDELAYCTRL on a 200 MHz reference never calibrates and its output is dead -- the "
+                      "design would build and load and capture nothing. Instantiate IDELAYCTRL, or remove "
+                      "the delays.\n",
+                      int(orphans.size()), orphans.size() == 1 ? "" : "s", sample.c_str());
+        }
         return;
+    }
     for (auto group : idelayctrl_map)
     {
         auto group_name = group.first;
