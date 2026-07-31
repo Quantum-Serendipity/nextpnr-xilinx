@@ -2881,9 +2881,17 @@ struct FasmBackend
         push(get_tile_name(ci->bel.tile));
         push("PLLE2_ADV");
         write_bit("IN_USE");
-        // FIXME: should be INV not ZINV (XRay error?)
-        write_bit("ZINV_PWRDWN", bool_or_default(ci->params, ctx->id("IS_PWRDWN_INVERTED"), false));
-        write_bit("ZINV_RST", bool_or_default(ci->params, ctx->id("IS_RST_INVERTED"), false));
+        // ZINV_* is prjxray's Z-INVERTED encoding: the bit is SET when the pin is
+        // NOT inverted.  Every other ZINV_ in this file writes !IS_x_INVERTED --
+        // ILOGIC/OLOGIC ZINV_D, ZINV_C, ZINV_OCLK, ZINV_ODATAIN, BUFGCTRL
+        // ZINV_CE0/S0, BUFHCE ZINV_CE, RAMB ZINV_*.  The CMT was the sole
+        // exception, under an old "FIXME: should be INV not ZINV (XRay error?)".
+        // It was not an XRay error.  Omitting ZINV_RST leaves the bit clear,
+        // which INVERTS RST, so a PLL with RST tied low is held in reset for
+        // ever and LOCKED never asserts.  INV_CLKINSEL below is genuinely an
+        // INV-encoded bit (note the name) and is correctly left un-negated.
+        write_bit("ZINV_PWRDWN", !bool_or_default(ci->params, ctx->id("IS_PWRDWN_INVERTED"), false));
+        write_bit("ZINV_RST", !bool_or_default(ci->params, ctx->id("IS_RST_INVERTED"), false));
         write_bit("INV_CLKINSEL", bool_or_default(ci->params, ctx->id("IS_CLKINSEL_INVERTED"), false));
         write_pll_clkout("DIVCLK", ci);
         write_pll_clkout("CLKFBOUT", ci);
@@ -3066,11 +3074,11 @@ struct FasmBackend
         push(get_tile_name(ci->bel.tile));
         push("MMCME2_ADV");
         write_bit("IN_USE");
-        // FIXME: should be INV not ZINV (XRay error?)
-        write_bit("ZINV_PWRDWN", bool_or_default(ci->params, id_IS_PWRDWN_INVERTED, false));
-        write_bit("ZINV_RST", bool_or_default(ci->params, id_IS_RST_INVERTED, false));
-        write_bit("ZINV_PSEN", bool_or_default(ci->params, id_IS_PSEN_INVERTED, false));
-        write_bit("ZINV_PSINCDEC", bool_or_default(ci->params, id_IS_PSINCDEC_INVERTED, false));
+        // See write_pll() for the reasoning.  ZINV_* is set when NOT inverted.
+        write_bit("ZINV_PWRDWN", !bool_or_default(ci->params, id_IS_PWRDWN_INVERTED, false));
+        write_bit("ZINV_RST", !bool_or_default(ci->params, id_IS_RST_INVERTED, false));
+        write_bit("ZINV_PSEN", !bool_or_default(ci->params, id_IS_PSEN_INVERTED, false));
+        write_bit("ZINV_PSINCDEC", !bool_or_default(ci->params, id_IS_PSINCDEC_INVERTED, false));
         write_bit("INV_CLKINSEL", bool_or_default(ci->params, id_IS_CLKINSEL_INVERTED, false));
         write_mmcm_clkout("DIVCLK", ci);
         write_mmcm_clkout("CLKFBOUT", ci);
