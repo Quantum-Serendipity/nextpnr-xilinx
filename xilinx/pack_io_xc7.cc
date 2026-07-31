@@ -1106,6 +1106,32 @@ void XC7Packer::pack_iologic()
                 std::string iol_site = get_ilogic_site(ctx->getBelName(io_bel).str(ctx));
                 ci->attrs[id_BEL] = iol_site + "/ISERDESE2";
             }
+
+            // Vivado leaves OFB/OCLK/OCLKB UNCONNECTED on an ISERDESE2 that
+            // does not use them. Tying them to a constant instead -- which is
+            // what a hand-written instantiation naturally does, and what the
+            // Xilinx templates show -- makes the router pull real nets to
+            // them, and reaching OFB and OCLKM needs two pips prjxray has not
+            // characterised:
+            //
+            //     RIOI3.RIOI_OLOGIC0_OFB.IOI_OLOGIC0_D1
+            //     RIOI3.IOI_OCLKM_0.IOI_IMUX31_1
+            //
+            // Place & route succeeds; fasm2frames then hard-errors on the
+            // undocumented features, so the failure surfaces two stages after
+            // its cause and looks like a database problem rather than a
+            // packing one.
+            //
+            // disconnect_constant_port only acts on $PACKER_GND_NET /
+            // $PACKER_VCC_NET, so a genuinely driven OCLK -- which the MEMORY
+            // interface types do use -- is left alone. OFB is guarded on
+            // OFB_USED as well, so that the "OFB tied to a constant while
+            // OFB_USED=TRUE" case still reaches the log_error above rather
+            // than being silently disconnected.
+            if (!ofb_used)
+                disconnect_constant_port(ci, id_OFB);
+            disconnect_constant_port(ci, ctx->id("OCLK"));
+            disconnect_constant_port(ci, ctx->id("OCLKB"));
         }
 
         // disconnect some ports that vivado also disconnects when wired to constant
