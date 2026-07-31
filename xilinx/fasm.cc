@@ -1787,12 +1787,13 @@ struct FasmBackend
             write_bit("ISERDES.MODE.MASTER");
             write_bit("ISERDES.NUM_CE.N1");
 
-            // Switch IDELMUXE3 to include the IDELAY element, if we have an IDELAYE2 driving D
             NetInfo *d = get_net_or_empty(ci, ctx->id("D"));
             if (d == nullptr || d->driver.cell == nullptr)
                 log_error("%s '%s' has disconnected D input\n", ci->type.c_str(ctx), ctx->nameOf(ci));
             CellInfo *drv = d->driver.cell;
-            if (boost::contains(drv->type.str(ctx), "IDELAYE2"))
+            bool delayed = boost::contains(drv->type.str(ctx), "IDELAYE2");
+            write_bit("IFFDELMUXE3.P0", delayed);
+            if (delayed)
                 write_bit("IDELMUXE3.P0");
             else
                 write_bit("IDELMUXE3.P1");
