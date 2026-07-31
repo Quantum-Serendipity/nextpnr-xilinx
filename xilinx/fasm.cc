@@ -1697,15 +1697,58 @@ struct FasmBackend
             write_bit("ISERDES.MODE.MASTER");
             write_bit("ISERDES.NUM_CE.N1");
 
-            // Switch IDELMUXE3 to include the IDELAY element, if we have an IDELAYE2 driving D
+            // Select the delayed or the direct input, on the mux that actually
+            // feeds the flip-flop.
+            //
+            // ILOGICE3 has two independent input muxes and they serve different
+            // outputs. From the site model:
+            //
+            //     IFF.D     <- IFFMUX_OUT <- IFFDELMUXE3_OUT
+            //                                  <- {DDLY, DINV_OUT, ZHOLD_IFF_INV_OUT}
+            //     O         <- IMUX       <- IDELMUXE3_OUT
+            //                                  <- {DDLY, DINV_OUT, ZHOLD_FABRIC_INV_OUT}
+            //
+            // IDELMUXE3 feeds ONLY the combinational O output. The register --
+            // the entire point of an IDDR -- is fed by IFFDELMUXE3, which this
+            // function did not write at all.
+            //
+            // For a plain IDDR that was harmless: the unwritten default is P1
+            // (DINV_OUT, direct), which is correct. zynq7 documents
+            // IFFDELMUXE3.P0 = 28_116 and virtex7 documents
+            // IFFDELMUXE3.P1 = !28_116, same bit inverted.
+            //
+            // For an IDDR fed by an IDELAYE2 it was a silent correctness bug:
+            // IDELMUXE3.P0 routed the delayed signal to the unused O output
+            // while the flip-flop kept sampling undelayed data. The delay was
+            // configured, occupied a site, and did nothing -- and a tap sweep
+            // built on it would have produced a flat, fully open eye for
+            // entirely the wrong reason.
             NetInfo *d = get_net_or_empty(ci, ctx->id("D"));
             if (d == nullptr || d->driver.cell == nullptr)
                 log_error("%s '%s' has disconnected D input\n", ci->type.c_str(ctx), ctx->nameOf(ci));
             CellInfo *drv = d->driver.cell;
-            if (boost::contains(drv->type.str(ctx), "IDELAYE2"))
-                write_bit("IDELMUXE3.P0");
-            else
-                write_bit("IDELMUXE3.P1");
+            bool delayed = boost::contains(drv->type.str(ctx), "IDELAYE2");
+
+            // The register path. This is the one that matters.
+            //
+            // Only P0 is written. P1 is deliberately left implicit: zynq7,
+            // artix7, kintex7 and spartan7 document only IFFDELMUXE3.P0
+            // (= 28_116 set); virtex7 additionally documents
+            // IFFDELMUXE3.P1 = !28_116, confirming P1 is simply that bit
+            // clear, which is the unwritten default. Emitting a literal
+            // "IFFDELMUXE3.P1" would make fasm2frames fail to resolve the
+            // feature on every family except virtex7.
+            if (delayed)
+                write_bit("IFFDELMUXE3.P0");
+
+            // The combinational path. Only meaningful when O is actually used;
+            // writing it unconditionally is what disguised the bug above.
+            if (get_net_or_empty(ci, ctx->id("O")) != nullptr) {
+                if (delayed)
+                    write_bit("IDELMUXE3.P0");
+                else
+                    write_bit("IDELMUXE3.P1");
+            }
 
             // Clock edge.  DDR_CLK_EDGE is a three-valued parameter encoded in two bits
             // (26_99 / 27_98 for LIOI3.ILOGIC_Y0), and the third value is the state where
