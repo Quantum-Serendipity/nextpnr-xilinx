@@ -2584,6 +2584,62 @@ struct FasmBackend
                         write_bit(std::string("BRAM36_") + pname + "_1");
                 }
                 pop();
+
+                // GUARD: x9 parity is not modelled correctly, so refuse rather
+                // than emit a silently-wrong bitstream.
+                //
+                // A RAMB36E1 at x9 is two RAMB18 halves at x4 (8 data bits) plus
+                // the RAMB36-scope leftover bit above for the 9th.  prjxray maps
+                // the site's parity pins ALTERNATELY across those halves:
+                //     DOPBDOP0 -> ...DOPBDOPL0     DOPBDOP1 -> ...DOPBDOPU0
+                // The 9th bit is not presented solely on index 0.  Measured on an
+                // xc7z020 (4096x26 capture buffer, three x9 RAMB36s): the parity
+                // bit reads back CORRECTLY on even addresses and as 0 on odd --
+                //     bit  8:  even 53.1% ones / odd 0.0%
+                //     bit 17:  even 53.1% ones / odd 0.0%
+                // while all 24 data bits, routed across both halves, are perfect.
+                // A design consuming only DOPBDOP[0] therefore gets a quietly
+                // wrong bit in half its words: it places, routes, builds, loads
+                // and runs.  That is the worst possible failure mode, so error.
+                //
+                // Same spirit as the is_ceused half-slice guard above: emit no
+                // bitstream rather than a broken one.
+                static const std::pair<const char *, const char *> x9_parity[] = {
+                        {"READ_WIDTH_A", "DOPADOP"},
+                        {"READ_WIDTH_B", "DOPBDOP"},
+                        {"WRITE_WIDTH_A", "DIPADIP"},
+                        {"WRITE_WIDTH_B", "DIPBDIP"},
+                };
+                for (auto &pp : x9_parity) {
+                    if (int_or_default(ci->params, ctx->id(pp.first), 0) != 9)
+                        continue;
+                    // Packed port names carry no bus brackets and no L/U suffix:
+                    // they are DOPBDOP0..3 / DIPADIP0..3.  The L/U split lives in
+                    // the SITE PIN map (DOPBDOP0 -> ...DOPBDOPL0, DOPBDOP1 ->
+                    // ...DOPBDOPU0), so index 0 reaches the lower half only.
+                    NetInfo *p0 = get_net_or_empty(ci, ctx->id(stringf("%s0", pp.second)));
+                    if (p0 == nullptr)
+                        continue;
+                    if (p0->name == ctx->id("$PACKER_GND_NET") || p0->name == ctx->id("$PACKER_VCC_NET"))
+                        continue;
+                    bool is_output = pp.second[1] == 'O';
+                    if (is_output ? p0->users.empty() : (p0->driver.cell == nullptr))
+                        continue;
+                    log_error("FASM: RAMB36E1 '%s' uses %s = 9 with parity bit %s0 in use (net '%s').\n"
+                              "  At x9 a RAMB36 is two RAMB18 halves and the site map sends %s0 to the "
+                              "LOWER half only (%s0 -> ...%sL0, %s1 -> ...%sU0).  The 9th bit alternates "
+                              "between halves by address, so a design reading only index 0 gets the "
+                              "correct value on even addresses and 0 on odd ones.\n"
+                              "  Measured on xc7z020 (4096x26 capture, three x9 RAMB36s): parity bits 8 "
+                              "and 17 read 53.1%% ones on even addresses and 0.0%% on odd, while all 24 "
+                              "data bits were bit-exact.\n"
+                              "  Refusing to emit a silently-corrupt bitstream.\n"
+                              "  Workaround: keep the array inside a single BRAM in a data-only width "
+                              "(bank a deep memory into 1024-deep x<=32 arrays), or widen it so yosys "
+                              "does not select a x9 mapping.\n",
+                              ci->name.c_str(ctx), pp.first, pp.second, p0->name.c_str(ctx),
+                              pp.second, pp.second, pp.second, pp.second, pp.second);
+                }
             }
             auto used_rdaddrcasc = used_wires_starting_with(tile, "BRAM_CASCOUT_ADDRARDADDR", false);
             auto used_wraddrcasc = used_wires_starting_with(tile, "BRAM_CASCOUT_ADDRBWRADDR", false);
