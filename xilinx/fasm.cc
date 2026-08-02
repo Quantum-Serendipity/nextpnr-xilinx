@@ -2733,9 +2733,53 @@ struct FasmBackend
                   eighths ? "integers and multiples of 0.125" : "integers only");
     }
 
+    void check_duty_cycle(CellInfo *ci, const std::string &prim, const std::string &name, double divide, int frac,
+                          bool used, double duty)
+    {
+        if (!used || duty == 0.5)
+            return;
+        std::string where = get_tile_name(ci->bel.tile);
+        if (divide <= 1)
+            log_error("OFF_GRID_DUTY_CYCLE: %s '%s' at %s requests %s_DUTY_CYCLE=%.6g on a counter with divide 1, "
+                      "which is bypassed (NO_COUNT) and has no programmable duty cycle; only 0.5 is accepted.\n",
+                      prim.c_str(), ci->name.c_str(ctx), where.c_str(), name.c_str(), duty);
+        if (frac != 0)
+            log_error("OFF_GRID_DUTY_CYCLE: %s '%s' at %s requests %s_DUTY_CYCLE=%.6g with a fractional divide "
+                      "(%.6g); only 0.5 is achievable there.\n",
+                      prim.c_str(), ci->name.c_str(ctx), where.c_str(), name.c_str(), duty, divide);
+        int d = int(floor(divide));
+        int high, low;
+        bool edge;
+        split_counter(divide, duty, high, low, edge);
+        if (high < 1 || high > 64 || low < 1 || low > 64) {
+            int hc_min = 2 * std::max(1, d - 64), hc_max = 2 * std::min(64, d - 1) + 1;
+            log_error("OFF_GRID_DUTY_CYCLE: %s '%s' at %s requests %s_DUTY_CYCLE=%.6g, which a divide-%d counter "
+                      "cannot produce (it rounds to HIGH_TIME %d, LOW_TIME %d; each must be 1 to 64). Achievable: "
+                      "%.6g to %.6g in steps of %.6g.\n",
+                      prim.c_str(), ci->name.c_str(ctx), where.c_str(), name.c_str(), duty, d, high, low,
+                      hc_min / (2.0 * d), hc_max / (2.0 * d), 0.5 / d);
+        }
+    }
+
+    int duty_half_cycles(int d, double duty)
+    {
+        double x = 2.0 * duty * d;
+        if (x < d)
+            return int(floor(x + 0.5 + 1e-9));
+        return int(ceil(x - 0.5 - 1e-9));
+    }
+
+    void split_counter(double divide, double duty, int &high, int &low, bool &edge)
+    {
+        int d = int(floor(divide));
+        int half_cycles = duty_half_cycles(d, duty);
+        high = half_cycles / 2;
+        low = d - high;
+        edge = (half_cycles % 2) != 0;
+    }
+
     void write_pll_clkout(const std::string &name, CellInfo *ci)
     {
-        // FIXME: variable duty cycle
         int high = 1, low = 1, phasemux = 0, delaytime = 0, frac = 0;
         bool no_count = false, edge = false;
         std::string divide_attr = name + ((name == "CLKFBOUT") ? "_MULT" : "_DIVIDE");
@@ -2747,27 +2791,26 @@ struct FasmBackend
         // explicit PHASE), found via a raw-bit diff against a real Vivado
         // MMCM bitstream (nextpnr-xilinx#177 MMCM-lock investigation).
         double phase = float_or_default(ci, name + "_PHASE", 0);
-        if (divide <= 1) {
-            no_count = true;
-        } else {
-            high = floor(divide / 2);
-            low = int(floor(divide) - high);
-            if (high != low)
-                edge = true;
-            if (name == "CLKOUT1" || name == "CLKFBOUT")
-                frac = floor(divide * 8) - floor(divide) * 8;
-            int phase_eights = floor((phase / 360) * divide * 8);
-            phasemux = phase_eights % 8;
-            delaytime = phase_eights / 8;
-        }
+        double duty = boost::starts_with(name, "CLKOUT") ? float_or_default(ci, name + "_DUTY_CYCLE", 0.5) : 0.5;
         bool used = false;
         if (name == "DIVCLK" || name == "CLKFBOUT") {
             used = true;
         } else {
             used = get_net_or_empty(ci, ctx->id(name)) != nullptr;
         }
+        if (divide <= 1) {
+            no_count = true;
+        } else {
+            if (name == "CLKOUT1" || name == "CLKFBOUT")
+                frac = floor(divide * 8) - floor(divide) * 8;
+            split_counter(divide, duty, high, low, edge);
+            int phase_eights = floor((phase / 360) * divide * 8);
+            phasemux = phase_eights % 8;
+            delaytime = phase_eights / 8;
+        }
         if (used)
             check_divider_grid(ci, "PLLE2_ADV", divide_attr, false);
+        check_duty_cycle(ci, "PLLE2_ADV", name, divide, frac, used, duty);
         if (name == "DIVCLK") {
             write_int_vector("DIVCLK_DIVCLK_HIGH_TIME[5:0]", high, 6);
             write_int_vector("DIVCLK_DIVCLK_LOW_TIME[5:0]", low, 6);
@@ -2943,7 +2986,6 @@ struct FasmBackend
 
     void write_mmcm_clkout(const std::string &name, CellInfo *ci)
     {
-        // FIXME: variable duty cycle
         int high = 1, low = 1, phasemux = 0, delaytime = 0, frac = 0;
         bool no_count = false, edge = false;
         bool fractional_counter = (name == "CLKFBOUT" || name == "CLKOUT0");
@@ -2957,27 +2999,26 @@ struct FasmBackend
         // explicit PHASE), found via a raw-bit diff against a real Vivado
         // MMCM bitstream (nextpnr-xilinx#177 MMCM-lock investigation).
         double phase = float_or_default(ci, name + "_PHASE", 0);
-        if (divide <= 1) {
-            no_count = true;
-        } else {
-            high = floor(divide / 2);
-            low = int(floor(divide) - high);
-            if (high != low)
-                edge = true;
-            if (name == "CLKOUT0" || name == "CLKFBOUT")
-                frac = floor(divide * 8) - floor(divide) * 8;
-            int phase_eights = floor((phase / 360) * divide * 8);
-            phasemux = phase_eights % 8;
-            delaytime = phase_eights / 8;
-        }
+        double duty = boost::starts_with(name, "CLKOUT") ? float_or_default(ci, name + "_DUTY_CYCLE", 0.5) : 0.5;
         bool used = false;
         if (name == "DIVCLK" || name == "CLKFBOUT") {
             used = true;
         } else {
             used = get_net_or_empty(ci, ctx->id(name)) != nullptr;
         }
+        if (divide <= 1) {
+            no_count = true;
+        } else {
+            if (name == "CLKOUT0" || name == "CLKFBOUT")
+                frac = floor(divide * 8) - floor(divide) * 8;
+            split_counter(divide, duty, high, low, edge);
+            int phase_eights = floor((phase / 360) * divide * 8);
+            phasemux = phase_eights % 8;
+            delaytime = phase_eights / 8;
+        }
         if (used)
             check_divider_grid(ci, "MMCME2_ADV", divide_attr, fractional_counter);
+        check_duty_cycle(ci, "MMCME2_ADV", name, divide, frac, used, duty);
         if (name == "DIVCLK") {
             write_int_vector("DIVCLK_DIVCLK_HIGH_TIME[5:0]", high, 6);
             write_int_vector("DIVCLK_DIVCLK_LOW_TIME[5:0]", low, 6);
