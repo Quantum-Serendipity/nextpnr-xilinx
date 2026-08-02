@@ -2698,9 +2698,17 @@ struct FasmBackend
 
     void write_pll_clkout(const std::string &name, CellInfo *ci)
     {
-        int high = 1, low = 1, phasemux = 0, delaytime = 0, frac = 0;
+        int high = 1, low = 1, phasemux = 0, delaytime = 0;
         bool no_count = false, edge = false;
         double divide = float_or_default(ci, name + ((name == "CLKFBOUT") ? "_MULT" : "_DIVIDE"), 1);
+        // PLLE2 counters are integer-only; the fractional interpolator exists
+        // only in the MMCM.  A non-integer value here previously fell into a
+        // half-implemented FRAC path (writing FRAC bits the PLL cannot use,
+        // with FRAC_EN driven from the unrelated EDGE flag); refuse instead,
+        // as Vivado does.
+        if (floor(divide) != divide)
+            log_error("%s: PLLE2_ADV %s must be an integer (fractional divide requires an MMCME2)\n",
+                      ci->name.c_str(ctx), name.c_str());
         double phase = float_or_default(ci, name + "_PHASE", 1);
         // Only the CLKOUTn counters have a user-visible duty cycle; DIVCLK and
         // CLKFBOUT are fixed at 50%.
@@ -2722,8 +2730,6 @@ struct FasmBackend
                 log_error("%s: %s_DUTY_CYCLE=%f is out of the achievable range for divide=%d\n",
                           ci->name.c_str(ctx), name.c_str(), duty, int(floor(divide)));
             low = int(floor(divide)) - high;
-            if (name == "CLKOUT1" || name == "CLKFBOUT")
-                frac = floor(divide * 8) - floor(divide) * 8;
             int phase_eights = floor((phase / 360) * divide * 8);
             phasemux = phase_eights % 8;
             delaytime = phase_eights / 8;
@@ -2747,10 +2753,6 @@ struct FasmBackend
             write_bit(name + "_CLKOUT2_EDGE[0]", edge);
             write_bit(name + "_CLKOUT2_NO_COUNT[0]", no_count);
             write_int_vector(name + "_CLKOUT2_DELAY_TIME[5:0]", delaytime, 6);
-            if (frac != 0) {
-                write_bit(name + "_CLKOUT2_FRAC_EN[0]", edge);
-                write_int_vector(name + "_CLKOUT2_FRAC[2:0]", frac, 3);
-            }
         }
     }
 
