@@ -2878,6 +2878,12 @@ struct FasmBackend
         write_pll_clkout("CLKOUT4", ci);
         write_pll_clkout("CLKOUT5", ci);
 
+        // Hold DONE until the PLL locks.  NOTE: the tile bit is emitted; any
+        // interaction with the global COR0 LOCK_CYCLE startup option is not
+        // modelled here and has not been verified on silicon.
+        if (bool_param_or_default(ci, "STARTUP_WAIT", false))
+            write_bit("STARTUP_WAIT");
+
         std::string comp = str_or_default(ci->params, ctx->id("COMPENSATION"), "INTERNAL");
         push("COMPENSATION");
         if (comp == "INTERNAL" || comp == "ZHOLD") {
@@ -3065,6 +3071,12 @@ struct FasmBackend
         write_mmcm_clkout("CLKOUT4", ci);
         write_mmcm_clkout("CLKOUT5", ci);
         write_mmcm_clkout("CLKOUT6", ci);
+
+        // Hold DONE until the MMCM locks.  NOTE: the tile bit is emitted; any
+        // interaction with the global COR0 LOCK_CYCLE startup option is not
+        // modelled here and has not been verified on silicon.
+        if (bool_param_or_default(ci, "STARTUP_WAIT", false))
+            write_bit("STARTUP_WAIT");
 
         std::string comp = str_or_default(ci->params, id_COMPENSATION, "INTERNAL");
         push("COMP");
