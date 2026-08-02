@@ -2722,18 +2722,30 @@ struct FasmBackend
 
     void write_pll_clkout(const std::string &name, CellInfo *ci)
     {
-        // FIXME: variable duty cycle
         int high = 1, low = 1, phasemux = 0, delaytime = 0, frac = 0;
         bool no_count = false, edge = false;
         double divide = float_or_default(ci, name + ((name == "CLKFBOUT") ? "_MULT" : "_DIVIDE"), 1);
         double phase = float_or_default(ci, name + "_PHASE", 1);
+        // Only the CLKOUTn counters have a user-visible duty cycle; DIVCLK and
+        // CLKFBOUT are fixed at 50%.
+        double duty =
+                name.compare(0, 6, "CLKOUT") == 0 ? float_or_default(ci, name + "_DUTY_CYCLE", 0.5) : 0.5;
         if (divide <= 1) {
             no_count = true;
         } else {
-            high = floor(divide / 2);
-            low = int(floor(divide) - high);
-            if (high != low)
-                edge = true;
+            // The counter runs HIGH_TIME + LOW_TIME = divide cycles; EDGE
+            // stretches the high phase by one half VCO cycle at LOW_TIME's
+            // expense, giving half-cycle duty resolution (XAPP888).  Round
+            // the requested high time to the nearest half cycle.  For
+            // duty = 0.5 this reduces exactly to the previous
+            // floor(divide/2) / EDGE-on-odd behaviour.
+            int half_cycles = (int)floor(2.0 * duty * floor(divide) + 0.5);
+            high = half_cycles / 2;
+            edge = (half_cycles % 2) != 0;
+            if (high < 1 || high > int(floor(divide)) - 1)
+                log_error("%s: %s_DUTY_CYCLE=%f is out of the achievable range for divide=%d\n",
+                          ci->name.c_str(ctx), name.c_str(), duty, int(floor(divide)));
+            low = int(floor(divide)) - high;
             if (name == "CLKOUT1" || name == "CLKFBOUT")
                 frac = floor(divide * 8) - floor(divide) * 8;
             int phase_eights = floor((phase / 360) * divide * 8);
@@ -2992,21 +3004,38 @@ struct FasmBackend
 
     void write_mmcm_clkout(const std::string &name, CellInfo *ci)
     {
-        // FIXME: variable duty cycle
         int high = 1, low = 1, phasemux = 0, delaytime = 0, frac = 0;
         bool no_count = false, edge = false;
         double divide = float_or_default(ci, name + ((name == "CLKFBOUT") ? "_MULT_F" :
                                                      (name == "CLKOUT0" ? "_DIVIDE_F" : "_DIVIDE")), 1);
         double phase = float_or_default(ci, name + "_PHASE", 1);
+        // Only the CLKOUTn counters have a user-visible duty cycle; DIVCLK and
+        // CLKFBOUT are fixed at 50%.
+        double duty =
+                name.compare(0, 6, "CLKOUT") == 0 ? float_or_default(ci, name + "_DUTY_CYCLE", 0.5) : 0.5;
         if (divide <= 1) {
             no_count = true;
         } else {
-            high = floor(divide / 2);
-            low = int(floor(divide) - high);
-            if (high != low)
-                edge = true;
             if (name == "CLKOUT0" || name == "CLKFBOUT")
                 frac = floor(divide * 8) - floor(divide) * 8;
+            // The fractional interpolator owns the waveform; a non-50% duty
+            // cannot be honoured alongside it (Vivado refuses it too).
+            if (frac != 0 && duty != 0.5)
+                log_error("%s: %s_DUTY_CYCLE must be 0.5 when the divide is fractional\n",
+                          ci->name.c_str(ctx), name.c_str());
+            // The counter runs HIGH_TIME + LOW_TIME = divide cycles; EDGE
+            // stretches the high phase by one half VCO cycle at LOW_TIME's
+            // expense, giving half-cycle duty resolution (XAPP888).  Round
+            // the requested high time to the nearest half cycle.  For
+            // duty = 0.5 this reduces exactly to the previous
+            // floor(divide/2) / EDGE-on-odd behaviour.
+            int half_cycles = (int)floor(2.0 * duty * floor(divide) + 0.5);
+            high = half_cycles / 2;
+            edge = (half_cycles % 2) != 0;
+            if (high < 1 || high > int(floor(divide)) - 1)
+                log_error("%s: %s_DUTY_CYCLE=%f is out of the achievable range for divide=%d\n",
+                          ci->name.c_str(ctx), name.c_str(), duty, int(floor(divide)));
+            low = int(floor(divide)) - high;
             int phase_eights = floor((phase / 360) * divide * 8);
             phasemux = phase_eights % 8;
             delaytime = phase_eights / 8;
