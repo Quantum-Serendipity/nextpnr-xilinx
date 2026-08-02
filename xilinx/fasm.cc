@@ -3396,9 +3396,19 @@ struct FasmBackend
         write_int_vector("FILTREG1_RESERVED[11:0]", 0x8, 12);
 
         // Vivado uses 0x100 (integer counters) for non-fractional configs;
-        // golden bitstreams confirm.  0xffff (the old value) is the XAPP888
-        // "enable everything" setting and does not match Vivado output.
-        write_int_vector("POWER_REG_POWER_REG_POWER_REG[15:0]", 0x100, 16);
+        // golden bitstreams confirm.  When the fractional interpolator is in
+        // use (CLKFBOUT_MULT_F or a used CLKOUT0_DIVIDE_F with a non-zero
+        // eighth), XAPP888 requires the power register at 0xFFFF -- with
+        // 0x100 the FRAC bits are configured but the interpolator is
+        // powered down.
+        {
+            double mult_f = float_or_default(ci, "CLKFBOUT_MULT_F", 5.000);
+            double div0_f = float_or_default(ci, "CLKOUT0_DIVIDE_F", 1.000);
+            bool clkout0_used = get_net_or_empty(ci, ctx->id("CLKOUT0")) != nullptr;
+            bool frac_in_use = (floor(mult_f * 8) != floor(mult_f) * 8) ||
+                               (clkout0_used && floor(div0_f * 8) != floor(div0_f) * 8);
+            write_int_vector("POWER_REG_POWER_REG_POWER_REG[15:0]", frac_in_use ? 0xFFFF : 0x100, 16);
+        }
         write_bit("LOCKREG3_RESERVED[0]");
         write_int_vector("TABLE[9:0]", filter_lookup[clkfbout_mult - 1], 10);
         pop(2);
