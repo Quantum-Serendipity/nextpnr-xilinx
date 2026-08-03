@@ -2451,6 +2451,40 @@ void Arch::routeClock()
         }
     }
     // Special pass for faster routing of global clock psuedo-net
+    //
+    // ## Why identification and routing are two phases (the arc interleave)
+    //
+    // This pass used to route net-at-a-time: every arc of the first clock,
+    // then every arc of the second.  Each wire it binds is STRENGTH_LOCKED,
+    // and an arc whose backward search finds every candidate wire held by
+    // another clock has no recourse -- no rip-up, no negotiation.  The
+    // general router cannot rescue it either: a SLICE clock pin is not
+    // reachable through general interconnect.  On a two-clock design whose
+    // placement interleaves the domains tile-by-tile (measured: the LibreSDR
+    // radio stream netlist, 0 of 368 seeds across three FIFO variants),
+    // whichever clock routes SECOND starves at the leaves -- the blocked-wire
+    // histograms show 413..660 candidate wires all "used by" the clock that
+    // went first.
+    //
+    // wip/clock-router-retry-DISPROVEN established that retrying failed
+    // sinks of the SAME net to a fixpoint changes nothing: the blockage is
+    // cross-net, so repeated attempts against the same locked wires cannot
+    // help.  The order the nets CLAIM shared resources in is what must
+    // change.
+    //
+    // So: identify every global clock net first (binding only its source
+    // wire), then route clock ARCS round-robin across all of them.  Both
+    // distribution trees grow together, claiming leaf resources in
+    // alternation instead of one net capturing whole regions wholesale.
+    // Per-arc behaviour -- the search, the intent filter, the lenient
+    // fallbacks -- is unchanged; only the order arcs are attempted in
+    // differs.
+    struct ClockRouteJob
+    {
+        NetInfo *net;
+        bool lenient; // to_pll_mmcm_clkin1 || to_bufg_input: fabric fallback allowed
+    };
+    std::vector<ClockRouteJob> clk_jobs;
     for (auto net : sorted(nets)) {
         NetInfo *clk_net = net.second;
         auto clk_driver = clk_net->driver;
@@ -2510,7 +2544,10 @@ void Arch::routeClock()
         if (getBoundWireNet(clk_src) == nullptr)
             bindWire(clk_src, clk_net, STRENGTH_LOCKED);
 
-        for (auto &usr : clk_net->users) {
+        clk_jobs.push_back(ClockRouteJob{clk_net, to_pll_mmcm_clkin1 || to_bufg_input});
+    }
+
+    auto route_clock_arc = [&](NetInfo *clk_net, PortRef &usr, bool lenient) {
             std::queue<WireId> visit;
             std::unordered_map<WireId, PipId> backtrace;
             WireId dest = WireId();
@@ -2519,15 +2556,19 @@ void Arch::routeClock()
             if (sink_wire == WireId()) {
                 log_warning("        clock '%s' user %s.%s has no sink wire, skipping arc\n",
                             clk_net->name.c_str(this), usr.cell->name.c_str(this), usr.port.c_str(this));
-                continue;
+                return;
             }
             if (getBoundWireNet(sink_wire) == clk_net)
-                continue; // already routed by fixed-routes
+                return; // already routed by fixed-routes
             if (getCtx()->debug) {
                 auto sink_wire_name = "(uninitialized)";
                 if (sink_wire != WireId())
                     sink_wire_name = nameOfWire(sink_wire);
-                log_info("        routing arc to %s.%s (wire %s):\n", usr.cell->name.c_str(this), usr.port.c_str(this), sink_wire_name);
+                // Arcs of different nets interleave in the log now -- name the
+                // net on every arc header so blocked-wire forensics can still
+                // attribute the lines that follow.
+                log_info("        routing arc of '%s' to %s.%s (wire %s):\n", clk_net->name.c_str(this),
+                         usr.cell->name.c_str(this), usr.port.c_str(this), sink_wire_name);
             }
 
             visit.push(sink_wire);
@@ -2571,8 +2612,9 @@ void Arch::routeClock()
                 }
             }
             if (dest == WireId()) {
-                log_info("            failed to find a route using dedicated resources.\n");
-                if (to_pll_mmcm_clkin1 || to_bufg_input) {
+                log_info("            clock '%s' -> %s.%s: failed to find a route using dedicated resources.\n",
+                         clk_net->name.c_str(this), usr.cell->name.c_str(this), usr.port.c_str(this));
+                if (lenient) {
                     // Due to some missing pips, currently special case more lenient solution
                     std::queue<WireId> empty;
                     std::swap(visit, empty);
@@ -2599,11 +2641,11 @@ void Arch::routeClock()
                     }
                     if (dest == WireId()) {
                         if (gtClockTemplateRoute(clk_net, usr))
-                            continue;
-                        continue;
+                            return;
+                        return;
                     }
                 } else {
-                    continue;
+                    return;
                 }
             }
             while (backtrace.count(dest)) {
@@ -2614,8 +2656,19 @@ void Arch::routeClock()
                 bindWire(dest, clk_net, STRENGTH_LOCKED);
                 bindPip(uh, clk_net, STRENGTH_LOCKED);
             }
-        }
-    }
+    };
+
+    // Round-robin: arc 0 of every clock, then arc 1 of every clock, ...
+    // Nets are attempted in the same sorted order as before, so a
+    // single-clock design routes bit-identically to the old net-at-a-time
+    // code (one net's round-robin IS net-at-a-time).
+    size_t clk_max_users = 0;
+    for (auto &j : clk_jobs)
+        clk_max_users = std::max(clk_max_users, j.net->users.size());
+    for (size_t arc_idx = 0; arc_idx < clk_max_users; ++arc_idx)
+        for (auto &j : clk_jobs)
+            if (arc_idx < j.net->users.size())
+                route_clock_arc(j.net, j.net->users[arc_idx], j.lenient);
 #if 0
     for (auto net : sorted(nets)) {
         NetInfo *ni = net.second;
