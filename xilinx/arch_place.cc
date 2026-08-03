@@ -19,6 +19,7 @@
 
 #include <boost/algorithm/string.hpp>
 #include <queue>
+#include <unordered_set>
 #include "design_utils.h"
 #include "log.h"
 #include "nextpnr.h"
@@ -1387,6 +1388,20 @@ void Arch::fixupPlacement()
             for (auto m : tree)
                 if (m->bel != BelId() && !isValidBelForCell(m, m->bel))
                     invalid = true;
+            if (!invalid) {
+                bool movable = true;
+                for (auto m : tree)
+                    if (m->belStrength >= STRENGTH_FIXED || (roi_active() && !is_rm_cell(m))) {
+                        movable = false;
+                        break;
+                    }
+                if (movable)
+                    for (auto m : tree)
+                        if (m->bel != BelId() && !isBelLocationValid(m->bel)) {
+                            invalid = true;
+                            break;
+                        }
+            }
             if (invalid)
                 roots.push_back(ci);
         }
@@ -1424,10 +1439,23 @@ void Arch::fixupPlacement()
                 }
                 return out.size() == members.size();
             };
-            Loc oloc = getBelLocation(root->bel);
+            bool still_invalid = false;
             for (auto m : members)
+                if (m->bel != BelId() && (!isValidBelForCell(m, m->bel) || !isBelLocationValid(m->bel))) {
+                    still_invalid = true;
+                    break;
+                }
+            if (!still_invalid)
+                continue;
+            Loc oloc = getBelLocation(root->bel);
+            std::vector<BelId> orig_bels;
+            std::vector<PlaceStrength> orig_strength;
+            for (auto m : members) {
+                orig_bels.push_back(m->bel);
+                orig_strength.push_back(m->belStrength);
                 if (m->bel != BelId())
                     unbindBel(m->bel);
+            }
             bool placed = false;
             std::vector<BelId> mbels;
             for (int r = 0; r <= std::max(gw, gh) && !placed; r++)
@@ -1463,19 +1491,27 @@ void Arch::fixupPlacement()
                         }
                     }
             if (!placed) {
-                // give up: restore members at their original positions
-                std::vector<BelId> obels;
-                if (cluster_bels(getBelByLocation(oloc), obels))
-                    for (size_t i = 0; i < members.size(); i++) {
-                        if (checkBelAvail(obels[i]))
-                            bindBel(obels[i], members[i], STRENGTH_WEAK);
-                    }
+                for (size_t i = 0; i < members.size(); i++)
+                    if (orig_bels[i] != BelId())
+                        bindBel(orig_bels[i], members[i], orig_strength[i]);
                 log_warning("post-place repair: no valid placement for '%s'\n", root->name.c_str(this));
-            } else
+            } else if (mbels != orig_bels)
                 ++fixed;
         }
         if (fixed)
             log_info("post-place repair: relocated %d stranded cluster(s)/cell(s) to valid bels\n", fixed);
+        std::unordered_set<int> bad_tiles;
+        for (auto &cp : cells) {
+            CellInfo *ci = cp.second.get();
+            if (ci->bel == BelId() || !isLogicTile(ci->bel) || bad_tiles.count(ci->bel.tile))
+                continue;
+            if (!isBelLocationValid(ci->bel)) {
+                bad_tiles.insert(ci->bel.tile);
+                log_warning("post-place repair: tile of bel %s still has an invalid placement; routing will fail "
+                            "there\n",
+                            getBelName(ci->bel).c_str(this));
+            }
+        }
     }
     // The input remerge below normalises which physical A-pin each net sits on.
     // It used to re-derive the LOGICAL port label from the pin's compacted
