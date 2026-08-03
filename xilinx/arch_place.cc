@@ -19,6 +19,7 @@
 
 #include <boost/algorithm/string.hpp>
 #include <queue>
+#include <unordered_set>
 #include "design_utils.h"
 #include "log.h"
 #include "nextpnr.h"
@@ -1354,6 +1355,32 @@ void Arch::fixupPlacement()
             for (auto m : tree)
                 if (m->bel != BelId() && !isValidBelForCell(m, m->bel))
                     invalid = true;
+            // Tile-level (control-set) invalidity.  isValidBelForCell() above
+            // is a static per-cell gate and cannot see conflicts BETWEEN
+            // cells -- most importantly two FFs with different clock nets
+            // packed into one slice.  A 7-series slice has exactly ONE clock
+            // input, so a mixed-clock slice is unroutable BY CONSTRUCTION:
+            // the clock pre-router finds the CLK site wire held by the other
+            // net, has no alternative (the sink is inside the site), and the
+            // general router cannot reach a SLICE clock pin at all.
+            //
+            // Measured on the LibreSDR radio stream netlist (xc7z020): this
+            // was EVERY routing failure across 0/368 seeds -- each failed
+            // seed had a handful of slices with FFs from both clock domains,
+            // presenting as a router capacity cliff ("Failed to route arc
+            // ... SLICE_XxYy/CLKINV_OUT") when it was an illegal placement
+            // all along.  The relocation below already re-verifies the
+            // destination tile with isBelLocationValid() on every member,
+            // so extending DETECTION to tile level is sufficient: every
+            // cluster in a conflicted tile is collected, the first one
+            // relocated makes the tile valid, and the rest re-settle at
+            // their original bels (the radius search tries radius 0 first).
+            if (!invalid)
+                for (auto m : tree)
+                    if (m->bel != BelId() && !isBelLocationValid(m->bel)) {
+                        invalid = true;
+                        break;
+                    }
             if (invalid)
                 roots.push_back(ci);
         }
@@ -1443,6 +1470,26 @@ void Arch::fixupPlacement()
         }
         if (fixed)
             log_info("post-place repair: relocated %d stranded cluster(s)/cell(s) to valid bels\n", fixed);
+        // Loud audit: any logic tile still invalid here (e.g. a control-set
+        // conflict between clusters this pass may not move -- carry chains,
+        // BEL-stamped imports) will fail in the router with a misleading
+        // "Failed to route arc ... CLKINV_OUT" error.  Name the tile now.
+        {
+            std::unordered_set<int> bad_tiles;
+            for (auto &cp : cells) {
+                CellInfo *ci = cp.second.get();
+                if (ci->bel == BelId() || !isLogicTile(ci->bel))
+                    continue;
+                if (bad_tiles.count(ci->bel.tile))
+                    continue;
+                if (!isBelLocationValid(ci->bel)) {
+                    bad_tiles.insert(ci->bel.tile);
+                    log_warning("post-place repair: tile of bel %s still has an invalid placement "
+                                "(control-set conflict?) -- routing will fail there\n",
+                                getBelName(ci->bel).c_str(this));
+                }
+            }
+        }
     }
     // The input remerge below normalises which physical A-pin each net sits on.
     // It used to re-derive the LOGICAL port label from the pin's compacted
