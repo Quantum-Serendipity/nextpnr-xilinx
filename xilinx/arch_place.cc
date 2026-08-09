@@ -344,20 +344,89 @@ bool Arch::xc7_logic_tile_valid(IdString tileType, LogicTileStatus &lts) const
             // (A BEL *attribute* is NOT a reliable marker -- place_initial
             //  back-annotates one onto every nextpnr-placed user cell too.)
             //
-            // The threshold must be STRENGTH_USER, exactly as the comment
-            // above says.  STRENGTH_STRONG is what nextpnr's own machinery
-            // uses for cells IT constrains: HeAP's strict legaliser binds
-            // every chain it places with STRENGTH_STRONG and calls
-            // isBelLocationValid() right after (placer_heap.cc,
-            // legalise_placement_strict), and placer1 binds cluster children
-            // the same way.  At STRENGTH_STRONG, any tile filled by a carry
-            // chain or F7/F8 mux tree was mistaken for a frozen import and
-            // skipped validation entirely -- making the legaliser's own
-            // validity query vacuous, so illegal LUT pairings (two LUTs
-            // whose logical inputs need more distinct physical pins than
-            // the slice has) survived to the router, which then failed with
-            // one overused SITEWIRE contended by two nets.
-            if (c->belStrength < STRENGTH_USER) {
+            // ---------------------------------------------------------------
+            // MERGE CONFLICT RESOLVED HERE, 2026-08-09 (xc7dpr Unit 7.1).
+            // The only conflicting hunk in the whole merge of
+            // fix/frozen-tile-validity-strength (8e11e04) into 4a3d7e1.  Both
+            // sides independently raised this bar off STRENGTH_STRONG and
+            // landed on different values; both rationales are kept verbatim
+            // below because they are two different measured bugs, not two
+            // opinions about one.
+            //
+            // OURS (bf78fccf, "restore real slice validation for
+            // placer-constrained tiles"):
+            //   The threshold must be STRENGTH_USER, exactly as the comment
+            //   above says.  STRENGTH_STRONG is what nextpnr's own machinery
+            //   uses for cells IT constrains: HeAP's strict legaliser binds
+            //   every chain it places with STRENGTH_STRONG and calls
+            //   isBelLocationValid() right after (placer_heap.cc,
+            //   legalise_placement_strict), and placer1 binds cluster children
+            //   the same way.  At STRENGTH_STRONG, any tile filled by a carry
+            //   chain or F7/F8 mux tree was mistaken for a frozen import and
+            //   skipped validation entirely -- making the legaliser's own
+            //   validity query vacuous, so illegal LUT pairings (two LUTs
+            //   whose logical inputs need more distinct physical pins than
+            //   the slice has) survived to the router, which then failed with
+            //   one overused SITEWIRE contended by two nets.
+            //
+            // THEIRS (a5dfa7d0, "frozen-tile fast path must require LOCKED,
+            // not STRONG"):
+            //   The bar is LOCKED, not STRONG.  STRENGTH_STRONG is what
+            //   nextpnr's OWN cluster/macro placement binds at
+            //   (place_common.cc place_macro, the radius search below), so
+            //   accepting it let a self-placed macro count as "imported, trust
+            //   it".  A dist-RAM macro landing in a tile whose FFs were
+            //   stamped by place_lef then skipped every control-set check:
+            //   RAMD64E on one clock co-packed with FDREs on another, in a
+            //   slice with ONE CLK pin.  Unroutable by construction -- it
+            //   surfaced as permanently skipped clock arcs (eth-arp: 4 slices
+            //   of the txf CDC FIFO, u_txf_wr WCLK vs u_txf_rd CK).  Imported
+            //   placements bind USER (attributesToArchInfo / HeAP / placer1),
+            //   so they still hit this fast path; nextpnr's own STRONG
+            //   bindings now get validated.
+            //
+            // ADJUDICATION.  Both rationales are about excluding
+            // STRENGTH_STRONG(2), and 4 and 5 both exclude it, so the two
+            // sides agree on every case either of them argues about.  Since
+            // LOCKED=4 and USER=5, the bars can differ for exactly one input:
+            // a cell at strength 4.  Measured, not assumed:
+            //
+            //   * Every bindBel call site in the tree, at THIS merged
+            //     revision: 23 WEAK, 10 STRONG, 3 USER, 2 LOCKED -- and both
+            //     LOCKED sites are ecp5/globals.cc:379,390, a different
+            //     architecture that is not linked into -DARCH=xilinx.  The
+            //     two variable-strength sites propagate rather than originate
+            //     (placer_heap.cc:291 copies cell->belStrength into the saved
+            //     solution; common/nextpnr.cc:620 replays the input JSON).
+            //   * So the only producer of strength 4 is an input JSON that
+            //     literally carries BEL_STRENGTH: 4.
+            //   * Observed BEL_STRENGTH across every JSON the flow has
+            //     actually produced (257 files, incl. the 19,768-cell
+            //     adversarial design and 65-cell counter25, reference and
+            //     replay): values 1, 2 and 5 only.  Zero cells at 4 anywhere
+            //     except the two artefacts of the Phase 5 experiment that
+            //     restamped 4 on purpose.
+            //   * That experiment is the one case where the bars can differ,
+            //     and it was run: --r2-strength 4 and --r2-strength 5 give
+            //     identical results on counter25 (0 post-place repairs, 0
+            //     unrouted arcs, 45/46 topo resolved, 22 pin swaps, same
+            //     semantic FASM diff), i.e. the fast path firing or not makes
+            //     no difference there.
+            //
+            // Taking THEIRS.  It is the weaker bar, so it cannot be the
+            // over-strict arm of risk 5 for an imported static stamped at
+            // LOCKED; it keeps this file identical to the branch so the next
+            // merge does not re-conflict here; and under the standing
+            // convention (the harness restamps imports to 5) it is
+            // bit-for-bit equivalent to OURS.
+            //
+            // CAVEAT, recorded rather than silently fixed: this bar is NOT
+            // single-sited.  arch_place.cc:1241 ("imported" == belStrength >=
+            // STRENGTH_USER, in the 5LUT/6LUT remerge skip) is a second
+            // is-this-frozen test, it came in with bf78fccf, and the parked
+            // branch does not touch it.  At stamp 5 the two agree.  A future
+            // unit that stamps imports at 4 must move BOTH or they disagree.
+            if (c->belStrength < STRENGTH_LOCKED) {
                 all_frozen = false;
                 break;
             }

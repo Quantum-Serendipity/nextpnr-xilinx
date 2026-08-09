@@ -23,6 +23,7 @@
 #error Include "arch.h" via "nextpnr.h" only.
 #endif
 
+#include <unordered_set>
 #include <boost/iostreams/device/mapped_file.hpp>
 
 #include <iostream>
@@ -875,8 +876,25 @@ struct Arch : BaseCtx
             updateBramBel(bel, nullptr);
     }
 
+    // NEXTPNR_BEL_BLACKLIST=<file>: reserve individual BELs by name (one
+    // "SLICE_X27Y57/A5LUT" per line).  Needed to hand a PARTIALLY pre-placed
+    // design to HeAP: the analytic placer happily drops a free cell into a spare
+    // bel of a slice that already holds a pinned CARRY4/SRL cluster, which the
+    // validity checker then rejects ("constraint satisfaction check failed") --
+    // and re-pinning offenders one at a time is whack-a-mole across every carry
+    // slice.  Blacklisting the spare bels of cluster slices keeps HeAP out of
+    // them entirely.  Lazily loaded on first use (env read once).
+    mutable std::unordered_set<int64_t> blacklist_bels;
+    mutable bool blacklist_bels_loaded = false;
+    void load_bel_blacklist() const;
+
     bool usp_bel_hard_unavail(BelId bel) const
     {
+        if (!blacklist_bels_loaded)
+            load_bel_blacklist();
+        if (!blacklist_bels.empty() &&
+            blacklist_bels.count((int64_t(bel.tile) << 32) | uint32_t(bel.index)))
+            return true;
         // if (chip_info->height > 600 && (bel.tile / chip_info->width) < 752) // constrain to SLR0
         //    return true;
         if ((getBelType(bel) == id_PSEUDO_GND || getBelType(bel) == id_PSEUDO_VCC) &&
@@ -1396,12 +1414,18 @@ struct Arch : BaseCtx
     DelayInfo getPipDelay(PipId pip) const
     {
         DelayInfo delay;
+        // early/fast-corner scale for the min-delay (hold) pass.  Fabric routing
+        // ~0.45x slow (golden get_net_delays FAST_MIN/SLOW_MAX = 0.562, but the
+        // per-PIP tail is lower); the dedicated global clock tree is low-variation
+        // (~0.9) so hold-critical clock skew isn't understated.
+        float minscale = 0.45f;
         NPNR_ASSERT(pip != PipId());
         if (locInfo(pip).pip_data[pip.index].flags == PIP_TILE_ROUTING) {
             int src_intent = wireIntent(getPipSrcWire(pip)), dst_intent = wireIntent(getPipDstWire(pip));
             if (src_intent == ID_NODE_GLOBAL_VDISTR || src_intent == ID_NODE_GLOBAL_HROUTE ||
                 src_intent == ID_NODE_GLOBAL_VROUTE || src_intent == ID_NODE_GLOBAL_HDISTR ||
                 src_intent == ID_NODE_GLOBAL_LEAF || src_intent == ID_NODE_GLOBAL_BUFG) {
+                minscale = 0.9f;
 
                 // Global clock-network per-hop delays, CALIBRATED to the golden
                 // Vivado write_sdf on the VC707 ethloop design (see
@@ -1455,6 +1479,7 @@ struct Arch : BaseCtx
             delay.delay = 300;
         } else
             delay.delay = 25;
+        delay.min = delay_t(delay.delay * minscale);   // fast/early corner (hold)
         return delay;
     }
 

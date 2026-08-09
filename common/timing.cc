@@ -22,8 +22,11 @@
 #include <algorithm>
 #include <cstdio>
 #include <boost/range/adaptor/reversed.hpp>
+#include <cstdlib>
 #include <deque>
+#include <fstream>
 #include <map>
+#include <sstream>
 #include <unordered_map>
 #include <utility>
 #include "log.h"
@@ -95,16 +98,48 @@ struct Timing
     bool net_delays;
     bool update;
     delay_t min_slack;
+    delay_t worst_hold_slack = std::numeric_limits<delay_t>::max() / 4;  // WHS (hold pass)
+    // Per-endpoint hold slack (Phase 2: drives targeted hold-buffer insertion).
+    // Recorded only in the reporting analysis (crit_path != nullptr), not during P&R.
+    struct HoldEndpoint
+    {
+        const NetInfo *net;   // net feeding the endpoint (where a delay buffer would go)
+        IdString cell, port;  // the capture FF D pin
+        delay_t slack;
+    };
+    std::vector<HoldEndpoint> hold_endpoints;
     CriticalPathMap *crit_path;
     DelayFrequency *slack_histogram;
     NetCriticalityMap *net_crit;
     IdString async_clock;
+
+    // Async clock-group exclusion (nextpnr-xilinx has no set_clock_groups): a
+    // setup path from a launch clock in one group to a capture clock in another
+    // is a CDC false path (synchroniser) and must NOT be timed -- otherwise a
+    // 61 ns cpu->eth synchroniser wire reads as a "16 MHz" failure and misleads
+    // the timing-driven router.  Loaded from NEXTPNR_ASYNC_GROUPS: one group per
+    // line, each a whitespace-separated list of substrings; a clock net joins
+    // the first group whose substring its name contains.
+    std::vector<std::vector<std::string>> async_groups;
+    int clock_group(IdString clk) const
+    {
+        if (async_groups.empty())
+            return -1;
+        std::string n = clk.c_str(ctx);
+        for (size_t g = 0; g < async_groups.size(); g++)
+            for (const auto &sub : async_groups[g])
+                if (n.find(sub) != std::string::npos)
+                    return int(g);
+        return -1;
+    }
 
     struct TimingData
     {
         TimingData() : max_arrival(), max_path_length(), min_remaining_budget() {}
         TimingData(delay_t max_arrival) : max_arrival(max_arrival), max_path_length(), min_remaining_budget() {}
         delay_t max_arrival;
+        // earliest arrival (hold pass); large default so std::min accumulates.
+        delay_t min_arrival = std::numeric_limits<delay_t>::max() / 4;
         unsigned max_path_length = 0;
         delay_t min_remaining_budget;
         bool false_startpoint = false;
@@ -118,6 +153,21 @@ struct Timing
               crit_path(crit_path), slack_histogram(slack_histogram), net_crit(net_crit),
               async_clock(ctx->id("$async$"))
     {
+        if (const char *fn = getenv("NEXTPNR_ASYNC_GROUPS")) {
+            std::ifstream in(fn);
+            std::string line;
+            while (std::getline(in, line)) {
+                std::istringstream iss(line);
+                std::vector<std::string> grp;
+                std::string tok;
+                while (iss >> tok)
+                    grp.push_back(tok);
+                if (!grp.empty())
+                    async_groups.push_back(std::move(grp));
+            }
+            if (!async_groups.empty())
+                log_info("timing: loaded %zu async clock group(s) from %s\n", async_groups.size(), fn);
+        }
     }
 
     delay_t walk_paths()
@@ -156,8 +206,9 @@ struct Timing
                         TimingClockingInfo clkInfo = ctx->getPortClockingInfo(cell.second.get(), o->name, i);
                         const NetInfo *clknet = get_net_or_empty(cell.second.get(), clkInfo.clock_port);
                         IdString clksig = clknet ? clknet->name : async_clock;
-                        net_data[o->net][ClockEvent{clksig, clknet ? clkInfo.edge : RISING_EDGE}] =
-                                TimingData{clkInfo.clockToQ.maxDelay()};
+                        auto &sd = net_data[o->net][ClockEvent{clksig, clknet ? clkInfo.edge : RISING_EDGE}];
+                        sd = TimingData{clkInfo.clockToQ.maxDelay()};
+                        sd.min_arrival = clkInfo.clockToQ.minDelay();   // hold pass startpoint
                     }
 
                 } else {
@@ -293,13 +344,16 @@ struct Timing
                 if (nd.false_startpoint)
                     continue;
                 const auto net_arrival = nd.max_arrival;
+                const auto net_min_arrival = nd.min_arrival;
                 const auto net_length_plus_one = nd.max_path_length + 1;
                 nd.min_remaining_budget = clk_period;
                 for (auto &usr : net->users) {
                     int port_clocks;
                     TimingPortClass portClass = ctx->getPortTimingClass(usr.cell, usr.port, port_clocks);
                     auto net_delay = net_delays ? ctx->getNetinfoRouteDelay(net, usr) : delay_t();
+                    auto net_delay_min = net_delays ? ctx->getNetinfoRouteDelay(net, usr, true) : delay_t();
                     auto usr_arrival = net_arrival + net_delay;
+                    auto usr_min_arrival = net_min_arrival + net_delay_min;
 
                     if (portClass == TMG_ENDPOINT || portClass == TMG_IGNORE || portClass == TMG_CLOCK_INPUT) {
                         // Skip
@@ -317,6 +371,7 @@ struct Timing
                             auto &data = net_data[port.second.net][start_clk];
                             auto &arrival = data.max_arrival;
                             arrival = std::max(arrival, usr_arrival + comb_delay.maxDelay());
+                            data.min_arrival = std::min(data.min_arrival, usr_min_arrival + comb_delay.minDelay());
                             if (!budget_override) { // Do not increment path length if budget overriden since it doesn't
                                 // require a share of the slack
                                 auto &path_length = data.max_path_length;
@@ -345,11 +400,23 @@ struct Timing
                 auto &net_min_remaining_budget = nd.min_remaining_budget;
                 for (auto &usr : net->users) {
                     auto net_delay = net_delays ? ctx->getNetinfoRouteDelay(net, usr) : delay_t();
+                    auto net_delay_min = net_delays ? ctx->getNetinfoRouteDelay(net, usr, true) : delay_t();
                     auto budget_override = ctx->getBudgetOverride(net, usr, net_delay);
                     int port_clocks;
                     TimingPortClass portClass = ctx->getPortTimingClass(usr.cell, usr.port, port_clocks);
                     if (portClass == TMG_REGISTER_INPUT || portClass == TMG_ENDPOINT) {
                         auto process_endpoint = [&](IdString clksig, ClockEdge edge, delay_t setup) {
+                            // Async clock-group exclusion: a launch->capture path
+                            // crossing two different async groups is a CDC false
+                            // path -- skip it entirely (no slack/budget/crit).
+                            {
+                                IdString launch_clk = startdomain.first.clock;
+                                if (launch_clk != async_clock && clksig != async_clock) {
+                                    int gl = clock_group(launch_clk), gc = clock_group(clksig);
+                                    if (gl >= 0 && gc >= 0 && gl != gc)
+                                        return;
+                                }
+                            }
                             const auto net_arrival = nd.max_arrival;
                             const auto endpoint_arrival = net_arrival + net_delay + setup;
                             delay_t period;
@@ -409,6 +476,16 @@ struct Timing
                                 const NetInfo *clknet = get_net_or_empty(usr.cell, clkInfo.clock_port);
                                 IdString clksig = clknet ? clknet->name : async_clock;
                                 process_endpoint(clksig, clknet ? clkInfo.edge : RISING_EDGE, clkInfo.setup.maxDelay());
+                                // HOLD: earliest data (min_arrival incl launch clk->Q_min + fast
+                                // data + fast route) must clear the capture FF's hold window.
+                                // hold_slack = min_arrival + net_min_delay - hold_time.
+                                if (nd.min_arrival < (std::numeric_limits<delay_t>::max() / 8)) {
+                                    delay_t hold_slack =
+                                            nd.min_arrival + net_delay_min - clkInfo.hold.maxDelay();
+                                    worst_hold_slack = std::min(worst_hold_slack, hold_slack);
+                                    if (crit_path)  // reporting analysis only
+                                        hold_endpoints.push_back({net, usr.cell->name, usr.port, hold_slack});
+                                }
                             }
                         } else {
                             process_endpoint(async_clock, RISING_EDGE, 0);
@@ -653,6 +730,35 @@ struct Timing
                     nc.cd_worst_slack = worst_slack.at(startdomain.first);
                 }
             }
+            // Export per-net max criticality (0..1) for timing-driven PLACEMENT
+            // feedback: place_lef weights net HPWL by (1 + K*crit), so the SA
+            // annealer keeps near-critical nets short.  Overwrite each call ->
+            // holds the last (most-converged) routing iteration's criticality.
+            if (const char *cf = getenv("NEXTPNR_CRIT_EXPORT")) {
+                // Key by DRIVER-CELL name, not net name: net names don't survive
+                // bir_to_nextpnr_json flattening on the place_lef side, but cell
+                // names do (as the hold-target export relies on).  Emit the max
+                // criticality over each driver cell's output nets.
+                std::map<IdString, float> cell_crit;
+                for (auto &nc : *net_crit) {
+                    float mx = 0.0f;
+                    for (float c : nc.second.criticality)
+                        mx = std::max(mx, c);
+                    if (mx <= 0.05f)
+                        continue;
+                    auto it = ctx->nets.find(nc.first);
+                    if (it == ctx->nets.end() || it->second->driver.cell == nullptr)
+                        continue;
+                    IdString dc = it->second->driver.cell->name;
+                    auto cur = cell_crit.find(dc);
+                    if (cur == cell_crit.end() || cur->second < mx)
+                        cell_crit[dc] = mx;
+                }
+                std::ofstream out(cf);
+                if (out)
+                    for (auto &cc : cell_crit)
+                        out << cc.first.c_str(ctx) << '\t' << cc.second << '\n';
+            }
 #if 0
             if (ctx->debug) {
                 for (auto &nc : *net_crit) {
@@ -802,6 +908,42 @@ void timing_analysis(Context *ctx, bool print_histogram, bool print_fmax, bool p
     Timing timing(ctx, true /* net_delays */, false /* update */, (print_path || print_fmax) ? &crit_paths : nullptr,
                   print_histogram ? &slack_histogram : nullptr);
     timing.walk_paths();
+    if (print_fmax) {
+        // In-process HOLD estimate (early/min-delay pass): earliest data vs the
+        // capture FF hold window.  Golden Vivado/OpenSTA ibex reference ~ +0.06ns.
+        log_info("Estimated worst hold slack: %.2f ns%s\n", ctx->getDelayNS(timing.worst_hold_slack),
+                 timing.worst_hold_slack < 0 ? "  *** HOLD VIOLATION ***" : "");
+        // Phase 2: the tightest hold endpoints -- targets for hold-buffer insertion.
+        auto &he = timing.hold_endpoints;
+        std::sort(he.begin(), he.end(), [](const Timing::HoldEndpoint &a, const Timing::HoldEndpoint &b) {
+            return a.slack < b.slack;
+        });
+        int nshow = std::min<int>(5, he.size());
+        if (nshow > 0) {
+            log_info("Tightest hold endpoints (targets for hold buffering):\n");
+            for (int i = 0; i < nshow; i++)
+                log_info("    %+.3f ns  %s.%s\n", ctx->getDelayNS(he[i].slack), he[i].cell.c_str(ctx),
+                         he[i].port.c_str(ctx));
+        }
+        // Phase 2b: export the sub-threshold hold targets (net + capture pin +
+        // slack) so an edit pass -- place_lef FPGA_HOLD_LUT1 or a reroute-detour --
+        // buffers ONLY these instead of blanket every FF->FF.  Env-gated:
+        //   NEXTPNR_HOLD_TARGETS=<file>  NEXTPNR_HOLD_MARGIN_NS=<slack thresh (0.15)>
+        if (const char *tf = getenv("NEXTPNR_HOLD_TARGETS")) {
+            const char *mg = getenv("NEXTPNR_HOLD_MARGIN_NS");
+            double margin = mg ? atof(mg) : 0.15;
+            std::ofstream ofs(tf);
+            int nwr = 0;
+            for (auto &e : he) {
+                if (ctx->getDelayNS(e.slack) >= margin)
+                    break; // sorted ascending
+                ofs << e.net->name.c_str(ctx) << '\t' << e.cell.c_str(ctx) << '.' << e.port.c_str(ctx) << '\t'
+                    << ctx->getDelayNS(e.slack) << '\n';
+                nwr++;
+            }
+            log_info("Wrote %d hold target(s) (< %.3f ns) to %s\n", nwr, margin, tf);
+        }
+    }
     std::map<IdString, std::pair<ClockPair, CriticalPath>> clock_reports;
     std::map<IdString, double> clock_fmax;
     std::vector<ClockPair> xclock_paths;
