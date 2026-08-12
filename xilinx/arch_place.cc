@@ -1676,7 +1676,20 @@ void Arch::fixupRouting()
                 auto p = ports[i];
                 if (!new_connections.count(p) || new_connections.at(p).empty())
                     continue;
-                if (lut6) {
+                // Only a pin the cell's OWN bel actually has may be connected.
+                // The two LUTs of a slot share the slice's A1..A6 SITE wires, so
+                // a permutation pip recorded for the slot was applied to BOTH
+                // cells -- but the 5LUT BEL has no A6 pin at all, so the 5LUT
+                // cell acquired an A6 port whose bel pin does not exist.
+                // Harmless while it lasts (fixupRouting runs after routing, and
+                // the FASM writer ignores a pin with no X_ORIG_PORT), but it is
+                // written into the JSON, and re-importing that JSON aborts in
+                // router2's setup_nets with "No wire found for port A6 on
+                // destination cell ..." -- the R2 static-import blocker.  It is
+                // also the exact state xc7_logic_tile_valid() already rejects
+                // (get_net_or_empty(lut5, id_A6) != nullptr); only the frozen-
+                // tile fast path stops that check from firing on an import.
+                if (lut6 && getBelPinWire(lut6->bel, p) != WireId()) {
                     if (!lut6->ports.count(p)) {
                         lut6->ports[p].name = p;
                         lut6->ports[p].type = PORT_IN;
@@ -1699,7 +1712,9 @@ void Arch::fixupRouting()
                     if (orig_attr.empty())
                         lut6->attrs.erase(id("X_ORIG_PORT_" + p.str(this)));
                 }
-                if (lut5) {
+                // Same bel-pin guard as the LUT6 block above.  This is the one
+                // that matters in practice: p == A6 on a 5LUT bel.
+                if (lut5 && getBelPinWire(lut5->bel, p) != WireId()) {
                     if (!lut5->ports.count(p)) {
                         lut5->ports[p].name = p;
                         lut5->ports[p].type = PORT_IN;
