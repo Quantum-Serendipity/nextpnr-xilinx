@@ -459,10 +459,61 @@ def import_device(name, prjxray_root, metadata_root):
 		raise RuntimeError("{} is not known device name".format(name))
 	fabricname = match.groups()[0]
 
-	if fabricname == 'xc7a35t':
+	# Device -> fabric resolution.
+	#
+	# prjxray-db ships this mapping AS DATA, one file per family, headed
+	# "# device to fabric mapping":
+	#
+	#     zynq7/mapping/devices.yaml        artix7/mapping/devices.yaml
+	#     "xc7z035":                         "xc7a35t":
+	#       fabric: "xc7z045"                  fabric: "xc7a50t"
+	#
+	# This function used to hard-code the artix7 row and ignore the file, so
+	# the zynq7 row was silently dropped. All 18 xc7z035* parts then resolved
+	# to a fabric directory that does not exist and is not meant to -- xc7z035
+	# and xc7z045 share a fabric, their part.json differing in idcode alone --
+	# and bbaexport.py died with a bare FileNotFoundError partway through the
+	# footprint loop, taking the whole zynq7 chipdb with it at every pin.
+	#
+	# Reproduce on an unpatched tree with any xc7z035 part:
+	#   bbaexport.py --device xc7z035fbg676-1 --bba /tmp/x.bba
+	#   -> FileNotFoundError: .../prjxray-db/zynq7/xc7z035/tilegrid.json
+	#
+	# Read the table rather than duplicating one of its rows. Parsed without
+	# PyYAML deliberately: the chipdb is generated under pypy3.10, which has
+	# no yaml module, and this file's shape is fixed and trivial. The parser
+	# is strict -- a file that exists but yields no rows is an error, not a
+	# silent fall-through to the legacy behaviour.
+	devices_yaml = os.path.join(prjxray_root, "mapping", "devices.yaml")
+	if os.path.exists(devices_yaml):
+		fabric_map = {}
+		current = None
+		with open(devices_yaml, "r") as dyf:
+			for line in dyf:
+				line = line.split("#", 1)[0].rstrip()
+				if not line.strip():
+					continue
+				if not line.startswith((" ", "\t")):
+					current = line.strip().rstrip(":").strip('"')
+				elif current is not None and "fabric:" in line:
+					fabric_map[current] = line.split(":", 1)[1].strip().strip('"')
+		if not fabric_map:
+			raise RuntimeError("{} exists but no device->fabric rows were parsed".format(devices_yaml))
+		fabricname = fabric_map.get(fabricname, fabricname)
+	elif fabricname == 'xc7a35t':
+		# Legacy fallback for databases predating mapping/devices.yaml.
 		# https://github.com/gatecat/nextpnr-xilinx/issues/35
 		# https://github.com/f4pga/prjxray/pull/1889
 		fabricname = 'xc7a50t'
+
+	# A missing fabric should name the device, the fabric it resolved to and
+	# the table consulted -- not surface as a bare FileNotFoundError from the
+	# open() below.
+	if not os.path.exists(os.path.join(prjxray_root, fabricname, "tilegrid.json")):
+		raise RuntimeError(
+			"device {} resolves to fabric {}, but {}/tilegrid.json does not "
+			"exist (device->fabric table consulted: {})".format(
+				name, fabricname, os.path.join(prjxray_root, fabricname), devices_yaml))
 	# Load intent JSON
 	with open(metadata_root + "/wire_intents.json", "r") as ijf:
 		ij = json.load(ijf)
