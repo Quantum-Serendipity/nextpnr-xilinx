@@ -1606,9 +1606,29 @@ void Arch::applyFixedRoutes(const std::string &filename)
     // 2235, i.e. essentially every flip-flop left with an unconfigured D mux --
     // dead on hardware.  So allow "keep Vivado's pin assignment" while still
     // letting the router complete the last mile.
-    bool replicate = getenv("NEXTPNR_FIXEDROUTES_NO_PINSWAP") != nullptr ||
+    //
+    // NEXTPNR_FIXEDROUTES_NOSWAP=1 also skips the whole loop.  It predates the
+    // NO_PINSWAP knob directly above in our tree and is the name the DPR gate
+    // fixtures use (scripts/fixed-routes-roundtrip.sh --noswap,
+    // scripts/nightly-regression.sh), so it is folded in here rather than
+    // renamed: one boolean, two spellings, identical behaviour.  Default is ON,
+    // i.e. unchanged; the knob exists because the loop's necessity is a
+    // measurable question and it used to require an out-of-tree binary to ask.
+    // Measured on xc7a100tcsg324-1 over a 65-cell design and a 19,768-cell one:
+    //   - replaying the ORIGINAL synthesis JSON under the lock, the swap is
+    //     unnecessary.  Skipping it routes clean (0 unrouted arcs), leaves the
+    //     FASM identical as a multiset, and additionally makes the written
+    //     netlist match the reference EXACTLY, which it does not otherwise.
+    //   - replaying the ROUTED JSON under --no-pack, the swap is REQUIRED.
+    //     Skipping it makes router2 fail to converge -- 19 overused site wires
+    //     on the small design, 31,386 on the large one.  The imported ports do
+    //     not agree with the locked route and only this loop reconciles them.
+    // So the KNOWN BUG note below stands, but not for the reason it gives.
+    const bool noswap_env = getenv("NEXTPNR_FIXEDROUTES_NOSWAP") != nullptr;
+    bool replicate = getenv("NEXTPNR_FIXEDROUTES_NO_PINSWAP") != nullptr || noswap_env ||
                      (getenv("NEXTPNR_ROUTE_FIXED_ONLY") != nullptr &&
                       getenv("NEXTPNR_FIXEDROUTES_PINSWAP") == nullptr);
+    const bool swap_lut_pins = !replicate;
     int pin_swaps = 0;
     for (auto &cellp : cells) {
         if (replicate)
@@ -1641,11 +1661,30 @@ void Arch::applyFixedRoutes(const std::string &filename)
         }
         // Align all inputs: nextpnr's router treats each belpin as fixed to its
         // tile input (A6-only leaves A1..A5 mismatched -> hooking collides ->
-        // 516-overused livelock), so the swap IS needed for routing.  KNOWN BUG:
-        // for ~15 frozen LUTs the A1..A5 swap+INIT-permutation writes a WRONG
-        // function (popcount changes) -- the detected pin disagrees with golden's
-        // INIT.  TODO: reconcile the direct-input detection with the golden INIT
-        // (or emit golden's INIT for stamped cells) so these stop corrupting.
+        // 516-overused livelock), so the swap IS needed for routing.
+        //
+        // CORRECTION, measured: the "hooking collides" half of that sentence is
+        // stale -- the external BFS hook it names has been off by default since
+        // the reserved-net contract landed (see the early return below).  The
+        // CONCLUSION survives anyway, for a different reason: replaying a routed
+        // JSON with --no-pack, the imported ports disagree with the locked route
+        // and router2 cannot reconcile them, so without this loop the design is
+        // unroutable (31,386 overused wires on a 12k-LUT design).  Replaying the
+        // original synthesis JSON, by contrast, does NOT need it.
+        //
+        // KNOWN BUG: for some frozen LUTs the A1..A5 swap + INIT permutation
+        // writes a WRONG function (popcount changes) -- the detected pin
+        // disagrees with golden's INIT.  The FASM half of that is closed (the
+        // corruption was the writer aliasing an empty X_ORIG_PORT token onto
+        // logical I0; see the fasm-lut-pin-alias fix), but a NETLIST half
+        // remains and is not fixed here: with this loop enabled the replay drops
+        // 1,870 LUT input connections that the reference build has, and leaves
+        // 1,641 cells carrying an X_ORIG_PORT_Ak on a pin with no net.  Both
+        // counts fall to 0 under NEXTPNR_FIXEDROUTES_NOSWAP=1, so this loop is
+        // the cause.  The FASM is unaffected; a consumer of the WRITTEN JSON is
+        // not.  TODO: reconcile the direct-input detection with the golden INIT,
+        // and stop fixupRouting() writing X_ORIG_PORT for a port whose
+        // connect_port() call was a no-op on a null net (design_utils.cc:87).
         for (int t = 1; t <= npin; t++) {
             IdString tgt = id("A" + std::to_string(t));
             WireId sw = getBelPinWire(ci->bel, tgt);
@@ -1744,6 +1783,12 @@ void Arch::applyFixedRoutes(const std::string &filename)
                  "netlist's INIT and pin assignment are authoritative)\n");
     else
         log_info("    fixed-routes: %d LUT-pin template swaps\n", pin_swaps);
+    // Keep the counter line greppable in NOSWAP mode: the DPR gate parses
+    // "fixed-routes: <n> LUT-pin template swaps" out of the log, and the
+    // replicate branch above does not print it.
+    if (noswap_env)
+        log_info("    fixed-routes: 0 LUT-pin template swaps (alignment swap disabled by "
+                 "NEXTPNR_FIXEDROUTES_NOSWAP)\n");
 
     // Complete the last mile of every locked arc.  With the hard-macro
     // contract (router2 now RESERVES locked wires to their own net rather
