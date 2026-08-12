@@ -568,11 +568,31 @@ struct FasmBackend
                 log_to_bit[lut_inputs[j].str(ctx)] = j;
             for (int j = 0; j < 6; j++) {
                 // Get the LUT physical to logical mapping
-                phys_to_log[j];
+                auto &p2l = phys_to_log[j];
                 if (!lut->attrs.count(ctx->id("X_ORIG_PORT_" + phys_inputs[j].str(ctx))))
                     continue;
                 std::string orig = lut->attrs.at(ctx->id("X_ORIG_PORT_" + phys_inputs[j].str(ctx))).as_string();
-                boost::split(phys_to_log[j], orig, boost::is_any_of(" "));
+                std::vector<std::string> toks;
+                boost::split(toks, orig, boost::is_any_of(" "));
+                // X_ORIG_PORT_<phys> is a SPACE-SEPARATED LIST of the logical
+                // ports sharing this physical input.  boost::split is not a
+                // tokeniser: a leading, trailing or doubled separator yields an
+                // EMPTY string, which is not the name of any logical port.
+                // Dropping it here is what stops log_to_bit's operator[] from
+                // default-inserting 0 and silently aliasing the pin onto logical
+                // input I0 -- see the file-level note on this patch.
+                for (auto &t : toks) {
+                    if (t.empty())
+                        continue;
+                    if (!log_to_bit.count(t))
+                        log_error("FASM: cell '%s' (type %s) maps physical LUT input %s to logical port "
+                                  "'%s', which is not an input of that cell type. The INIT permutation "
+                                  "for this LUT cannot be computed; refusing to emit a wrong truth "
+                                  "table (X_ORIG_PORT_%s = \"%s\").\n",
+                                  ctx->nameOf(lut), lut->type.c_str(ctx), phys_inputs[j].c_str(ctx), t.c_str(),
+                                  phys_inputs[j].c_str(ctx), orig.c_str());
+                    p2l.push_back(t);
+                }
             }
             int lbound = 0, ubound = 64;
             // Fracturable LUTs
@@ -586,8 +606,11 @@ struct FasmBackend
                 for (int k = 0; k < 6; k++) {
                     if ((j & (1 << k)) == 0)
                         continue;
+                    // .at(), not operator[]: every entry was validated against
+                    // log_to_bit above, so a miss here is a logic error and must
+                    // throw rather than silently resolve to logical input 0.
                     for (auto &p2l : phys_to_log[k])
-                        log_index |= (1 << log_to_bit[p2l]);
+                        log_index |= (1 << log_to_bit.at(p2l));
                 }
                 bits[j] = (init.str.at(log_index) == Property::S1);
             }

@@ -1684,10 +1684,17 @@ void Arch::fixupRouting()
                     connect_port(getCtx(), orig_nets[new_connections.at(p).front()], lut6, p);
                     lut6->attrs[id("X_ORIG_PORT_" + p.str(this))] = std::string("");
                     auto &orig_attr = lut6->attrs[id("X_ORIG_PORT_" + p.str(this))].str;
-                    bool first = true;
                     for (auto &nc : new_connections.at(p)) {
-                        orig_attr += orig_ports_l6[nc] + (first ? "" : " ");
-                        first = false;
+                        // Separator BETWEEN elements, and skip elements that are
+                        // empty because this cell never used that original port.
+                        // Appending " " after each non-first element emitted a
+                        // TRAILING space for the list ["", "I1"], which the FASM
+                        // writer split into an empty token.
+                        if (orig_ports_l6[nc].empty())
+                            continue;
+                        if (!orig_attr.empty())
+                            orig_attr += " ";
+                        orig_attr += orig_ports_l6[nc];
                     }
                     if (orig_attr.empty())
                         lut6->attrs.erase(id("X_ORIG_PORT_" + p.str(this)));
@@ -1700,10 +1707,13 @@ void Arch::fixupRouting()
                     connect_port(getCtx(), orig_nets[new_connections.at(p).front()], lut5, p);
                     lut5->attrs[id("X_ORIG_PORT_" + p.str(this))] = std::string("");
                     auto &orig_attr = lut5->attrs[id("X_ORIG_PORT_" + p.str(this))].str;
-                    bool first = true;
                     for (auto &nc : new_connections.at(p)) {
-                        orig_attr += orig_ports_l5[nc] + (first ? "" : " ");
-                        first = false;
+                        // Same fix as the LUT6 block above.
+                        if (orig_ports_l5[nc].empty())
+                            continue;
+                        if (!orig_attr.empty())
+                            orig_attr += " ";
+                        orig_attr += orig_ports_l5[nc];
                     }
                     if (orig_attr.empty())
                         lut5->attrs.erase(id("X_ORIG_PORT_" + p.str(this)));
