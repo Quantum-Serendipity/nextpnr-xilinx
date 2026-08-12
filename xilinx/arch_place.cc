@@ -1607,6 +1607,14 @@ void Arch::fixupRouting()
      * and Vivado happy, preserving the original logical netlist
      */
     std::unordered_map<int, std::vector<int>> used_perm_pips; // tile -> [extra_data] for LUT perm pips
+    // Accounting for the two ways this rewrite can silently damage the netlist it
+    // is meant to relabel.  Both were found by comparing a route-lock replay's
+    // written JSON against the reference build's: the FASM was identical and the
+    // netlist was not, which is invisible to a FASM gate and fatal to the next
+    // build that re-imports the JSON.
+    int perm_label_no_net = 0; // X_ORIG_PORT suppressed because connect_port() had a null net
+    int perm_dropped_nets = 0; // input connections this pass removed and did not put back
+    std::string perm_dropped_first;
 
     for (auto net : sorted(nets)) {
         NetInfo *ni = net.second;
@@ -1654,6 +1662,14 @@ void Arch::fixupRouting()
                 if (lut5)
                     orig_ports_l5[ports[i]] = str_or_default(lut5->attrs, id("X_ORIG_PORT_" + ports[i].str(this)));
             }
+            // Per-CELL snapshot, unlike orig_nets above, which merges the pair.
+            // Used only to check afterwards that nothing was lost.
+            NetInfo *l6_before[6] = {nullptr, nullptr, nullptr, nullptr, nullptr, nullptr};
+            NetInfo *l5_before[6] = {nullptr, nullptr, nullptr, nullptr, nullptr, nullptr};
+            for (int i = 0; i < 6; i++) {
+                l6_before[i] = lut6 ? get_net_or_empty(lut6, ports[i]) : nullptr;
+                l5_before[i] = lut5 ? get_net_or_empty(lut5, ports[i]) : nullptr;
+            }
             for (auto &nc : new_connections) {
                 if (lut6)
                     disconnect_port(getCtx(), lut6, nc.first);
@@ -1694,23 +1710,34 @@ void Arch::fixupRouting()
                         lut6->ports[p].name = p;
                         lut6->ports[p].type = PORT_IN;
                     }
-                    connect_port(getCtx(), orig_nets[new_connections.at(p).front()], lut6, p);
-                    lut6->attrs[id("X_ORIG_PORT_" + p.str(this))] = std::string("");
-                    auto &orig_attr = lut6->attrs[id("X_ORIG_PORT_" + p.str(this))].str;
-                    for (auto &nc : new_connections.at(p)) {
-                        // Separator BETWEEN elements, and skip elements that are
-                        // empty because this cell never used that original port.
-                        // Appending " " after each non-first element emitted a
-                        // TRAILING space for the list ["", "I1"], which the FASM
-                        // writer split into an empty token.
-                        if (orig_ports_l6[nc].empty())
-                            continue;
-                        if (!orig_attr.empty())
-                            orig_attr += " ";
-                        orig_attr += orig_ports_l6[nc];
+                    NetInfo *newnet = orig_nets[new_connections.at(p).front()];
+                    connect_port(getCtx(), newnet, lut6, p);
+                    // connect_port() RETURNS SILENTLY on a null net
+                    // (common/design_utils.cc), so writing the label
+                    // unconditionally manufactured an X_ORIG_PORT on a pin with
+                    // no net at all -- 1,641 cells' worth in a route-lock replay,
+                    // and a self-inconsistency in every consumer of the JSON.
+                    // A pin with no net has no label.
+                    if (newnet == nullptr) {
+                        perm_label_no_net++;
+                    } else {
+                        lut6->attrs[id("X_ORIG_PORT_" + p.str(this))] = std::string("");
+                        auto &orig_attr = lut6->attrs[id("X_ORIG_PORT_" + p.str(this))].str;
+                        for (auto &nc : new_connections.at(p)) {
+                            // Separator BETWEEN elements, and skip elements that
+                            // are empty because this cell never used that original
+                            // port.  Appending " " after each non-first element
+                            // emitted a TRAILING space for the list ["", "I1"],
+                            // which the FASM writer split into an empty token.
+                            if (orig_ports_l6[nc].empty())
+                                continue;
+                            if (!orig_attr.empty())
+                                orig_attr += " ";
+                            orig_attr += orig_ports_l6[nc];
+                        }
+                        if (orig_attr.empty())
+                            lut6->attrs.erase(id("X_ORIG_PORT_" + p.str(this)));
                     }
-                    if (orig_attr.empty())
-                        lut6->attrs.erase(id("X_ORIG_PORT_" + p.str(this)));
                 }
                 // Same bel-pin guard as the LUT6 block above.  This is the one
                 // that matters in practice: p == A6 on a 5LUT bel.
@@ -1719,23 +1746,64 @@ void Arch::fixupRouting()
                         lut5->ports[p].name = p;
                         lut5->ports[p].type = PORT_IN;
                     }
-                    connect_port(getCtx(), orig_nets[new_connections.at(p).front()], lut5, p);
-                    lut5->attrs[id("X_ORIG_PORT_" + p.str(this))] = std::string("");
-                    auto &orig_attr = lut5->attrs[id("X_ORIG_PORT_" + p.str(this))].str;
-                    for (auto &nc : new_connections.at(p)) {
-                        // Same fix as the LUT6 block above.
-                        if (orig_ports_l5[nc].empty())
-                            continue;
-                        if (!orig_attr.empty())
-                            orig_attr += " ";
-                        orig_attr += orig_ports_l5[nc];
+                    NetInfo *newnet = orig_nets[new_connections.at(p).front()];
+                    connect_port(getCtx(), newnet, lut5, p);
+                    if (newnet == nullptr) {
+                        // Same suppression as the LUT6 block above.
+                        perm_label_no_net++;
+                    } else {
+                        lut5->attrs[id("X_ORIG_PORT_" + p.str(this))] = std::string("");
+                        auto &orig_attr = lut5->attrs[id("X_ORIG_PORT_" + p.str(this))].str;
+                        for (auto &nc : new_connections.at(p)) {
+                            // Same fix as the LUT6 block above.
+                            if (orig_ports_l5[nc].empty())
+                                continue;
+                            if (!orig_attr.empty())
+                                orig_attr += " ";
+                            orig_attr += orig_ports_l5[nc];
+                        }
+                        if (orig_attr.empty())
+                            lut5->attrs.erase(id("X_ORIG_PORT_" + p.str(this)));
                     }
-                    if (orig_attr.empty())
-                        lut5->attrs.erase(id("X_ORIG_PORT_" + p.str(this)));
+                }
+            }
+            // A permutation is a RELABELLING: every net on the slot's inputs
+            // before this rewrite must still be on one of them after it.  The
+            // disconnect phase above clears both the source and the destination
+            // of every permutation pip but the reconnect phase only refills
+            // destinations, so a net sitting on a port that is neither -- which
+            // is what an imprecise route-lock pin alignment produces -- is
+            // DELETED, silently, with the FASM unaffected.  Count it; a netlist
+            // defect that costs nothing to detect must not be silent again.
+            for (int c = 0; c < 2; c++) {
+                CellInfo *cc = (c == 0) ? lut6 : lut5;
+                NetInfo **before = (c == 0) ? l6_before : l5_before;
+                if (cc == nullptr)
+                    continue;
+                for (int i = 0; i < 6; i++) {
+                    if (before[i] == nullptr)
+                        continue;
+                    bool still = false;
+                    for (int k = 0; k < 6; k++)
+                        if (get_net_or_empty(cc, ports[k]) == before[i])
+                            still = true;
+                    if (still)
+                        continue;
+                    if (perm_dropped_nets++ == 0)
+                        perm_dropped_first = std::string(nameOf(cc)) + "/" + ports[i].str(this) + " ('" +
+                                             nameOf(before[i]) + "')";
                 }
             }
         }
     }
+    if (perm_label_no_net > 0)
+        log_info("LUT permutation rewrite: %d X_ORIG_PORT label(s) suppressed on pins left with no net\n",
+                 perm_label_no_net);
+    if (perm_dropped_nets > 0)
+        log_warning("LUT permutation rewrite DROPPED %d LUT input connection(s) (first: %s). The written "
+                    "netlist no longer matches the design; the FASM is unaffected, so this is invisible to a "
+                    "FASM comparison and fatal to anything that re-imports the JSON.\n",
+                    perm_dropped_nets, perm_dropped_first.c_str());
     /*
      * Route PAD nets which won't have been routed due to inout issues
      */

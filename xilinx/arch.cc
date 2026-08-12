@@ -1629,7 +1629,49 @@ void Arch::applyFixedRoutes(const std::string &filename)
                      (getenv("NEXTPNR_ROUTE_FIXED_ONLY") != nullptr &&
                       getenv("NEXTPNR_FIXEDROUTES_PINSWAP") == nullptr);
     const bool swap_lut_pins = !replicate;
-    int pin_swaps = 0;
+    //
+    // WHERE THE TARGET ASSIGNMENT COMES FROM.  The lock records the LUT input
+    // crossbar as PIP_LUT_PERMUTATION pips, and those pips ARE the mapping:
+    // extra_data is eight[3:0];from[3:0];to[3:0], where `from` indexes the TILE
+    // INPUT the net arrives on and `to` indexes the BELPIN it is delivered to
+    // (xilinx/java/bbaexport.java, addSiteIOPIP).  Read the desired per-belpin
+    // net straight out of them.
+    //
+    // This replaces a wire-name probe that answered in the WRONG COORDINATE
+    // SYSTEM for part of its domain.  That probe took the net bound on the
+    // belpin's own site wire when there was one, and otherwise fell back to
+    // "the net on the direct tile input wire whose name ends in the same pin
+    // id" -- which is the `from` index, i.e. fixupRouting()'s OUTPUT labelling,
+    // not the input labelling this loop is supposed to produce.  Measured on
+    // counter25 with the two candidate nets computed side by side: of the 19
+    // input pins where they differ, a freshly packed netlist agrees with the
+    // BELPIN net 19 times and with the tile input 0 times, and all 4 swaps the
+    // loop performed in that configuration came from the fallback -- i.e. every
+    // one of them was damage.  On the 14,054-LUT adversarial design the same
+    // damage is 7,015 swaps and it costs 1,870 LUT input connections, because
+    // fixupRouting() then reads a port that no longer holds the net it expects
+    // and deletes the connection instead of moving it.
+    //
+    // Reading the permutation pips has a second property the probe did not:
+    // it is the SAME data fixupRouting() reads (arch_place.cc, used_perm_pips),
+    // so the two passes cannot disagree about the permutation.
+    std::unordered_map<int, std::unordered_map<int, NetInfo *>> locked_lut_input;
+    for (NetInfo *net : fixed_nets) {
+        for (auto &w : net->wires) {
+            PipId pip = w.second.pip;
+            if (pip == PipId())
+                continue;
+            auto &pd = locInfo(pip).pip_data[pip.index];
+            if (pd.flags != PIP_LUT_PERMUTATION)
+                continue;
+            // key: slot[3:0] << 4 | belpin index[3:0]
+            locked_lut_input[pip.tile][(((pd.extra_data >> 8) & 0xF) << 4) | (pd.extra_data & 0xF)] = net;
+        }
+    }
+    int locked_lut_pins = 0;
+    for (auto &t : locked_lut_input)
+        locked_lut_pins += int(t.second.size());
+    int pin_swaps = 0, pins_no_locked_net = 0, pins_already_aligned = 0, pins_net_not_on_cell = 0;
     for (auto &cellp : cells) {
         if (replicate)
             break;
@@ -1682,48 +1724,38 @@ void Arch::applyFixedRoutes(const std::string &filename)
         // 1,641 cells carrying an X_ORIG_PORT_Ak on a pin with no net.  Both
         // counts fall to 0 under NEXTPNR_FIXEDROUTES_NOSWAP=1, so this loop is
         // the cause.  The FASM is unaffected; a consumer of the WRITTEN JSON is
-        // not.  TODO: reconcile the direct-input detection with the golden INIT,
-        // and stop fixupRouting() writing X_ORIG_PORT for a port whose
-        // connect_port() call was a no-op on a null net (design_utils.cc:87).
+        // not.  TODO: reconcile the direct-input detection with the golden INIT.
+        //
+        // BOTH halves of that TODO are now closed and the paragraph above is
+        // kept only as the historical record: the target assignment is read from
+        // the locked permutation pips above (no wire-name probe, no fallback in
+        // the wrong coordinate system), and fixupRouting() no longer writes a
+        // label for a connect_port() that was a no-op.
+        auto tile_it = locked_lut_input.find(ci->bel.tile);
+        const int slot = getBelLocation(ci->bel).z >> 4;
         for (int t = 1; t <= npin; t++) {
             IdString tgt = id("A" + std::to_string(t));
-            WireId sw = getBelPinWire(ci->bel, tgt);
-            if (sw == WireId())
+            if (getBelPinWire(ci->bel, tgt) == WireId())
                 continue;
-            // The locked route binds to the CANONICAL node-root wire, which for a
-            // LUT input differs from the raw belpin site wire -- so canonicalise
-            // before probing.  The belpin's uphill is an intra-slice crossbar: it
-            // can be fed from ANY of the tile input wires (D1..D5), so a naive scan
-            // returns whichever is bound first -- the WRONG net.  The net golden
-            // routes to THIS pin arrives on the DIRECT tile input wire whose name
-            // ends in the same pin id (belpin "D5" <- "..._D5"); match only that.
-            WireId csw = canonicalWireId(chip_info, sw.tile, sw.index);
-            std::string swn = nameOfWire(sw);
-            std::string pin = swn.substr(swn.rfind('/') + 1); // e.g. "D5"
-            std::string want = "_" + pin;
-            NetInfo *dnet = getBoundWireNet(csw);
-            if (dnet != nullptr && !fixed_nets.count(dnet))
-                dnet = nullptr;
-            if (dnet == nullptr) {
-                for (auto pip : getPipsUphill(csw)) {
-                    WireId s = getPipSrcWire(pip);
-                    std::string sn = nameOfWire(s);
-                    std::string stail = sn.substr(sn.rfind('/') + 1);
-                    if (stail.size() < want.size() ||
-                        stail.compare(stail.size() - want.size(), want.size(), want) != 0)
-                        continue; // not the direct tile input for this belpin
-                    NetInfo *bn = getBoundWireNet(canonicalWireId(chip_info, s.tile, s.index));
-                    if (bn != nullptr && fixed_nets.count(bn)) {
-                        dnet = bn;
-                        break;
-                    }
-                }
+            // The net the LOCK delivers to THIS belpin, by index, from the
+            // permutation pip's `to` field.  Absent means the lock routes nothing
+            // to this belpin, which is not the same thing as "look somewhere else
+            // for a net" -- the old fallback's mistake.
+            NetInfo *dnet = nullptr;
+            if (tile_it != locked_lut_input.end()) {
+                auto pit = tile_it->second.find((slot << 4) | (t - 1));
+                if (pit != tile_it->second.end())
+                    dnet = pit->second;
             }
-            if (dnet == nullptr)
+            if (dnet == nullptr) {
+                pins_no_locked_net++;
                 continue;
+            }
             NetInfo *tnet = (ci->ports.count(tgt) && ci->ports.at(tgt).net) ? ci->ports.at(tgt).net : nullptr;
-            if (tnet == dnet)
+            if (tnet == dnet) {
+                pins_already_aligned++;
                 continue; // already on the right belpin
+            }
             // find the port currently carrying dnet
             IdString src_pin = IdString();
             for (int k = 1; k <= npin; k++) {
@@ -1733,8 +1765,14 @@ void Arch::applyFixedRoutes(const std::string &filename)
                     break;
                 }
             }
-            if (src_pin == IdString())
-                continue; // this cell doesn't use dnet
+            if (src_pin == IdString()) {
+                // The two LUTs of a slot share the slice's input site wires, so a
+                // net the lock delivers to this belpin may belong to the partner
+                // cell and not to this one.  Leave it alone; it is not this cell's
+                // to move.
+                pins_net_not_on_cell++;
+                continue;
+            }
             // swap src_pin <-> tgt (nets + X_ORIG_PORT attrs)
             IdString oa_src = id("X_ORIG_PORT_" + src_pin.str(this)),
                      oa_tgt = id("X_ORIG_PORT_" + tgt.str(this));
@@ -1789,6 +1827,10 @@ void Arch::applyFixedRoutes(const std::string &filename)
     if (noswap_env)
         log_info("    fixed-routes: 0 LUT-pin template swaps (alignment swap disabled by "
                  "NEXTPNR_FIXEDROUTES_NOSWAP)\n");
+    if (swap_lut_pins)
+        log_info("    fixed-routes: LUT input belpins locked %d (aligned %d, moved %d, not on this cell %d, "
+                 "no locked net %d)\n",
+                 locked_lut_pins, pins_already_aligned, pin_swaps, pins_net_not_on_cell, pins_no_locked_net);
 
     // Complete the last mile of every locked arc.  With the hard-macro
     // contract (router2 now RESERVES locked wires to their own net rather
