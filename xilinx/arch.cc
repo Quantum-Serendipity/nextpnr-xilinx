@@ -902,6 +902,29 @@ bool Arch::place()
     return true;
 }
 
+// Is this constant sink's value delivered by a CONFIGURATION BIT rather than by
+// the routing graph?  If so, failing to bridge it is not a defect and must not
+// fail the build -- but it is still reported, because "not a defect" is a claim
+// that has to be re-checked whenever the FASM writer changes.
+//
+// One case today: a CARRY4's CIN / CYINIT.  write_carry_config() in
+// xilinx/fasm.cc emits PRECYINIT.C0 / .C1 for a constant carry-in and says so:
+// "The carry packer disconnects a constant carry-in and records its value here,
+// so router2 needn't route GND/VCC into CIN/CYINIT."  It goes further and warns
+// that routing the (unused) CYINIT in via the AX path emits a PRECYINIT.AX bit
+// that CONFLICTS with PRECYINIT.CIN.  Measured on an artefact: the attosoc
+// legacy-carry4 build on xc7a100tfgg484-2 cannot bridge five CARRY4 CYINIT
+// sinks, and every one of those slices carries the constant anyway --
+// e.g. CLBLL_L_X2Y71.SLICEL_X0.PRECYINIT.C0 for SLICE_X0Y71.
+static bool const_sink_is_config_delivered(const PortRef &usr)
+{
+    if (usr.cell == nullptr)
+        return false;
+    if (usr.cell->type != id_CARRY4)
+        return false;
+    return usr.port == id_CIN || usr.port == id_CYINIT;
+}
+
 void Arch::routeVcc()
 {
     // Route BOTH constant pseudo-nets (Vcc and Gnd) through their real bridge
@@ -914,6 +937,45 @@ void Arch::routeVcc()
     // of traversing the whole pseudo network to the single bound source -> no
     // O(device) stall.  Real sink-side bridge pips get bound + emitted to FASM.
     const int iter_max = 50000;
+    // A holdout is USUALLY NOT TERMINAL, and this is the whole reason the retry
+    // below exists.  The BFS terminates on `getBoundWireNet(curr) == net`, i.e.
+    // on the const net's OWN existing routing, as well as on a pseudo-intent
+    // wire.  So the graph this search runs on is not fixed: every sink that is
+    // bridged makes the const tree bigger and puts a terminator closer to the
+    // sinks that have not been tried yet.  A sink processed EARLY in
+    // net->users order can therefore fail -- it has to trek all the way to some
+    // tile's GND_WIRE -- where the identical sink processed LATE succeeds in a
+    // handful of hops, because by then a sibling sink in the same tile has
+    // already dragged the constant in.  That is exactly the asymmetry measured
+    // between a fresh build (max BFS 50000, one holdout) and a --fixed-routes
+    // replay of it (max BFS 40, none): the replay starts with the whole tree
+    // pre-bound.  Re-running the failures against the finished tree gives a
+    // fresh build the same advantage.
+    //
+    // BOTH failure modes are real and they need different treatment, which is
+    // why the retry also escalates the budget rather than only re-ordering:
+    //   * measured holdouts that EXHAUST the reachable free-wire graph at 9, 12,
+    //     34, 178, 683, 4366 and 5303 wires -- far below the cap.  Nothing that
+    //     spends more iterations helps those; there is nothing left to look at.
+    //   * a measured holdout found on the retry only at 136,077 wires, i.e.
+    //     beyond the 50,000 cap.  A path existed and the search was cut off.
+    // Simply raising iter_max for everyone would make every congested sink pay
+    // an unknown, device-size-dependent budget to fix the second class and do
+    // nothing at all for the first.
+    //
+    // Rip-up is NOT an option here, unlike in router1's route_const_arc (which
+    // does have a second, ripping pass): routeVcc runs AFTER the main router, so
+    // a signal net torn up here would never be re-routed by anything.
+    // Budget is escalated on the retry, and the two halves do different jobs.
+    // Pass 1 keeps the original 50,000 so a normal build costs exactly what it
+    // used to.  A sink that has already failed once is rare -- single digits on
+    // every design measured -- so it can afford a search large enough to
+    // EXHAUST the reachable free-wire graph rather than be cut off by it, which
+    // is what turns "we do not know whether a path exists" into an answer.
+    // Raising pass 1 to this value instead would make every congested sink pay
+    // it; the escalation is the same budget spent only where it is needed.
+    const int iter_max_retry = 4000000;
+    const int max_fill_passes = 8;
     std::vector<std::pair<IdString, int>> cnets = {
         { id("$PACKER_VCC_NET"), ID_PSEUDO_VCC },
         { id("$PACKER_GND_NET"), ID_PSEUDO_GND },
@@ -924,6 +986,7 @@ void Arch::routeVcc()
     std::ofstream holdout_out;
     if (const char *hf = getenv("NEXTPNR_GND_HOLDOUT_FILE"))
         holdout_out.open(hf);
+    int total_unrouted = 0;
     for (auto &cn : cnets) {
         if (!nets.count(cn.first))
             continue;
@@ -933,69 +996,131 @@ void Arch::routeVcc()
         WireId src = getCtx()->getNetinfoSourceWire(net);
         if (src != WireId())
             bindWire(src, net, STRENGTH_STRONG);
-        int unrouted = 0, max_iter_seen = 0;
-        for (auto &usr : net->users) {
-            std::queue<WireId> visit;
-            std::unordered_map<WireId, PipId> backtrace;
-            WireId dest = WireId();
-            WireId sink = getCtx()->getNetinfoSinkWire(net, usr);
-            if (sink == WireId())
-                log_error("Pin '%s' of bel '%s' has no associated wire\n", usr.port.c_str(this), nameOfBel(usr.cell->bel));
-            visit.push(sink);
-            int iter = 0;
-            while (!visit.empty() && iter < iter_max) {
-                ++iter;
-                WireId curr = visit.front();
-                visit.pop();
-                if (getBoundWireNet(curr) == net || wireIntent(curr) == pseudo_intent) {
-                    dest = curr;
-                    break;
+        int max_iter_seen = 0, passes = 0;
+        // Sinks still to try, by index into net->users.  Pass 1 is every sink,
+        // in the original order, so a build with no holdout is bit-identical to
+        // the pre-retry behaviour; later passes carry only the failures.
+        std::vector<size_t> pending, failed;
+        for (size_t i = 0; i < net->users.size(); i++)
+            pending.push_back(i);
+        while (true) {
+            ++passes;
+            failed.clear();
+            for (size_t ui : pending) {
+                auto &usr = net->users.at(ui);
+                std::queue<WireId> visit;
+                std::unordered_map<WireId, PipId> backtrace;
+                WireId dest = WireId();
+                WireId sink = getCtx()->getNetinfoSinkWire(net, usr);
+                if (sink == WireId())
+                    log_error("Pin '%s' of bel '%s' has no associated wire\n", usr.port.c_str(this),
+                              nameOfBel(usr.cell->bel));
+                visit.push(sink);
+                int iter = 0;
+                const int budget = (passes == 1) ? iter_max : iter_max_retry;
+                while (!visit.empty() && iter < budget) {
+                    ++iter;
+                    WireId curr = visit.front();
+                    visit.pop();
+                    if (getBoundWireNet(curr) == net || wireIntent(curr) == pseudo_intent) {
+                        dest = curr;
+                        break;
+                    }
+                    // Don't route the const net THROUGH a wire owned by a signal net
+                    // (e.g. the frozen macro's locked routing) -- the old code only
+                    // vetted src wires, so a signal-owned dst wire slipped into the
+                    // path and tripped bindWire's wire-ownership assert.
+                    if (getBoundWireNet(curr) != nullptr)
+                        continue;
+                    for (auto uh : getPipsUphill(curr)) {
+                        if (!checkPipAvail(uh))
+                            continue;
+                        WireId s = getPipSrcWire(uh);
+                        if (backtrace.count(s))
+                            continue;
+                        if (!checkWireAvail(s) && getBoundWireNet(s) != net)
+                            continue;
+                        backtrace[s] = uh;
+                        visit.push(s);
+                    }
                 }
-                // Don't route the const net THROUGH a wire owned by a signal net
-                // (e.g. the frozen macro's locked routing) -- the old code only
-                // vetted src wires, so a signal-owned dst wire slipped into the
-                // path and tripped bindWire's wire-ownership assert.
-                if (getBoundWireNet(curr) != nullptr)
+                if (iter > max_iter_seen)
+                    max_iter_seen = iter;
+                if (dest == WireId()) {
+                    failed.push_back(ui);
+                    // Always logged, never behind a knob.  It also says WHICH of
+                    // the two failure modes happened, because they need
+                    // different fixes: "exhausted" means every wire reachable
+                    // from the sink through free/own resources was looked at and
+                    // none of them was a constant source, so a bigger budget is
+                    // useless; "hit its cap" means the search was cut off and
+                    // the answer may simply have been further away.
+                    log_info("    %s: pass %d left %s.%s (bel %s) unbridged -- BFS %s after %d of %d wires\n",
+                             cn.first.c_str(this), passes, usr.cell->name.c_str(this), usr.port.c_str(this),
+                             nameOfBel(usr.cell->bel),
+                             visit.empty() ? "exhausted the reachable free-wire graph" : "hit its iteration cap",
+                             iter, budget);
                     continue;
-                for (auto uh : getPipsUphill(curr)) {
-                    if (!checkPipAvail(uh))
-                        continue;
-                    WireId s = getPipSrcWire(uh);
-                    if (backtrace.count(s))
-                        continue;
-                    if (!checkWireAvail(s) && getBoundWireNet(s) != net)
-                        continue;
-                    backtrace[s] = uh;
-                    visit.push(s);
+                }
+                while (backtrace.count(dest)) {
+                    auto uh = backtrace[dest];
+                    dest = getPipDstWire(uh);
+                    if (getBoundWireNet(dest) == nullptr)
+                        bindWire(dest, net, STRENGTH_STRONG);
+                    if (getBoundPipNet(uh) == nullptr)
+                        bindPip(uh, net, STRENGTH_STRONG);
                 }
             }
-            if (iter > max_iter_seen)
-                max_iter_seen = iter;
-            if (dest == WireId()) {
-                ++unrouted;
-                if (getenv("NEXTPNR_LOG_CONST_HOLDOUTS"))
-                    log_info("    %s HOLDOUT: %s.%s (bel %s)\n", cn.first.c_str(this),
-                             usr.cell->name.c_str(this), usr.port.c_str(this),
-                             nameOfBel(usr.cell->bel));
-                // GND holdouts only: a local LUT1(INIT=0) can replace these.
-                if (holdout_out.is_open() && cn.second == ID_PSEUDO_GND)
-                    holdout_out << usr.cell->name.c_str(this) << " "
-                                << usr.port.c_str(this) << "\n";
-                continue;
-            }
-            while (backtrace.count(dest)) {
-                auto uh = backtrace[dest];
-                dest = getPipDstWire(uh);
-                if (getBoundWireNet(dest) == nullptr)
-                    bindWire(dest, net, STRENGTH_STRONG);
-                if (getBoundPipNet(uh) == nullptr)
-                    bindPip(uh, net, STRENGTH_STRONG);
-            }
+            if (failed.empty())
+                break;
+            // No progress: this pass bound nothing, so the next one would search
+            // an identical graph and fail identically.  Terminates the loop in
+            // at most |failures| passes even without the cap below.
+            if (failed.size() == pending.size())
+                break;
+            if (passes >= max_fill_passes)
+                break;
+            pending = failed;
         }
-        log_info("    %s: %d/%d sinks bridged (%d left to main router; max BFS %d)\n",
-                 cn.first.c_str(this), int(net->users.size()) - unrouted, int(net->users.size()),
-                 unrouted, max_iter_seen);
+        int unrouted = int(failed.size()), config_delivered = 0;
+        for (size_t ui : failed) {
+            auto &usr = net->users.at(ui);
+            if (const_sink_is_config_delivered(usr))
+                ++config_delivered;
+        }
+        total_unrouted += unrouted - config_delivered;
+        // A CONSTANT SINK THAT WAS NEVER BRIDGED IS A CORRECTNESS DEFECT, NOT A
+        // STATISTIC.  This used to be a bare counter plus an opt-in log line, so
+        // a build could ship an undriven const input, exit 0 and write a
+        // complete-looking FASM.  For a LUT input the damage is masked by
+        // accident -- fixupRouting() erases the pin's X_ORIG_PORT because it has
+        // no bound permutation pip, and get_lut_init() then emits a function
+        // independent of that pin, which is right for GND and WRONG for VCC --
+        // and for a non-LUT sink (FF CE/SR, CARRY4 DI, BRAM/DSP/IOB) nothing
+        // masks it at all.  Name every one of them, then refuse to continue.
+        for (size_t ui : failed) {
+            auto &usr = net->users.at(ui);
+            if (const_sink_is_config_delivered(usr))
+                log_warning("%s: sink %s.%s (bel %s) not bridged, but its value is delivered by a "
+                            "configuration bit (PRECYINIT.C0/.C1), so this is not a defect\n",
+                            cn.first.c_str(this), usr.cell->name.c_str(this), usr.port.c_str(this),
+                            nameOfBel(usr.cell->bel));
+            else
+                log_warning("%s: no reachable constant source for sink %s.%s (bel %s)\n", cn.first.c_str(this),
+                            usr.cell->name.c_str(this), usr.port.c_str(this), nameOfBel(usr.cell->bel));
+            // GND holdouts only: a local LUT1(INIT=0) can replace these.
+            if (holdout_out.is_open() && cn.second == ID_PSEUDO_GND)
+                holdout_out << usr.cell->name.c_str(this) << " " << usr.port.c_str(this) << "\n";
+        }
+        log_info("    %s: %d/%d sinks bridged (%d unrouted, %d of them config-delivered; %d fill pass(es); "
+                 "max BFS %d)\n",
+                 cn.first.c_str(this), int(net->users.size()) - unrouted, int(net->users.size()), unrouted,
+                 config_delivered, passes, max_iter_seen);
     }
+    if (total_unrouted > 0)
+        log_error("routeVcc: %d constant sink(s) could not be bridged and are not delivered by a configuration "
+                  "bit (listed above). The design would be written out with undriven constant inputs.\n",
+                  total_unrouted);
 }
 
 // BODGE: template a GT-clock -> BUFG route from the known-good Vivado path.
