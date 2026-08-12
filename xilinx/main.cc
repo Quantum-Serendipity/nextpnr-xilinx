@@ -34,7 +34,7 @@ class UspCommandHandler : public CommandHandler
     UspCommandHandler(int argc, char **argv);
     virtual ~UspCommandHandler(){};
     std::unique_ptr<Context> createContext(std::unordered_map<std::string, Property> &values) override;
-    void setupArchContext(Context *ctx) override{};
+    void setupArchContext(Context *ctx) override;
     void customBitstream(Context *ctx) override;
     void customAfterLoad(Context *ctx) override;
 
@@ -78,6 +78,21 @@ std::unique_ptr<Context> UspCommandHandler::createContext(std::unordered_map<std
     return std::unique_ptr<Context>(new Context(chipArgs));
 }
 
+// Deliberately here and NOT in customAfterLoad. setupArchContext runs before
+// parse_json; customAfterLoad runs after it. Interning "fixed-routes" after the
+// design's own names are interned shifts the packer's later IdStrings but not
+// the design's, and the HeAP placer iterates cell-name-keyed unordered_maps in
+// raw hash order (placer_heap.cc 190/267/380/450/653/695/1339/1352, with
+// IdString hashing to its own index). A partial shift re-partitions those
+// buckets and moves the placement -- 39 of 65 cells on counter25, with a
+// zero-pip file. Interning before parse_json shifts EVERY subsequent index
+// equally, which preserves the bucket partition and hence iteration order.
+void UspCommandHandler::setupArchContext(Context *ctx)
+{
+    if (vm.count("fixed-routes"))
+        ctx->settings[ctx->id("fixed-routes")] = vm["fixed-routes"].as<std::string>();
+}
+
 void UspCommandHandler::customAfterLoad(Context *ctx)
 {
     if (vm.count("xdc")) {
@@ -89,8 +104,6 @@ void UspCommandHandler::customAfterLoad(Context *ctx)
             ctx->parseXdc(in);
         }
     }
-    if (vm.count("fixed-routes"))
-        ctx->settings[ctx->id("fixed-routes")] = vm["fixed-routes"].as<std::string>();
 }
 
 int main(int argc, char *argv[])
