@@ -1797,6 +1797,138 @@ void Arch::applyFixedRoutes(const std::string &filename)
                   "%d, conflict %d, malformed %d); the static lock did not fully apply\n",
                   miss_net + miss_tile + miss_pip + conflict + malformed, miss_net, miss_tile, miss_pip, conflict,
                   malformed);
+
+    // -------- DRIVERLESS LOCK: a partial lock that omits the driver ---------
+    // A lock file may legitimately specify only PART of a net's route, and the
+    // two orientations of "part" are NOT symmetric.  Measured (work/f1-fragment,
+    // scripts/f1-fragment-lock.sh):
+    //
+    //   * omitted pips on the SINK side -- the router completes the last mile
+    //     correctly.  Net u_rm.rst: 17 of its 21 pips locked (the driver-side
+    //     ones), output carries all 21 and is identical to the reference.
+    //
+    //   * omitted pips on the SOURCE side -- the net is SILENTLY TRUNCATED.
+    //     Nets rm_out[0,1,2,4]: the written route equals the lock file exactly
+    //     (new=0 pips, 0.0 ms of router time), the routing tree's root moves off
+    //     the driver's bel pin (SITEWIRE/SLICE_X52Y124/A6LUT_O6, strength 1) onto
+    //     a fabric wire (INT_L_X32Y124/EE4BEG2, strength 4), and the FASM loses
+    //     the driver's output-mux rows (CLBLL_L_X32Y124.SLICEL_X0.AOUTMUX.O6 and
+    //     CLBLL_L_X32Y124.CLBLL_LOGIC_OUTS20.CLBLL_LL_AMUX).  The LUT output is
+    //     connected to nothing: dead silicon.  And EVERYTHING reported success --
+    //     rc=0, the bound-pips line above clean on all six counters, zero
+    //     "Failed to route arc", zero warnings, zero errors, both partition gates
+    //     passing, 948 lines of FASM emitted.
+    //
+    // Mechanism, at common/router2.cc:1091-1093:
+    //     // Case of arcs that were pre-routed strongly (e.g. clocks)
+    //     if (net->wires.count(dst_wire) && net->wires.at(dst_wire).strength > STRENGTH_STRONG)
+    //         return ARC_SUCCESS;
+    // check_arc_routing() has already returned false for that arc one line
+    // earlier (router2.cc:1087), so the arc is KNOWN INCOMPLETE; the sink wire is
+    // nonetheless bound at STRENGTH_LOCKED (4) > STRENGTH_STRONG (2), so
+    // route_net() returns ARC_SUCCESS (enumerator 0 of ArcRouteResult,
+    // router2.cc:368-373, i.e. also `false` out of the bool route_net at :1065)
+    // and abandons the whole net.  That guard is upstream (ffd679cd3, David Shah,
+    // 2019-11-19) and is deliberately NOT touched here -- changing shared router
+    // behaviour is a different, larger change.  This is DETECTION, placed at the
+    // one point in the flow that knows the lock was partial.
+    //
+    // Predicate, measured exact on both orientations above: for every net that
+    // received a locked pip, take W = its driver's output wire.  If the net has a
+    // driver wire at all and does not own W, the lock specifies part of that
+    // net's route but omits its driver -- the router cannot reconnect it and, per
+    // the guard above, will not try.
+    //
+    // EXEMPT: the packer's const nets.  $PACKER_GND_NET / $PACKER_VCC_NET are
+    // driven by the synthetic PSEUDO_GND / PSEUDO_VCC cells the packer creates
+    // (xilinx/pack.cc:877 and :888).  Their driver wire --
+    // PSEUDO_{GND,VCC}_WIRE_GLBL -- IS bound in a fully routed build, where it
+    // shows up as the net's root triplet with an empty pip.  It is simply not
+    // bound YET at this point: the const router binds it later, and no pip in
+    // any lock file will ever bind it because no pip has it as a source.  So
+    // for these nets its absence carries NO information about whether the lock
+    // is partial, which is the only thing this check is asking.
+    //
+    // That is measured, not argued.  fixed-routes-roundtrip's replay arm locks a
+    // COMPLETE route -- 742/742 pips bound, 0 unrouted arcs, 0 lines of semantic
+    // FASM diff against the reference it replays -- and the un-exempted predicate
+    // still flagged $PACKER_VCC_NET.  On a whole route, so partiality cannot be
+    // what it saw.  On the whole-chip clock-containment arm the count is exactly
+    // 2 of 19,686 locked nets and both are these two.
+    //
+    // Keyed on the driver cell TYPE.  The RM-set snapshot at
+    // xilinx/arch.cc:3428-3436 makes the same carve-out by '$PACKER_' name
+    // substring; that is precedent for the exemption EXISTING, not for how to
+    // spell it.  A name substring also matches any user net that happens to
+    // contain the text and misses a const driver that arrives renamed, whereas
+    // the type is what pack.cc actually sets.
+    //
+    // LIMITATION, stated so the exemption cannot be read as a clean bill of
+    // health: this check now says NOTHING about whether a const net's lock is
+    // complete.  A truncated GND/VCC tree is a real failure and it is NOT
+    // covered here -- const containment is Unit 7.5's.
+    std::vector<NetInfo *> driverless_nets;
+    int with_driver = 0, const_exempt = 0;
+    for (NetInfo *net : fixed_nets) {
+        if (net->driver.cell != nullptr &&
+            (net->driver.cell->type == id_PSEUDO_GND || net->driver.cell->type == id_PSEUDO_VCC)) {
+            const_exempt++;
+            continue;
+        }
+        WireId src_wire = getCtx()->getNetinfoSourceWire(net);
+        // No driver cell, or a driver with no placement/bel pin: nothing to
+        // compare against, and not a defect in the lock file.  Such a net lands
+        // in none of the three buckets below, so if the census line's numbers do
+        // not add up to the denominator, that gap is exactly this case.
+        if (src_wire == WireId())
+            continue;
+        if (net->wires.count(src_wire)) {
+            with_driver++;
+            continue;
+        }
+        driverless_nets.push_back(net);
+    }
+    // fixed_nets is an unordered_set; sort so the census and the name list below
+    // are reproducible between runs of the same binary on the same input.
+    std::sort(driverless_nets.begin(), driverless_nets.end(),
+              [&](NetInfo *a, NetInfo *b) { return a->name.str(this) < b->name.str(this); });
+    int driverless = int(driverless_nets.size());
+    // The exempt count is REPORTED, not merely applied: an exemption that leaves
+    // no trace in the log is how a hole opens without anyone noticing it opened.
+    // Same shape as the 'partition RM set:' census at xilinx/arch.cc:3441-3443.
+    log_info("    fixed-routes: %d/%d locked nets contain their driver (%d driverless, %d const driver(s) exempt)\n",
+             with_driver, int(fixed_nets.size()), driverless, const_exempt);
+    if (driverless > 0) {
+        std::string names;
+        int shown = 0;
+        for (NetInfo *net : driverless_nets) {
+            if (shown >= 10)
+                break;
+            if (shown++ > 0)
+                names += ", ";
+            names += nameOf(net);
+        }
+        if (driverless > shown)
+            names += ", ...";
+        // Same advisory/fatal split, and for the same reason, as the not-bound
+        // check above: outside a rectangle a deliberately partial lock is an
+        // interactive experiment and this is advice.  A partition rectangle IS
+        // the DPR signal, and there a truncated net reaches a partial bitstream
+        // that loads cleanly and drives nothing -- self-consistent FASM for a
+        // design that is not the one anybody asked for.  Gated on roi_active()
+        // rather than a new env var, so no knob exists that could make this inert.
+        if (roi_active())
+            log_error("fixed-routes: %d locked net(s) do not contain their own driver (%s); the locked fragment "
+                      "omits the net's driver wire, so router2 silently truncates the net to the fragment "
+                      "(common/router2.cc:1091-1093) and the driver's output mux is lost from the FASM\n",
+                      driverless, names.c_str());
+        else
+            log_warning("fixed-routes: %d locked net(s) do not contain their own driver (%s); the locked fragment "
+                        "omits the net's driver wire, so router2 will silently truncate the net to the fragment "
+                        "(common/router2.cc:1091-1093)\n",
+                        driverless, names.c_str());
+    }
+
     if (xmux_hits > 0 || xmux_fail > 0)
         log_info("    fixed-routes: %d xMUX pseudo-pips resolved to site pips (%d unresolved)\n", xmux_hits,
                  xmux_fail);
