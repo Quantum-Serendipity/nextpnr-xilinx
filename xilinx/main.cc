@@ -104,6 +104,24 @@ void UspCommandHandler::customAfterLoad(Context *ctx)
             ctx->parseXdc(in);
         }
     }
+    // Snapshot the reconfigurable-module cell set. This has to happen here and
+    // nowhere later: customAfterLoad runs after parse_json and
+    // attributesToArchInfo (common/command.cc:305 then :308), so the static
+    // cells are bound and the RM cells are not -- and Arch::place() ends with
+    // archInfoToAttributes() (xilinx/arch.cc:901), which stamps NEXTPNR_BEL onto
+    // every bound cell and destroys the distinction permanently.
+    //
+    // Taken unconditionally, not only when a rectangle is supplied, so that the
+    // set is available to any later diagnostic and so its cost and its census
+    // line appear in every log rather than only in confined runs.
+    ctx->snapshot_rm_cells();
+    // Force the partition rectangle to load NOW rather than lazily on the first
+    // checkBelAvail. Laziness would make a malformed or impossible rectangle
+    // fatal only if something later happened to ask about a bel -- so a run
+    // that placed nothing would accept a broken rectangle silently, and a test
+    // asserting "a bad rectangle is rejected" would pass for the wrong reason.
+    // The mechanism must fail at configuration time, not at first use.
+    (void)ctx->roi_active();
 }
 
 int main(int argc, char *argv[])

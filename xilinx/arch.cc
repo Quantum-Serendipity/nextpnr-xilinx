@@ -3077,4 +3077,105 @@ void Arch::load_bel_blacklist() const
     log_info("bel blacklist: reserved %d bel(s) from %s (%d unresolved)\n", n, f, miss);
 }
 
+void Arch::load_partition_roi() const
+{
+    // Set first, so a re-entrant roi_active() from the bel walk below cannot
+    // recurse into this function. Same idiom as load_bel_blacklist above.
+    roi_loaded = true;
+    const char *f = getenv("NEXTPNR_PARTITION_ROI");
+    if (f == nullptr)
+        return;
+    std::ifstream in(f);
+    if (!in)
+        log_error("NEXTPNR_PARTITION_ROI: cannot open '%s'\n", f);
+    std::string all((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+
+    // A key scan, not a JSON parse, and deliberately so. We need exactly four
+    // integers out of a file whose schema is owned by prjxray, we must not take
+    // a JSON dependency into Arch, and -- the reason that matters -- a real
+    // parser would happily accept a well-formed object with none of these keys
+    // and leave the rectangle silently absent. Every key is mandatory and a
+    // missing one is a hard error, so this mechanism cannot be half-configured.
+    auto grab = [&](const char *key, int &dst) {
+        std::string pat = std::string("\"") + key + "\"";
+        size_t p = all.find(pat);
+        if (p == std::string::npos)
+            log_error("NEXTPNR_PARTITION_ROI: '%s' has no \"%s\" key\n", f, key);
+        p = all.find(':', p + pat.size());
+        if (p == std::string::npos)
+            log_error("NEXTPNR_PARTITION_ROI: '%s' key \"%s\" has no value\n", f, key);
+        dst = int(strtol(all.c_str() + p + 1, nullptr, 10));
+    };
+    grab("GRID_X_MIN", roi_x0);
+    grab("GRID_X_MAX", roi_x1);
+    grab("GRID_Y_MIN", roi_y0);
+    grab("GRID_Y_MAX", roi_y1);
+
+    if (roi_x0 < 0 || roi_y0 < 0 || roi_x1 < roi_x0 || roi_y1 < roi_y0)
+        log_error("NEXTPNR_PARTITION_ROI: '%s' gives an empty or inverted rectangle "
+                  "grid (%d,%d)-(%d,%d)\n",
+                  f, roi_x0, roi_y0, roi_x1, roi_y1);
+    if (roi_x1 >= chip_info->width || roi_y1 >= chip_info->height)
+        log_error("NEXTPNR_PARTITION_ROI: '%s' rectangle grid (%d,%d)-(%d,%d) does not fit the "
+                  "device grid %dx%d\n",
+                  f, roi_x0, roi_y0, roi_x1, roi_y1, int(chip_info->width), int(chip_info->height));
+
+    // Report the reservation count the way load_bel_blacklist does. A silent
+    // containment mechanism is the failure mode this programme keeps hitting --
+    // NEXTPNR_EXCLUDE_STAMPED_BBOX and NEXTPNR_FRESH_REGION_MARGIN were both
+    // inert for months and said nothing. If `outside` is 0 the rectangle covers
+    // the whole device and confines nothing, which is a configuration error
+    // rather than a successful run, so it is fatal rather than merely logged.
+    int inside = 0, outside = 0;
+    for (BelId b : getBels()) {
+        int x = b.tile % chip_info->width, y = b.tile / chip_info->width;
+        if (x < roi_x0 || x > roi_x1 || y < roi_y0 || y > roi_y1)
+            outside++;
+        else
+            inside++;
+    }
+    if (outside == 0)
+        log_error("NEXTPNR_PARTITION_ROI: '%s' rectangle grid (%d,%d)-(%d,%d) covers every bel on "
+                  "the device -- it would confine nothing\n",
+                  f, roi_x0, roi_y0, roi_x1, roi_y1);
+    log_info("partition ROI: grid (%d,%d)-(%d,%d) from %s; %d bel(s) reserved outside, %d inside\n", roi_x0, roi_y0,
+             roi_x1, roi_y1, f, outside, inside);
+}
+
+void Arch::snapshot_rm_cells()
+{
+    // Called from UspCommandHandler::customAfterLoad, i.e. after parse_json and
+    // attributesToArchInfo have run and before anything else binds a bel. At
+    // that instant -- and at no later one -- "has no bel" means "is an RM cell":
+    // the import binds exactly the cells carrying NEXTPNR_BEL, and the next
+    // thing to bind anything is the placer.
+    //
+    // attrs["BEL"] is also tested because a cell carrying the LEGACY BEL
+    // attribute is bel-less here and is bound later by HeAP's place_constraints
+    // (common/placer_heap.cc:398-410). Such a cell is stamped, not RM, and
+    // classifying it RM would confine a cell the user pinned deliberately.
+    rm_snapshot_taken = true;
+    int n = 0, packer = 0;
+    for (auto &cp : cells) {
+        CellInfo *ci = cp.second.get();
+        if (ci->bel != BelId() || ci->attrs.count(id("BEL")))
+            continue;
+        // Packer const drivers ($PACKER_GND_DRV / $PACKER_VCC_DRV, created at
+        // xilinx/pack.cc:876 and :887) and the frontend's own constant drivers
+        // arrive bel-less like RM logic but belong to neither side: they are
+        // legalisation helpers that must be placeable next to their loads,
+        // including inside the locked static region. The same carve-out is made
+        // by NEXTPNR_EXCLUDE_STAMPED_BBOX at xilinx/arch_place.cc:1088.
+        if (ci->name.str(this).find("$PACKER_") != std::string::npos) {
+            packer++;
+            continue;
+        }
+        rm_cells.insert(ci->name);
+        n++;
+    }
+    log_info("partition RM set: %d reconfigurable cell(s) snapshotted at import (%d packer const "
+             "driver(s) exempt, %d cell(s) total)\n",
+             n, packer, int(cells.size()));
+}
+
 NEXTPNR_NAMESPACE_END

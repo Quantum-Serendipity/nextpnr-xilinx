@@ -963,6 +963,33 @@ void Arch::dumpTileStatus(BelId bel) const
 
 bool Arch::isBelLocationValid(BelId bel) const
 {
+    // Partition ROI, enforcement point 3 of 3: the post-bind catch.
+    //
+    // This MUST be here, above the isLogicTile dispatch, and not folded into
+    // usp_bel_hard_unavail. The only usp_bel_hard_unavail sweep in this function
+    // is in the terminal else-branch below, which a CLB/CLBLM bel never reaches
+    // -- so on exactly the tile class an RM occupies, this function is blind to
+    // the hard-unavail mechanism.
+    //
+    // Two live paths bind a bel that checkBelAvail already refused and rely on
+    // this check to undo it:
+    //   * HeAP's legaliser ORs checkBelAvail with a ripup escape --
+    //     common/placer_heap.cc:1027, `checkBelAvail(sz) || (radius >
+    //     ripup_radius || rng(20000) < 10)` -- then validates at :1036.
+    //   * placer1's SA move path never calls checkBelAvail at all: its
+    //     fast_bels is built unfiltered (common/placer1.cc:88-104) and
+    //     random_bel_for_cell gates only on region/bel_excluded/locked_bels.
+    //     try_swap_position binds at :619 and validates here at :634. This is
+    //     not a --placer sa curiosity: HeAP runs it by default via
+    //     placer1_refine (common/placer_heap.cc:316).
+    //
+    // Cell-aware via the bound cell, because a static cell legitimately sits
+    // outside the rectangle and must stay valid there.
+    if (roi_active() && bel_outside_roi(bel)) {
+        CellInfo *bc = getBoundBelCell(bel);
+        if (bc != nullptr && is_rm_cell(bc))
+            return false;
+    }
     IdString belTileType = getBelTileType(bel);
     if (isLogicTile(bel)) {
         // Logic Tile
@@ -1011,6 +1038,19 @@ bool Arch::isBelLocationValid(BelId bel) const
 bool Arch::isValidBelForCell(CellInfo *cell, BelId bel) const
 {
     if (usp_bel_hard_unavail(bel))
+        return false;
+    // Partition ROI, enforcement point 2 of 3: the per-cell gate.
+    //
+    // Cell-AWARE, unlike checkBelAvail, and that asymmetry is load-bearing. A
+    // static cell sits at whatever bel the import bound it to, which is
+    // legitimately outside the rectangle. If this test were bel-only, every
+    // static cell would become invalid at its own bel, fixupPlacement would
+    // classify the entire locked design as stranded at arch_place.cc:1176 --
+    // it does NOT skip them, because its `attrs.count(id("BEL"))` guard is
+    // itself inert on a round-tripped netlist -- and the repair loop would try
+    // to relocate the static region. The rectangle would destroy the thing it
+    // exists to protect.
+    if (roi_active() && is_rm_cell(cell) && bel_outside_roi(bel))
         return false;
     // A distributed-RAM / SRL LUT (is_memory / is_srl) is only legal in a
     // SLICEM.  Like the 6LUT-on-5LUT gate below, this MUST be enforced at
