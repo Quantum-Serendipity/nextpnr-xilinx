@@ -906,6 +906,19 @@ bool Arch::place()
         log_info("partition ROI: %lld bel-avail veto(s) [point 1], %lld cell-gate veto(s) [point 2], "
                  "%lld post-bind veto(s) [point 3]\n",
                  (long long)roi_veto_avail, (long long)roi_veto_cell, (long long)roi_veto_loc);
+    // Invariant P, checked here and not at the head of Arch::route().  This is
+    // the last point at which the placement is final -- fixupPlacement above
+    // both relocates cells and rewires LUT input ports, so net->users is not
+    // settled before it -- and the first at which nothing has been routed.  It
+    // is also before archInfoToAttributes() below, which stamps NEXTPNR_BEL
+    // onto every bound cell and thereby destroys the static/RM distinction for
+    // any subsequent round trip.
+    //
+    // The head of Arch::route() would have been the obvious site and is the
+    // wrong one: the placement-containment evidence script runs nextpnr with
+    // --no-route, so a gate there would be skipped by the very flow that exists
+    // to prove the rectangle works.
+    check_partition_nets();
     getCtx()->attrs[getCtx()->id("step")] = std::string("place");
     archInfoToAttributes();
     return true;
@@ -3185,6 +3198,176 @@ void Arch::snapshot_rm_cells()
     log_info("partition RM set: %d reconfigurable cell(s) snapshotted at import (%d packer const "
              "driver(s) exempt, %d cell(s) total)\n",
              n, packer, int(cells.size()));
+}
+
+void Arch::load_exempt_nets() const
+{
+    exempt_nets_loaded = true;
+    const char *f = getenv("NEXTPNR_PARTITION_EXEMPT_NETS");
+    if (f == nullptr)
+        return;
+    std::ifstream in(f);
+    if (!in)
+        log_error("NEXTPNR_PARTITION_EXEMPT_NETS: cannot open '%s'\n", f);
+    std::string ln;
+    int n = 0, miss = 0;
+    while (std::getline(in, ln)) {
+        while (!ln.empty() && (ln.back() == '\r' || ln.back() == ' ' || ln.back() == '\t'))
+            ln.pop_back();
+        if (ln.empty() || ln[0] == '#')
+            continue;
+        IdString nn = id(ln);
+        // An entry matching no net is reported, not silently dropped. It fails
+        // CLOSED -- the net it was meant to exempt keeps being checked -- but a
+        // typo'd exemption and a correct one are otherwise indistinguishable,
+        // and "the exemption list I thought I applied" is precisely the kind of
+        // belief this gate exists to stop anyone holding unverified.
+        if (!nets.count(nn)) {
+            log_warning("NEXTPNR_PARTITION_EXEMPT_NETS: '%s' names net '%s', which does not exist in this "
+                        "design\n",
+                        f, ln.c_str());
+            miss++;
+            continue;
+        }
+        exempt_nets.insert(nn);
+        n++;
+    }
+    log_info("partition net exemptions: %d net(s) exempt from invariant P, from %s (%d unresolved)\n", n, f, miss);
+}
+
+void Arch::check_partition_nets() const
+{
+    if (!roi_active())
+        return;
+    if (!exempt_nets_loaded)
+        load_exempt_nets();
+
+    // The RM set is a snapshot of cell NAMES taken at import, and is_rm_cell()
+    // is a name lookup, so it fails OPEN: a miss is indistinguishable from
+    // "this cell is static". Arch::pack() invalidates the set wholesale --
+    // flush_cells() erases originals and installs freshly-named replacements
+    // (feed-through LUTs "$LUT$N", MUXFs "$MUX$N", split LUT6_2 halves, carry
+    // splits "$split$xorcy"/"$split$muxcy", DRAM/DSP sub-cells), none of which
+    // are in the snapshot. Under a stale set this gate would examine a
+    // shrinking subset of the RM logic and report zero violations on a design
+    // that crosses the boundary freely -- a clean pass that means nothing.
+    //
+    // The DPR flow passes --no-pack so the pairing holds, but NOTHING in the
+    // code enforced it: the whole failure was one missing CLI flag away. Two
+    // independent checks, because they catch different halves. The flag is
+    // definitive for "pack ran"; the dangling-name scan also catches any future
+    // path that erases or renames a cell between import and placement.
+    if (packed_since_rm_snapshot)
+        log_error("partition net gate: Arch::pack() ran after the RM cell set was snapshotted, so the set is "
+                  "stale and every packer-created cell would be misclassified as static. Re-run with "
+                  "--no-pack, which is what the DPR flow uses.\n");
+    int stale = 0;
+    for (IdString rn : sorted(rm_cells))
+        if (!cells.count(rn)) {
+            if (stale < 8)
+                log_warning("partition net gate: snapshotted RM cell '%s' no longer exists\n", rn.c_str(this));
+            stale++;
+        }
+    if (stale > 0)
+        log_error("partition net gate: %d snapshotted RM cell(s) no longer exist, so the RM set is stale and "
+                  "is_rm_cell() would silently misclassify replacements as static\n",
+                  stale);
+
+    const IdString gnd_net = id("$PACKER_GND_NET"), vcc_net = id("$PACKER_VCC_NET");
+    const char *mode = getenv("NEXTPNR_PARTITION_NETS");
+    const bool fatal = (mode == nullptr) || std::string(mode) != "warn";
+
+    int rm_nets = 0, excl_const = 0, excl_listed = 0;
+    int bad_nets = 0, bad_outside = 0, bad_unplaced = 0, reported = 0;
+    const int report_cap = 20;
+
+    for (auto np : sorted(nets)) {
+        NetInfo *net = np.second;
+
+        // An endpoint list, driver first. driver.cell is null on an undriven
+        // net; users are assumed non-null tree-wide (Context::check does the
+        // same). A net is in scope iff ANY endpoint sits on an RM cell -- the
+        // whole point is to catch the net with one RM end and one static end.
+        std::vector<const PortRef *> eps;
+        if (net->driver.cell != nullptr)
+            eps.push_back(&net->driver);
+        for (auto &u : net->users)
+            eps.push_back(&u);
+
+        bool touches_rm = false;
+        for (const PortRef *pr : eps)
+            if (is_rm_cell(pr->cell)) {
+                touches_rm = true;
+                break;
+            }
+        if (!touches_rm)
+            continue;
+        rm_nets++;
+
+        if (net->name == gnd_net || net->name == vcc_net) {
+            excl_const++;
+            continue;
+        }
+        if (exempt_nets.count(net->name)) {
+            excl_listed++;
+            continue;
+        }
+
+        int outside = 0, unplaced = 0;
+        for (const PortRef *pr : eps) {
+            CellInfo *c = pr->cell;
+            // bel_outside_roi() answers false for BelId(), i.e. an UNPLACED
+            // cell reads as "inside". That is right for its three enforcement
+            // callers -- you cannot veto a bind that has not happened -- and
+            // exactly backwards here, where it would let an unplaced RM
+            // endpoint satisfy P silently. fixupPlacement's give-up path can
+            // leave a stranded cluster unbound with only a log_warning, so this
+            // state is reachable at precisely the moment this gate runs. Test
+            // the sentinel first, and report it as its own class.
+            const bool is_unplaced = (c->bel == BelId());
+            const bool is_outside = !is_unplaced && bel_outside_roi(c->bel);
+            if (!is_unplaced && !is_outside)
+                continue;
+            if (is_unplaced)
+                unplaced++;
+            else
+                outside++;
+            if (reported < report_cap)
+                log_warning("partition net gate: net '%s' endpoint %s.%s (%s cell) is %s -- the net crosses the "
+                            "partition boundary\n",
+                            net->name.c_str(this), c->name.c_str(this), pr->port.c_str(this),
+                            is_rm_cell(c) ? "RM" : "static",
+                            is_unplaced ? "UNPLACED" : (std::string("outside the rectangle, at bel ") +
+                                                        nameOfBel(c->bel))
+                                                               .c_str());
+            reported++;
+        }
+        if (outside > 0 || unplaced > 0) {
+            bad_nets++;
+            bad_outside += outside;
+            bad_unplaced += unplaced;
+        }
+    }
+    if (reported > report_cap)
+        log_warning("partition net gate: %d further violating endpoint(s) not listed\n", reported - report_cap);
+
+    // Emit the census UNCONDITIONALLY whenever the rectangle is active, pass or
+    // fail, and state which mode it ran in. A gate that says nothing when it
+    // passes is indistinguishable from a gate that did not run, and this
+    // programme has shipped four such mechanisms already. The acceptance script
+    // requires this line's presence, not merely the absence of an error.
+    log_info("partition net gate [%s]: %d net(s) touch RM logic, %d crossing (%d endpoint(s) outside, %d "
+             "unplaced), %d const-exempt, %d list-exempt\n",
+             fatal ? "fatal" : "warn", rm_nets, bad_nets, bad_outside, bad_unplaced, excl_const, excl_listed);
+
+    if (bad_nets > 0 && fatal)
+        log_error("partition net gate: invariant P is violated by %d net(s) (listed above). Every net with an RM "
+                  "endpoint must have all endpoints inside the partition rectangle. The repair is upstream -- "
+                  "add partition pins so each boundary signal is split at an anchor LUT inside the region. Do "
+                  "NOT exempt these nets to make this pass; an exemption is a hole in the containment that "
+                  "pr_verify cannot see. Set NEXTPNR_PARTITION_NETS=warn to downgrade this to a report while "
+                  "the anchoring is being applied.\n",
+                  bad_nets);
 }
 
 NEXTPNR_NAMESPACE_END

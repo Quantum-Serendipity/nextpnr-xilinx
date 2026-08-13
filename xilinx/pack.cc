@@ -1343,6 +1343,10 @@ void XilinxPacker::pack_inverters()
 
 bool Arch::pack()
 {
+    // Recorded, not inferred. ctx->attrs["step"] would be ambiguous here: a
+    // round-tripped netlist carries step=pack from the run that produced it, so
+    // reading it back cannot distinguish "packed earlier" from "packing now".
+    packed_since_rm_snapshot = true;
     if (xc7) {
         XC7Packer packer;
         packer.ctx = getCtx();

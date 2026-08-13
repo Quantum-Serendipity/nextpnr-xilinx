@@ -972,10 +972,75 @@ struct Arch : BaseCtx
     bool rm_snapshot_taken = false;
     void snapshot_rm_cells();
 
+    // Set by Arch::pack(). The RM set is snapshotted at customAfterLoad, which
+    // runs BEFORE the pack step, so any run that packs invalidates it: every
+    // cell the packer creates carries a name the snapshot never saw, and
+    // is_rm_cell() fails open on a miss. The DPR flow passes --no-pack, but
+    // that pairing was unenforced -- one missing CLI flag from a rectangle that
+    // confines a shrinking subset of the RM logic while still reporting
+    // non-zero vetoes. check_partition_nets() refuses to run under a stale set.
+    bool packed_since_rm_snapshot = false;
+
     bool is_rm_cell(const CellInfo *ci) const
     {
         return rm_snapshot_taken && ci != nullptr && rm_cells.count(ci->name);
     }
+
+    // NEXTPNR_PARTITION_EXEMPT_NETS=<file>: one net name per line (blank lines
+    // and '#' comments ignored), exempt from invariant P below.
+    //
+    // This file exists because of a gap the source cannot close for us.  P
+    // excludes the global clock spine, and this architecture has NO usable
+    // predicate for "is a global clock net":
+    //
+    //   - NetInfo::is_global (xilinx/archdefs.h) is declared and NEVER WRITTEN
+    //     on this arch.  Every write in the tree is ecp5/pack.cc or
+    //     ice40/arch.cc; every xilinx read would see a permanent false.  It
+    //     compiles, it reads naturally, and it would exempt nothing -- exactly
+    //     the shape of silently-inert mechanism this programme keeps shipping.
+    //   - routeClock()'s `is_global` (xilinx/arch.cc) is a function-LOCAL bool
+    //     re-derived from driver/user cell TYPES, shadowing the dead member. It
+    //     is not stored, not exported, and not a name test.
+    //   - getBelGlobalBuf() is a bel-TYPE test that also matches PSEUDO_GND and
+    //     PSEUDO_VCC, so it conflates clocks with the const drivers.
+    //
+    // A type-based exemption would also widen silently the moment a design uses
+    // a buffer type not on the list.  So the exemption is an explicit list of
+    // NAMES, supplied per design, counted and logged on every run -- unresolved
+    // entries included, because a typo'd exemption that matches no net is
+    // indistinguishable from a correct one unless it is reported.
+    mutable std::unordered_set<IdString> exempt_nets;
+    mutable bool exempt_nets_loaded = false;
+    void load_exempt_nets() const;
+
+    // Invariant P, asserted at the end of Arch::place().
+    //
+    //   Every signal net with at least one endpoint on an RM cell has ALL of
+    //   its endpoints on cells placed INSIDE the partition rectangle.
+    //
+    // Equivalently: no signal net crosses the partition boundary.  Each
+    // boundary signal is split by an anchor LUT sited inside the rectangle into
+    // a static-side net and an RM-side net.  P is a property of the NETLIST,
+    // not of the router, so a violation is repaired upstream by adding
+    // partition pins -- never by exempting the net here.
+    //
+    // Why the routing clamp needs this first: a net's router2 bounding box is
+    // the union over its arcs, so a net that legitimately crosses already has a
+    // box spanning both sides.  Intersecting that box with the rectangle leaves
+    // exactly two options and both are failures -- clamp it and a legal design
+    // cannot route (with the error naming a pip, pointing at the router when
+    // the defect is in the anchoring), or exempt it and the exemption is a
+    // per-net hole that pr_verify cannot see because it is intentional.
+    //
+    // $PACKER_GND_NET and $PACKER_VCC_NET are excluded by exact name equality,
+    // never by the find("$PACKER_") substring test snapshot_rm_cells uses on
+    // cell names -- a catch-all is how an exemption becomes a hole.  They
+    // cannot satisfy P by construction: usp_bel_hard_unavail above pins every
+    // PSEUDO_GND/PSEUDO_VCC bel to grid x=0, so unless the rectangle includes
+    // column 0 the const drivers are outside it always.  Containing them is
+    // Unit 7.5's problem and is a change to route_xilinx_const's
+    // "always succeeds" contract, not a bounding-box question.
+    void check_partition_nets() const;
 
     bool checkBelAvail(BelId bel) const
     {
