@@ -40,14 +40,82 @@ struct FasmBackend
 
     FasmBackend(Context *ctx, std::ostream &out) : ctx(ctx), out(out){};
 
-    void push(const std::string &x) { fasm_ctx.push_back(x); }
+    // ---------------------------------------------------------------------
+    // Region-filtered emission (--region-only).
+    //
+    // Restricts the FASM to the NEXTPNR_PARTITION_ROI rectangle, which is what
+    // makes the output a PARTIAL bitstream source rather than a whole-device
+    // one.  The filter is purely SPATIAL and deliberately owner-blind: a
+    // configuration frame is rewritten wholesale, so every feature in a frame
+    // this partition owns must appear, including static features that happen
+    // to sit in the same tiles.  Filtering by owner instead would drop static
+    // routing that crosses the region and erase it at reconfiguration time.
+    //
+    // Two filter points, not one.  The plan for this unit assumed a single
+    // hook at write_prefix() covered all emission; it does not.  write_pip()
+    // composes its lines directly (three sites) and runs with an EMPTY prefix
+    // stack, so a write_prefix() hook could not have filtered routing PIPs
+    // even in principle -- and routing PIPs are the largest line class in a
+    // real FASM file.  See docs/region-emission.md.
+    //
+    // cur_tile is the tile index owning the current prefix context.  It is an
+    // INDEX, never a name: tile-name X/Y is a different coordinate system from
+    // prjxray grid space (INT_L_X32Y100 is grid (81,103)), and deriving a
+    // location from a name is how this programme last got a containment result
+    // wrong.  index -> getTileLocation() is exact.
+    bool region_filter = false;
+    int rx0 = -1, ry0 = -1, rx1 = -1, ry1 = -1;
+    int cur_tile = -1;
+    int64_t lines_kept = 0, lines_dropped = 0, pips_kept = 0, pips_dropped = 0;
+    // Governed (RM-touching) nets whose pips were dropped as out-of-region.
+    // This must be empty: an RM pip outside the rectangle is a containment
+    // failure, and this is the LAST point on the path that can still see it.
+    std::set<std::string> rm_outside;
+    std::unordered_set<IdString> governed;
 
-    void pop() { fasm_ctx.pop_back(); }
+    bool tile_in_region(int tile) const
+    {
+        Loc l = ctx->getTileLocation(tile);
+        return l.x >= rx0 && l.x <= rx1 && l.y >= ry0 && l.y <= ry1;
+    }
+
+    // False => suppress this line.  Fails CLOSED on a missing tile context:
+    // an untagged emission is a bug, not a licence to emit.
+    bool emit_allowed()
+    {
+        if (!region_filter)
+            return true;
+        NPNR_ASSERT(cur_tile >= 0);
+        if (tile_in_region(cur_tile)) {
+            lines_kept++;
+            return true;
+        }
+        lines_dropped++;
+        return false;
+    }
+
+    // Depth-0 pushes must declare their tile (cur_tile is cleared whenever the
+    // stack empties, so a new prefix context cannot inherit a stale one).  A
+    // push site added later without a cur_tile assignment trips this instead of
+    // silently attributing its lines to the previous tile.
+    void push(const std::string &x)
+    {
+        if (fasm_ctx.empty())
+            NPNR_ASSERT(cur_tile >= 0);
+        fasm_ctx.push_back(x);
+    }
+
+    void pop()
+    {
+        fasm_ctx.pop_back();
+        if (fasm_ctx.empty())
+            cur_tile = -1;
+    }
 
     void pop(int N)
     {
         for (int i = 0; i < N; i++)
-            fasm_ctx.pop_back();
+            pop();
     }
     bool last_was_blank = true;
     void blank()
@@ -67,6 +135,8 @@ struct FasmBackend
     void write_bit(const std::string &name, bool value = true)
     {
         if (value) {
+            if (!emit_allowed())
+                return;
             write_prefix();
             out << name << std::endl;
         }
@@ -74,6 +144,8 @@ struct FasmBackend
 
     void write_vector(const std::string &name, const std::vector<bool> &value, bool invert = false, bool reverse = true)
     {
+        if (!emit_allowed())
+            return;
         write_prefix();
         out << name << " = " << int(value.size()) << "'b";
         if (reverse) {
@@ -350,6 +422,11 @@ struct FasmBackend
 
     void write_pip(PipId pip, NetInfo *net)
     {
+        // Bookkeeping first, deliberately unfiltered: used_wires_starting_with()
+        // derives features from this map, and those features are themselves
+        // emitted through the prefix path where they get filtered on their own
+        // tile.  Filtering the map instead would change what gets DERIVED, not
+        // just what gets written.
         pips_by_tile[pip.tile].push_back(pip);
 
         auto dst_intent = ctx->wireIntent(ctx->getPipDstWire(pip));
@@ -359,6 +436,36 @@ struct FasmBackend
         auto &pd = ctx->locInfo(pip).pip_data[pip.index];
         if (pd.flags != PIP_TILE_ROUTING)
             return;
+
+        // Filter point 2 of 2.  All three emission sites below print
+        // get_tile_name(pip.tile), so one test on pip.tile covers them.
+        //
+        // Placed AFTER the early returns above, deliberately: before them it
+        // also counts pips that emit nothing anyway (pseudo-GND/VCC, non-
+        // tile-routing), which inflates the census into a number that is
+        // neither a pip count anyone cares about nor a line count.  Here,
+        // "dropped" means "reached emission and was suppressed".
+        //
+        // It is still a PIP count, not a LINE count: the pseudo-pip branch
+        // expands one pip into several features, and the IOI OCLK branch emits
+        // two lines for one pip.  Nothing here can know how many lines a
+        // suppressed pip would have produced, so the census does not pretend
+        // to.  The line-exact claim is the gate's, which diffs this output
+        // against scripts/roi-filter-fasm.py -- an independent implementation
+        // that resolves tiles through tilegrid.json by name rather than
+        // through the chipdb by index.
+        if (region_filter && !tile_in_region(pip.tile)) {
+            pips_dropped++;
+            // Last-line backstop, and narrower than it looks: this sees only
+            // pips that would have been EMITTED.  Whole-net containment is
+            // Arch::check_partition_routes()' job, which walks every bound pip
+            // with no early returns at all.
+            if (net != nullptr && governed.count(net->name))
+                rm_outside.insert(net->name.str(ctx));
+            return;
+        }
+        if (region_filter)
+            pips_kept++;
 
         IdString src = IdString(ctx->locInfo(pip).wire_data[pd.src_index].name);
         IdString dst = IdString(ctx->locInfo(pip).wire_data[pd.dst_index].name);
@@ -678,6 +785,8 @@ struct FasmBackend
                         continue;
                 }
 
+                if (!emit_allowed())
+                    continue; // loop over uphill pips -- not a function exit
                 write_prefix();
                 out << belname;
                 if (!skip_pinname)
@@ -720,6 +829,7 @@ struct FasmBackend
         if (lts == nullptr)
             return;
 
+        cur_tile = tile;
         push(tname);
         push(get_half_name(half, boost::contains(tname, "CLBLM")));
 
@@ -861,6 +971,7 @@ struct FasmBackend
         if (lts == nullptr)
             return;
 
+        cur_tile = tile;
         push(tname);
         push(get_half_name(half, is_mtile));
 
@@ -960,6 +1071,7 @@ struct FasmBackend
         if (carry == nullptr)
             return;
 
+        cur_tile = tile;
         push(tname);
         push(get_half_name(half, is_mtile));
 
@@ -1112,6 +1224,7 @@ struct FasmBackend
         std::string tile = get_tile_name(pad->bel.tile);
         if (boost::starts_with(tile, "GTP_") || boost::starts_with(tile, "GTX_"))
             return;
+        cur_tile = pad->bel.tile;
         push(tile);
 
         bool is_riob18   = boost::starts_with(tile, "RIOB18_");
@@ -1513,6 +1626,7 @@ struct FasmBackend
     void write_iol_config(CellInfo *ci)
     {
         std::string tile = get_tile_name(ci->bel.tile);
+        cur_tile = ci->bel.tile;
         push(tile);
         bool is_sing     = boost::contains(tile, "_SING_");
         bool is_top_sing = ci->bel.tile < ctx->getHclkForIoi(ci->bel.tile);
@@ -1713,6 +1827,7 @@ struct FasmBackend
             }
         }
         for (auto &hclk : ioconfig_by_hclk) {
+            cur_tile = hclk.first;
             push(get_tile_name(hclk.first));
             write_bit("STEPDOWN", hclk.second.stepdown);
             write_bit("VREF.V_675_MV", hclk.second.vref);
@@ -1759,6 +1874,7 @@ struct FasmBackend
                 const IobTile &io = kv.second;
                 const char *want = io.is_left ? "INT_L" : "INT_R";
                 // Search ±2 rows for an INT tile of the right type.
+                int chosen_tile = -1;
                 std::string chosen;
                 for (int dy = 0; dy <= 2 && chosen.empty(); dy++) {
                     for (int sgn : {+1, -1}) {
@@ -1772,6 +1888,7 @@ struct FasmBackend
                             int tile = gy * chip_w + gx;
                             if (tile < 0 || tile >= int(tt.size())) continue;
                             if (std::get<1>(tt[tile]) != want) continue;
+                            chosen_tile = tile;
                             chosen = std::get<0>(tt[tile]);
                             break;
                         }
@@ -1780,6 +1897,7 @@ struct FasmBackend
                 }
                 if (chosen.empty() || emitted.count(chosen)) continue;
                 emitted.insert(chosen);
+                cur_tile = chosen_tile;
                 push(chosen);
                 write_bit("IOB_COL_BANK_ACTIVE");
                 write_bit("IOB_COL_OBUF_CASCADE_Y1");
@@ -1817,6 +1935,7 @@ struct FasmBackend
             if (!boost::starts_with(tile_name, "CFG_CENTER_"))
                 continue;
 
+            cur_tile = ci->bel.tile;
             push(tile_name);
             if (ci->type == id_BSCAN) {
                 push("BSCAN");
@@ -1885,6 +2004,7 @@ struct FasmBackend
         for (auto cell : sorted(ctx->cells)) {
             CellInfo *ci = cell.second;
             if (ci->type == id_BUFGCTRL) {
+                cur_tile = ci->bel.tile;
                 push(get_tile_name(ci->bel.tile));
                 auto xy = ctx->getSiteLocInTile(ci->bel);
                 bufgctrl_used_y[ci->bel.tile].insert(xy.y);
@@ -1899,6 +2019,7 @@ struct FasmBackend
                 write_bit("ZINV_S1", !bool_or_default(ci->params, ctx->id("IS_S1_INVERTED")));
                 pop(2);
             } else if (ci->type == id_BUFHCE) {
+                cur_tile = ci->bel.tile;
                 push(get_tile_name(ci->bel.tile));
                 auto xy = ctx->getSiteLocInTile(ci->bel);
                 push("BUFHCE.BUFHCE_X" + std::to_string(xy.x) + "Y" + std::to_string(xy.y));
@@ -1974,6 +2095,7 @@ struct FasmBackend
 
         for (int tile = 0; tile < int(tt.size()); tile++) {
             std::tie(name, type) = tt.at(tile);
+            cur_tile = tile;
             push(name);
             if (type == "HCLK_L" || type == "HCLK_R" || type == "HCLK_L_BOT_UTURN" || type == "HCLK_R_BOT_UTURN") {
                 auto used_sources = used_wires_starting_with(tile, "HCLK_CK_", true);
@@ -2024,6 +2146,7 @@ struct FasmBackend
 
         for (int tile = 0; tile < int(tt.size()); tile++) {
             std::tie(name, type) = tt.at(tile);
+            cur_tile = tile;
             push(name);
             if (type == "CLK_BUFG_REBUF") {
                 for (auto &gclk : all_gclk) {
@@ -2129,6 +2252,7 @@ struct FasmBackend
 
     void write_bram_half(int tile, int half, CellInfo *ci)
     {
+        cur_tile = tile;
         push(get_tile_name(tile));
         push("RAMB18_Y" + std::to_string(half));
         if (ci != nullptr) {
@@ -2303,6 +2427,7 @@ struct FasmBackend
 
     void write_pll(CellInfo *ci)
     {
+        cur_tile = ci->bel.tile;
         push(get_tile_name(ci->bel.tile));
         push("PLLE2_ADV");
         write_bit("IN_USE");
@@ -2446,6 +2571,7 @@ struct FasmBackend
 
     void write_mmcm(CellInfo *ci)
     {
+        cur_tile = ci->bel.tile;
         push(get_tile_name(ci->bel.tile));
         push("MMCME2_ADV");
         write_bit("IN_USE");
@@ -2872,6 +2998,7 @@ struct FasmBackend
 
     void write_ibufds_gte2(CellInfo * ci)
     {
+        cur_tile = ci->bel.tile;
         push(get_tile_name(ci->bel.tile));
         Loc siteLoc = ctx->getSiteLocInTile(ci->bel);
         push("IBUFDS_GTE2_Y" + std::to_string(siteLoc.y));
@@ -2889,6 +3016,7 @@ struct FasmBackend
 
     void write_gtp_pll(CellInfo *ci)
     {
+        cur_tile = ci->bel.tile;
         push(get_tile_name(ci->bel.tile));
 
         push("GTPE2_COMMON");
@@ -2967,6 +3095,7 @@ struct FasmBackend
 
     void write_gtp_channel(CellInfo *ci)
     {
+        cur_tile = ci->bel.tile;
         push(get_tile_name(ci->bel.tile));
         push("GTPE2_CHANNEL");
 
@@ -3544,6 +3673,7 @@ struct FasmBackend
 
     void write_pcie_2_1(CellInfo *ci)
     {
+        cur_tile = ci->bel.tile;
         push(get_tile_name(ci->bel.tile));
         push("PCIE");
 
@@ -4186,6 +4316,7 @@ struct FasmBackend
 
     void write_gtx_pll(CellInfo *ci)
     {
+        cur_tile = ci->bel.tile;
         push(get_tile_name(ci->bel.tile));
 
         push("GTXE2_COMMON");
@@ -4260,6 +4391,7 @@ struct FasmBackend
 
 void write_gtx_channel(CellInfo *ci)
     {
+        cur_tile = ci->bel.tile;
         push(get_tile_name(ci->bel.tile));
         push("GTXE2_CHANNEL");
 
@@ -4808,6 +4940,7 @@ void write_gtx_channel(CellInfo *ci)
     {
         auto tile_name = get_tile_name(ci->bel.tile);
         auto tile_side = tile_name.at(4);
+        cur_tile = ci->bel.tile;
         push(tile_name);
         push("DSP48");
         auto xy = ctx->getSiteLocInTile(ci->bel);
@@ -4976,18 +5109,63 @@ void write_gtx_channel(CellInfo *ci)
         write_bram();
         write_clocking();
         write_ip();
+        report_region_filter();
+    }
+
+    void report_region_filter()
+    {
+        if (!region_filter)
+            return;
+        // Unconditional census, pass or fail, for the same reason as every
+        // other gate in this tree: a filter that is silent on success cannot
+        // be told apart from a filter that never ran.  These numbers are the
+        // evidence that emission was actually scoped, and "0 dropped" is a
+        // RESULT -- on a whole-device design it means the filter is inert.
+        // Units differ between the two halves and are named so: the prefix path
+        // is one call per LINE, the pip path is one call per PIP and a pip can
+        // expand to several lines.  Adding them would produce a number that is
+        // not a count of anything.
+        log_info("    region emission: kept %lld feature line(s) + %lld routing pip(s), dropped %lld line(s) + %lld "
+                 "pip(s), rectangle (%d,%d)-(%d,%d)\n",
+                 (long long)lines_kept, (long long)pips_kept, (long long)lines_dropped, (long long)pips_dropped,
+                 rx0, ry0, rx1, ry1);
+        if (!rm_outside.empty()) {
+            // The emission point is the last place on the path that can see
+            // this.  Arch::check_partition_routes() audits what router2 bound,
+            // but pips reach the bitstream from ten binding paths and only one
+            // of them is router2's search; anything bound after that gate, or
+            // laundered through an import, arrives here unexamined.
+            for (auto &n : rm_outside)
+                log_warning("    region emission: governed net '%s' has routing outside the rectangle\n", n.c_str());
+            log_error("region emission: %zu governed net(s) route outside the partition rectangle; the partial "
+                      "bitstream would be incomplete\n",
+                      rm_outside.size());
+        }
     }
 };
 
 } // namespace
 
-void Arch::writeFasm(const std::string &filename)
+void Arch::writeFasm(const std::string &filename, bool region_only)
 {
     std::ofstream out(filename);
     if (!out)
         log_error("failed to open file %s for writing (%s)\n", filename.c_str(), strerror(errno));
 
     FasmBackend be(getCtx(), out);
+    if (region_only) {
+        // One rectangle from one source.  --region-only carries no coordinates
+        // of its own precisely so that emission cannot drift away from the
+        // rectangle placement and routing were held to.
+        if (!roi_active())
+            log_error("--region-only needs a partition rectangle; set NEXTPNR_PARTITION_ROI\n");
+        be.region_filter = true;
+        be.rx0 = roi_x0;
+        be.ry0 = roi_y0;
+        be.rx1 = roi_x1;
+        be.ry1 = roi_y1;
+        be.governed = partition_nets();
+    }
     be.write_fasm();
 }
 

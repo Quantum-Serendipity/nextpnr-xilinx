@@ -1896,7 +1896,8 @@ struct Arch : BaseCtx
     void routeVcc();
     void routeClock();
     void applyFixedRoutes(const std::string &filename);
-    void writeFixedRoutes(const std::string &filename) const;
+    // region_only restricts the dump to the NEXTPNR_PARTITION_ROI rectangle.
+    void writeFixedRoutes(const std::string &filename, bool region_only = false) const;
     bool gtClockTemplateRoute(NetInfo *clk_net, PortRef &usr);
     void findSourceSinkLocations();
     std::unordered_map<WireId, Loc> sink_locs, source_locs;
@@ -1937,7 +1938,9 @@ struct Arch : BaseCtx
         return chip_info->tile_types[chip_info->tile_insts[id.tile].type];
     }
     // -------------------------------------------------
-    void writeFasm(const std::string &filename);
+    // region_only restricts emission to the NEXTPNR_PARTITION_ROI rectangle,
+    // which is what makes the output a partial bitstream source.
+    void writeFasm(const std::string &filename, bool region_only = false);
 };
 
 NEXTPNR_NAMESPACE_END

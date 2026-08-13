@@ -1716,6 +1716,28 @@ void Arch::applyFixedRoutes(const std::string &filename)
     log_info("    fixed-routes: bound %d/%d pips (net-miss %d, tile-miss %d, pip-miss %d, conflict %d, malformed %d, "
              "redundant-driver %d)\n",
              nbound, nlines, miss_net, miss_tile, miss_pip, conflict, malformed, redundant);
+    // In an interactive run these are advisory: you read the warnings and
+    // decide.  In a DPR build they are not.  Every one of the five paths below
+    // ends in `continue`, so a non-zero count means pips named in the static
+    // lock were NOT bound -- and the partial bitstream that follows is built
+    // against a static design that is not the one on the board.  Nothing
+    // downstream can detect that, because the FASM is self-consistent; it is
+    // simply consistent with the wrong static.
+    //
+    // redundant-driver is deliberately EXCLUDED.  It counts a second driver
+    // skipped because routeClock() already drove that wire, which a
+    // whole-design import legitimately offers (the clock nets come through as
+    // TYPE == SIGNAL).  It is an expected non-zero on the working flow; making
+    // it fatal would break the very configuration this exists to protect.
+    //
+    // Gated on roi_active() rather than a new env var: a partition rectangle
+    // IS the DPR signal, non-DPR users are unaffected, and no knob is added
+    // that could later be set to make this inert.
+    if (roi_active() && (miss_net || miss_tile || miss_pip || conflict || malformed))
+        log_error("fixed-routes: %d pip(s) from the static lock were not bound (net-miss %d, tile-miss %d, pip-miss "
+                  "%d, conflict %d, malformed %d); the static lock did not fully apply\n",
+                  miss_net + miss_tile + miss_pip + conflict + malformed, miss_net, miss_tile, miss_pip, conflict,
+                  malformed);
     if (xmux_hits > 0 || xmux_fail > 0)
         log_info("    fixed-routes: %d xMUX pseudo-pips resolved to site pips (%d unresolved)\n", xmux_hits,
                  xmux_fail);
@@ -2149,13 +2171,15 @@ void Arch::applyFixedRoutes(const std::string &filename)
 // full routed design through write->read must re-bind every pip and leave the
 // router with nothing to do (self-test); a filtered subset captures a hard
 // macro's frozen island.
-void Arch::writeFixedRoutes(const std::string &filename) const
+void Arch::writeFixedRoutes(const std::string &filename, bool region_only) const
 {
     std::ofstream out(filename);
     if (!out)
         log_error("failed to open fixed-routes output '%s'\n", filename.c_str());
+    if (region_only && !roi_active())
+        log_error("--region-only needs a partition rectangle; set NEXTPNR_PARTITION_ROI\n");
     out << "# nextpnr-xilinx fixed-routes: <net> <tile>/<src_idx>.<dst_idx>\n";
-    int npips = 0, nnets = 0;
+    int npips = 0, nnets = 0, nskipped = 0;
     for (auto &np : nets) {
         NetInfo *ni = np.second.get();
         bool any = false;
@@ -2163,6 +2187,20 @@ void Arch::writeFixedRoutes(const std::string &filename) const
             PipId pip = w.second.pip;
             if (pip == PipId())
                 continue;
+            // The format is one self-contained line per pip -- the net name is
+            // re-emitted on every line and there is no per-net header -- so a
+            // per-pip filter needs no format change.  What it DOES produce is a
+            // disconnected locked tree for any net the rectangle cuts, which is
+            // the reader's normal case (applyFixedRoutes hands the remainder to
+            // router2) but is invisible in the file: nothing records that a
+            // fragment is a fragment.
+            if (region_only) {
+                Loc l = getPipLocation(pip);
+                if (l.x < roi_x0 || l.x > roi_x1 || l.y < roi_y0 || l.y > roi_y1) {
+                    nskipped++;
+                    continue;
+                }
+            }
             auto &pd = locInfo(pip).pip_data[pip.index];
             out << ni->name.str(this) << ' ' << chip_info->tile_insts[pip.tile].name.get() << '/' << pd.src_index
                 << '.' << pd.dst_index << '\n';
@@ -2172,7 +2210,11 @@ void Arch::writeFixedRoutes(const std::string &filename) const
         if (any)
             nnets++;
     }
-    log_info("Wrote %d fixed-route pips across %d nets to '%s'\n", npips, nnets, filename.c_str());
+    if (region_only)
+        log_info("Wrote %d fixed-route pips across %d nets to '%s' (%d outside the rectangle skipped)\n", npips, nnets,
+                 filename.c_str(), nskipped);
+    else
+        log_info("Wrote %d fixed-route pips across %d nets to '%s'\n", npips, nnets, filename.c_str());
 }
 
 void Arch::routeClock()

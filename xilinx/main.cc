@@ -54,18 +54,29 @@ po::options_description UspCommandHandler::getArchOptions()
                            "frozen hard-macro routing to LOCK before routing (net + src->dst pips)");
     specific.add_options()("write-fixed-routes", po::value<std::string>(),
                            "after routing, dump fabric routing in --fixed-routes format");
+    specific.add_options()("region-only",
+                           "restrict --fasm and --write-fixed-routes output to the NEXTPNR_PARTITION_ROI rectangle");
 
     return specific;
 }
 
 void UspCommandHandler::customBitstream(Context *ctx)
 {
+    // One switch, no coordinates.  Both emitters take the rectangle from
+    // NEXTPNR_PARTITION_ROI, the same file placement and routing read: two
+    // sources for one rectangle is how they drift apart.
+    //
+    // Opt-in rather than implied by roi_active(), because the containment
+    // evidence needs BOTH outputs -- the unfiltered FASM is what proves the
+    // region outside the partition is byte-identical between two RM builds,
+    // and a filter that switched itself on would delete that comparison.
+    bool region_only = vm.count("region-only") > 0;
     if (vm.count("fasm")) {
         std::string filename = vm["fasm"].as<std::string>();
-        ctx->writeFasm(filename);
+        ctx->writeFasm(filename, region_only);
     }
     if (vm.count("write-fixed-routes"))
-        ctx->writeFixedRoutes(vm["write-fixed-routes"].as<std::string>());
+        ctx->writeFixedRoutes(vm["write-fixed-routes"].as<std::string>(), region_only);
 }
 
 std::unique_ptr<Context> UspCommandHandler::createContext(std::unordered_map<std::string, Property> &values)
