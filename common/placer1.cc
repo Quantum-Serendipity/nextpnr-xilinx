@@ -475,6 +475,8 @@ class SAPlacer
 
         auto saplace_end = std::chrono::high_resolution_clock::now();
         log_info("SA placement time %.02fs\n", std::chrono::duration<float>(saplace_end - saplace_start).count());
+        if (ctx->roi_active())
+            log_info("SA moves rejected by the partition rectangle: %lld\n", (long long)n_roi_reject);
 
         // Final post-pacement validitiy check
         extern bool dbg_validity_runtime;
@@ -632,6 +634,15 @@ class SAPlacer
         }
 
         if (!ctx->isBelLocationValid(newBel) || ((other_cell != nullptr && !ctx->isBelLocationValid(oldBel)))) {
+            // Attribute the rejection to the partition rectangle when it
+            // reproduces point 3's predicate exactly (xilinx/arch_place.cc).
+            // The condition above is left byte-identical -- the counter is
+            // computed after the fact rather than by splitting the short-circuit
+            // -- so this cannot perturb placement.
+            if (ctx->roi_active() &&
+                ((ctx->bel_outside_roi(newBel) && ctx->is_rm_cell(cell)) ||
+                 (other_cell != nullptr && ctx->bel_outside_roi(oldBel) && ctx->is_rm_cell(other_cell))))
+                ++n_roi_reject;
             ctx->unbindBel(newBel);
             if (other_cell != nullptr)
                 ctx->unbindBel(oldBel);
@@ -766,10 +777,17 @@ class SAPlacer
         }
         for (const auto &mm : moves_made) {
             if (!ctx->isBelLocationValid(mm.first->bel) || !check_cell_bel_region(mm.first, mm.first->bel) ||
-                bel_excluded(mm.first, mm.first->bel))
+                bel_excluded(mm.first, mm.first->bel)) {
+                if (ctx->roi_active() && ctx->bel_outside_roi(mm.first->bel) && ctx->is_rm_cell(mm.first))
+                    ++n_roi_reject;
                 goto swap_fail;
-            if (!ctx->isBelLocationValid(mm.second))
+            }
+            if (!ctx->isBelLocationValid(mm.second)) {
+                if (ctx->roi_active() && ctx->bel_outside_roi(mm.second) &&
+                    ctx->is_rm_cell(ctx->getBoundBelCell(mm.second)))
+                    ++n_roi_reject;
                 goto swap_fail;
+            }
             CellInfo *bound = ctx->getBoundBelCell(mm.second);
             if (bound && (!check_cell_bel_region(bound, bound->bel) || bel_excluded(bound, bound->bel)))
                 goto swap_fail;
@@ -1348,6 +1366,14 @@ class SAPlacer
     float lambda = 0.5;
     bool improved = false;
     int n_move, n_accept;
+    // Run total, deliberately NOT reset per iteration the way n_move/n_accept
+    // are at the top of the annealing loop.  This is the witness that the SA
+    // move path actually attempted to leave the partition rectangle: without
+    // it, "no RM cell outside the rectangle" is equally consistent with a
+    // rectangle that refused every attempt and one that was never tested,
+    // because refinement's diameter is 3 and a design placed away from the
+    // boundary would never propose an outside bel at all.
+    int64_t n_roi_reject = 0;
     int diameter = 35, max_x = 1, max_y = 1;
     std::unordered_map<IdString, std::tuple<int, int>> bel_types;
     std::unordered_map<IdString, BoundingBox> region_bounds;

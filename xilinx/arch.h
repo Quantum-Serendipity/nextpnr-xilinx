@@ -928,6 +928,18 @@ struct Arch : BaseCtx
     mutable bool roi_loaded = false;
     void load_partition_roi() const;
 
+    // One veto counter per enforcement point, reported at the end of
+    // Arch::place().  These exist because "0 RM cells outside the rectangle" is
+    // a STATIC observation: it is equally true of a rectangle that refused a
+    // thousand escape attempts and of a rectangle that was never consulted.
+    // The counters separate "the mechanism held" from "nothing tried to leave",
+    // which is the distinction this programme has repeatedly failed to make --
+    // most recently when four malformed-rectangle tests passed under --no-place
+    // because the lazily-loaded rectangle was never opened.
+    mutable int64_t roi_veto_avail = 0; // point 1, checkBelAvail
+    mutable int64_t roi_veto_cell = 0;  // point 2, isValidBelForCell
+    mutable int64_t roi_veto_loc = 0;   // point 3, isBelLocationValid
+
     bool roi_active() const
     {
         if (!roi_loaded)
@@ -980,8 +992,19 @@ struct Arch : BaseCtx
         // build_fast_bels(), and placer1's fast_bels is not filtered at all, so
         // it cannot be the only enforcement point.  See points 2 and 3 in
         // xilinx/arch_place.cc.
-        if (bel_outside_roi(bel))
+        //
+        // ORDERING INVARIANT, load-bearing: build_fast_bels() runs once, at
+        // common/placer_heap.cc:151, and the rectangle must already be loaded
+        // by then or the snapshot is taken unfiltered.  Arch::place() is far
+        // downstream of the eager load in UspCommandHandler::customAfterLoad,
+        // so this holds -- but it holds by ordering, not by construction, and
+        // reverting the load to lazy would silently reopen HeAP's ripup escape
+        // (:1027).  scripts/partition-roi-evidence.sh asserts the ordering
+        // directly out of the log.
+        if (bel_outside_roi(bel)) {
+            ++roi_veto_avail;
             return false;
+        }
         return tileStatus[bel.tile].boundcells[bel.index] == nullptr;
     }
 

@@ -897,6 +897,15 @@ bool Arch::place()
         log_error("US+ architecture does not support placer '%s'\n", placer.c_str());
     }
     fixupPlacement();
+    // Emitted after fixupPlacement so the post-place repair's own candidate
+    // rejections are included.  Unconditional when the rectangle is active,
+    // even at zero, so the acceptance gate can grep for it and tell "held" from
+    // "never ran" -- the same reason the fixed-routes counter line at :1948 is
+    // printed unconditionally.
+    if (roi_active())
+        log_info("partition ROI: %lld bel-avail veto(s) [point 1], %lld cell-gate veto(s) [point 2], "
+                 "%lld post-bind veto(s) [point 3]\n",
+                 (long long)roi_veto_avail, (long long)roi_veto_cell, (long long)roi_veto_loc);
     getCtx()->attrs[getCtx()->id("step")] = std::string("place");
     archInfoToAttributes();
     return true;
