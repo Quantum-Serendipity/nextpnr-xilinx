@@ -135,6 +135,10 @@ struct Router2
     // routing loop has joined.
     std::atomic<int64_t> partition_veto_fwd{0};
     std::atomic<int64_t> partition_veto_bwd{0};
+    // update_congestion() is called from the single-threaded main loop only, so
+    // these two need no synchronisation.
+    int64_t partition_bb_growths = 0;
+    int64_t partition_bb_reclamps = 0;
 
     Router2(Context *ctx, const Router2Cfg &cfg) : ctx(ctx), cfg(cfg) {}
 
@@ -1174,10 +1178,22 @@ struct Router2
                 // exploring tiles it can never legally use, which is pure
                 // wasted routing effort and a misleading debug picture.
                 if (net_data.partition) {
+                    const int bx0 = net_data.bb.x0, by0 = net_data.bb.y0;
+                    const int bx1 = net_data.bb.x1, by1 = net_data.bb.y1;
                     net_data.bb.x0 = std::max(net_data.bb.x0, cfg.partition_x0);
                     net_data.bb.y0 = std::max(net_data.bb.y0, cfg.partition_y0);
                     net_data.bb.x1 = std::min(net_data.bb.x1, cfg.partition_x1);
                     net_data.bb.y1 = std::min(net_data.bb.y1, cfg.partition_y1);
+                    // Counted, so the census can say the re-clamp ACTUALLY BIT
+                    // rather than merely that it was compiled in. Without this
+                    // the only evidence would be indirect -- "the forward veto
+                    // count is still zero after N iterations, therefore the box
+                    // never escaped" -- which is a sound argument that silently
+                    // becomes vacuous if growth never happens at all.
+                    if (net_data.bb.x0 != bx0 || net_data.bb.y0 != by0 || net_data.bb.x1 != bx1 ||
+                        net_data.bb.y1 != by1)
+                        partition_bb_reclamps++;
+                    partition_bb_growths++;
                 }
             }
         }
@@ -1651,10 +1667,11 @@ struct Router2
         // not merely on the absence of an out-of-region pip.
         if (cfg.partition_active)
             log_info("partition route clamp: %d net(s) governed, %lld pip(s) vetoed (%lld forward A*, %lld backwards "
-                     "BFS), rectangle (%d,%d)-(%d,%d)\n",
+                     "BFS), %lld box growth(s) of which %lld re-clamped, rectangle (%d,%d)-(%d,%d)\n",
                      int(cfg.partition_nets.size()), (long long)(partition_veto_fwd + partition_veto_bwd),
-                     (long long)partition_veto_fwd, (long long)partition_veto_bwd, cfg.partition_x0, cfg.partition_y0,
-                     cfg.partition_x1, cfg.partition_y1);
+                     (long long)partition_veto_fwd, (long long)partition_veto_bwd, (long long)partition_bb_growths,
+                     (long long)partition_bb_reclamps, cfg.partition_x0, cfg.partition_y0, cfg.partition_x1,
+                     cfg.partition_y1);
         if (cfg.perf_profile) {
             std::vector<std::pair<int, IdString>> nets_by_runtime;
             for (auto &n : nets_by_udata) {

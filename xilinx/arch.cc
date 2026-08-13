@@ -2565,6 +2565,10 @@ bool Arch::route()
         findSourceSinkLocations();
         routeVcc();
         fixupRouting();
+        // This path never runs router2, so the clamp does not exist here at
+        // all -- every pip came from the imported ROUTING attribute or
+        // applyFixedRoutes. It is precisely the case the backstop is for.
+        check_partition_routing();
         getCtx()->settings[getCtx()->id("route")] = 1;
         archInfoToAttributes();
         log_info("    route-fixed-only: imported routing kept as-is; no general router run\n");
@@ -2575,6 +2579,11 @@ bool Arch::route()
     // hands the placed-but-otherwise-unrouted design off to an external router
     // (RapidWright's classic 7-series Router) that fills in all general nets.
     if (settings.find(id("route-clock-only")) != settings.end()) {
+        // routeClock() and applyFixedRoutes() have both already bound
+        // STRENGTH_LOCKED pips above, with no location test. The general nets
+        // are deliberately left for an external router, but whatever THIS tool
+        // bound is still ours to answer for.
+        check_partition_routing();
         getCtx()->settings[getCtx()->id("route")] = 1;
         archInfoToAttributes();
         return true;
@@ -2641,6 +2650,11 @@ bool Arch::route()
     // exited 255; as a post-router fill it only consumes leftover resources.
     routeVcc();
     fixupRouting();
+    // LAST point at which anything can bind a pip, and the first at which
+    // nothing further will. Deliberately before archInfoToAttributes() below,
+    // so a violation aborts BEFORE the offending routing is stamped back into
+    // the ROUTING attribute and becomes re-importable.
+    check_partition_routing();
     // POST-ROUTE timing.  Only router1 runs timing_analysis after routing, so
     // with router2 the ONLY "Max frequency" lines in the log come from
     // placer1's post-placement call -- an estimate built from
@@ -3304,6 +3318,77 @@ std::unordered_set<IdString> Arch::partition_nets() const
             out.insert(net->name);
     }
     return out;
+}
+
+void Arch::check_partition_routing() const
+{
+    if (!roi_active())
+        return;
+
+    // The SAME set the clamp governs, from the same call. Never a re-derived
+    // predicate: a backstop that disagreed with the thing it is backstopping
+    // would be checking a different design.
+    const std::unordered_set<IdString> governed = partition_nets();
+
+    int nets_checked = 0, bad_nets = 0;
+    int64_t pips_checked = 0, pips_outside = 0;
+    std::vector<std::pair<std::string, std::string>> offenders;
+
+    for (auto np : sorted(nets)) {
+        NetInfo *net = np.second;
+        if (!governed.count(net->name))
+            continue;
+        nets_checked++;
+        int bad_here = 0;
+        for (auto &w : net->wires) {
+            if (w.second.pip == PipId())
+                continue;
+            pips_checked++;
+            Loc l = getPipLocation(w.second.pip);
+            if (l.x >= roi_x0 && l.x <= roi_x1 && l.y >= roi_y0 && l.y <= roi_y1)
+                continue;
+            pips_outside++;
+            bad_here++;
+            // Collected and sorted rather than logged in place: net->wires is a
+            // hash map, so iteration order is not stable and an unsorted report
+            // would differ run to run on the same design.
+            offenders.emplace_back(std::string(net->name.c_str(this)),
+                                   std::string(nameOfPip(w.second.pip)) + " at tile (" + std::to_string(l.x) + "," +
+                                           std::to_string(l.y) + ")");
+        }
+        if (bad_here > 0)
+            bad_nets++;
+    }
+
+    std::sort(offenders.begin(), offenders.end());
+    const size_t report_cap = 20;
+    for (size_t i = 0; i < offenders.size() && i < report_cap; i++)
+        log_warning("partition route gate: net '%s' binds pip %s, OUTSIDE the partition rectangle\n",
+                    offenders[i].first.c_str(), offenders[i].second.c_str());
+    if (offenders.size() > report_cap)
+        log_warning("partition route gate: %d further out-of-rectangle pip(s) not listed\n",
+                    int(offenders.size() - report_cap));
+
+    // Unconditional census, pass or fail, for the third time in this file and
+    // for the same reason: a gate that is silent on success cannot be told
+    // apart from a gate that never ran.
+    log_info("partition route gate: %d net(s) examined, %lld pip(s) bound, %lld outside the rectangle in %d net(s), "
+             "rectangle (%d,%d)-(%d,%d)\n",
+             nets_checked, (long long)pips_checked, (long long)pips_outside, bad_nets, roi_x0, roi_y0, roi_x1, roi_y1);
+
+    // No downgrade knob, deliberately. The two existing ones (PARTITION_NETS,
+    // PARTITION_CLAMP) are already BANNED escape hatches; a third would be the
+    // one most likely to be reached for, because this gate fires late, after a
+    // build that otherwise looks finished. If it fires the repair is real:
+    // either the design routes outside its region, or a net that legitimately
+    // leaves (the clock spine) belongs in NEXTPNR_PARTITION_EXEMPT_NETS.
+    if (pips_outside > 0)
+        log_error("partition route gate: %d net(s) have routing outside the partition rectangle (listed above). "
+                  "router2's clamp cannot have allowed this -- it refuses such pips during search -- so the binding "
+                  "came from one of the paths that bypass it: the netlist's imported ROUTING attribute, "
+                  "applyFixedRoutes, routeClock, routeVcc, fixupRouting, or router1. A partial bitstream built from "
+                  "this routing would write configuration frames outside the region and corrupt static logic.\n",
+                  bad_nets);
 }
 
 void Arch::check_partition_nets() const
