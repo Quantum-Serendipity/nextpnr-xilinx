@@ -1056,6 +1056,35 @@ struct Arch : BaseCtx
     // than documenting it.
     std::unordered_set<IdString> partition_nets() const;
 
+    // The DETECTIVE half of route containment. router2's clamp is PREVENTIVE
+    // and covers exactly one of the ten paths in this tree that can bind a pip
+    // to a net. The others bypass it entirely, and three of them are live:
+    //
+    //   * attributesToArchInfo() binds every pip in a netlist's ROUTING
+    //     attribute at frontend import (frontend_base.h:293) -- five stages
+    //     before Arch::route() -- taking the STRENGTH VERBATIM FROM THE FILE.
+    //   * routeClock() and applyFixedRoutes() bind at STRENGTH_LOCKED before
+    //     router2 runs, with no location test of any kind.
+    //   * routeVcc() and fixupRouting() bind AFTER it, so nothing downstream
+    //     can reconcile them.
+    //
+    // Worse, router2 LAUNDERS the imported ones back out: setup_wires() seeds
+    // its per-wire state from pre-existing Arch bindings, check_arc_routing()
+    // skips any arc already consistently routed so it is never offered to the
+    // A* or the backwards BFS, and bind_and_check() then re-binds those exact
+    // pips -- with no location test. The ripup filter is
+    // `strength <= STRENGTH_STRONG`, so anything LOCKED is exempt even from
+    // that. A round-tripped netlist can therefore carry pips anywhere on the
+    // die, through router2, and out into the FASM, with the clamp reporting a
+    // clean run throughout.
+    //
+    // So this walks what was ACTUALLY BOUND rather than what was searched.
+    // net->wires is the complete record of bound pips -- Arch::bindPip is the
+    // single writer, and xilinx/fasm.cc's write_routing() reads that same map
+    // and nothing else -- so a pass over it sees every pip feature that can
+    // reach the bitstream.
+    void check_partition_routing() const;
+
     bool checkBelAvail(BelId bel) const
     {
         if (usp_bel_hard_unavail(bel))
