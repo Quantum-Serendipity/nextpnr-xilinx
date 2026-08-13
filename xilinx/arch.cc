@@ -2590,6 +2590,44 @@ bool Arch::route()
         cfg.bb_margin_y = 4;
         cfg.backwards_max_iter = 200;
         cfg.perf_profile = true;
+        // Unit 7.4: confine the reconfigurable module's routing to the same
+        // rectangle that confined its placement. One rectangle, both phases --
+        // a routing clamp on a different rectangle than the placer used would
+        // be a guarantee about the wrong region.
+        // NEXTPNR_PARTITION_CLAMP=off is the DISCRIMINATION ARM, not a workaround.
+        // A clamp that has only ever been observed to pass is untested: the
+        // acceptance evidence needs a run where the same design, same placement
+        // and same rectangle routes WITHOUT the clamp, so that "0 pips outside
+        // the rectangle" can be shown to be caused by the clamp rather than by
+        // the router never having wanted to leave. It is logged as an error-level
+        // warning and named in assert-no-escape-hatches.sh so it cannot survive
+        // into a real DPR build unnoticed.
+        const char *clamp_mode = getenv("NEXTPNR_PARTITION_CLAMP");
+        const bool clamp_off = clamp_mode != nullptr && std::string(clamp_mode) == "off";
+        if (roi_active() && clamp_off) {
+            log_warning("partition route clamp: DISABLED by NEXTPNR_PARTITION_CLAMP=off. The rectangle governs "
+                        "placement but NOT routing; RM nets may bind pips anywhere on the die and the resulting "
+                        "partial bitstream may write frames outside the region. This setting exists to produce the "
+                        "unclamped control arm for the acceptance evidence. It must never be set for a build whose "
+                        "bitstream will be loaded.\n");
+        }
+        if (roi_active() && !clamp_off) {
+            cfg.partition_active = true;
+            cfg.partition_x0 = roi_x0;
+            cfg.partition_y0 = roi_y0;
+            cfg.partition_x1 = roi_x1;
+            cfg.partition_y1 = roi_y1;
+            cfg.partition_nets = partition_nets();
+            // Unconditional, pass or fail, for the same reason the net gate's
+            // census is unconditional: a clamp that says nothing is
+            // indistinguishable from a clamp that was never installed, and this
+            // programme has shipped four silently-inert mechanisms already.
+            log_info("partition route clamp: %d net(s) confined to tiles (%d,%d)-(%d,%d)\n",
+                     int(cfg.partition_nets.size()), roi_x0, roi_y0, roi_x1, roi_y1);
+            if (cfg.partition_nets.empty())
+                log_warning("partition route clamp: the rectangle is active but governs NO nets. Either the RM "
+                            "cell set is empty or every RM net was exempted; the clamp will have no effect.\n");
+        }
         router2(getCtx(), cfg);
         result = true;
     } else {
@@ -3235,6 +3273,39 @@ void Arch::load_exempt_nets() const
     log_info("partition net exemptions: %d net(s) exempt from invariant P, from %s (%d unresolved)\n", n, f, miss);
 }
 
+std::unordered_set<IdString> Arch::partition_nets() const
+{
+    std::unordered_set<IdString> out;
+    if (!roi_active())
+        return out;
+    if (!exempt_nets_loaded)
+        load_exempt_nets();
+
+    const IdString gnd_net = id("$PACKER_GND_NET"), vcc_net = id("$PACKER_VCC_NET");
+    for (auto np : sorted(nets)) {
+        NetInfo *net = np.second;
+        // Const nets and listed exemptions (the clock spine) are Unit 7.5's,
+        // contained by pre-binding and applyFixedRoutes rather than by the bbox
+        // clamp. Excluded by exact name, never by a catch-all predicate -- a
+        // catch-all is how an exemption silently becomes a hole.
+        if (net->name == gnd_net || net->name == vcc_net)
+            continue;
+        if (exempt_nets.count(net->name))
+            continue;
+        // is_rm_cell() tolerates a null cell, which an undriven net has.
+        bool touches_rm = is_rm_cell(net->driver.cell);
+        if (!touches_rm)
+            for (auto &u : net->users)
+                if (is_rm_cell(u.cell)) {
+                    touches_rm = true;
+                    break;
+                }
+        if (touches_rm)
+            out.insert(net->name);
+    }
+    return out;
+}
+
 void Arch::check_partition_nets() const
 {
     if (!roi_active())
@@ -3281,6 +3352,12 @@ void Arch::check_partition_nets() const
     int bad_nets = 0, bad_outside = 0, bad_unplaced = 0, reported = 0;
     const int report_cap = 20;
 
+    // The set Arch::route() will hand the router as its clamp list. Checked
+    // against this loop's own scope decision in both directions below, so that
+    // "the gate validated it" and "the clamp governs it" cannot drift apart.
+    const std::unordered_set<IdString> governed = partition_nets();
+    int in_scope = 0;
+
     for (auto np : sorted(nets)) {
         NetInfo *net = np.second;
 
@@ -3312,6 +3389,12 @@ void Arch::check_partition_nets() const
             excl_listed++;
             continue;
         }
+
+        // This net is in scope for P. partition_nets() must have reached the
+        // same conclusion, or the clamp and the gate are governing different
+        // sets and one of them is lying.
+        NPNR_ASSERT(governed.count(net->name));
+        in_scope++;
 
         int outside = 0, unplaced = 0;
         for (const PortRef *pr : eps) {
@@ -3350,6 +3433,13 @@ void Arch::check_partition_nets() const
     }
     if (reported > report_cap)
         log_warning("partition net gate: %d further violating endpoint(s) not listed\n", reported - report_cap);
+
+    // The other direction: every net partition_nets() claims is governed must
+    // have been reached by this loop. Together with the per-net assert above
+    // this is set equality, not merely containment -- a governed net this gate
+    // never examined would be clamped by the router without P ever having been
+    // checked for it.
+    NPNR_ASSERT(size_t(in_scope) == governed.size());
 
     // Emit the census UNCONDITIONALLY whenever the rectangle is active, pass or
     // fail, and state which mode it ran in. A gate that says nothing when it

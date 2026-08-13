@@ -1042,6 +1042,20 @@ struct Arch : BaseCtx
     // "always succeeds" contract, not a bounding-box question.
     void check_partition_nets() const;
 
+    // The single definition of "a net the partition rectangle governs": any net
+    // with at least one endpoint on an RM cell, less the two const nets and the
+    // explicitly exempted ones. Empty when the rectangle is inactive.
+    //
+    // TWO CONSUMERS, ONE DEFINITION, AND THAT IS THE POINT.
+    // check_partition_nets() asserts invariant P over this set before placement
+    // finishes; Arch::route() clamps the router's pip choice over this same set.
+    // If the two ever disagreed, a net could satisfy the gate and then route
+    // wherever it liked -- a hole of exactly the kind this unit exists to close,
+    // and one that no acceptance script could see, because both halves would
+    // report success. check_partition_nets() NPNR_ASSERTs the agreement rather
+    // than documenting it.
+    std::unordered_set<IdString> partition_nets() const;
+
     bool checkBelAvail(BelId bel) const
     {
         if (usp_bel_hard_unavail(bel))

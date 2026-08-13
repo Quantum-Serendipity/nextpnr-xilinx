@@ -49,6 +49,23 @@ struct Router2Cfg
 
     // Print additional performance profiling information
     bool perf_profile = false;
+
+    // ---- partition containment (Unit 7.4) ----------------------------------
+    // A partial-reconfiguration build confines the reconfigurable module's nets
+    // to a fixed tile rectangle. The arch fills these in; every field has an
+    // in-class default so the three arches that construct Router2Cfg and pass
+    // it straight through (generic, ice40, ecp5) are unaffected and keep
+    // compiling. When partition_active is false this costs one predictable
+    // branch per net, taken once in setup_nets().
+    //
+    // The net SET is passed in rather than derived here on purpose: the same
+    // set is validated by the invariant-P gate before placement finishes, so
+    // the clamp governs exactly the nets the gate proved are containable. A
+    // router-side re-derivation could disagree with the gate, and a net the
+    // gate blessed but the clamp missed is a silent hole.
+    bool partition_active = false;
+    int partition_x0 = 0, partition_y0 = 0, partition_x1 = 0, partition_y1 = 0;
+    std::unordered_set<IdString> partition_nets;
 };
 
 void router2(Context *ctx, const Router2Cfg &cfg);
