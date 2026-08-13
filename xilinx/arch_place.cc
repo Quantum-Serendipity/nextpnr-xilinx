@@ -1307,6 +1307,45 @@ void Arch::fixupPlacement()
         if (fixed)
             log_info("post-place repair: relocated %d stranded cluster(s)/cell(s) to valid bels\n", fixed);
     }
+    // The input remerge below normalises which physical A-pin each net sits on.
+    // It used to re-derive the LOGICAL port label from the pin's compacted
+    // ordinal in lutInfo.input_sigs -- "I" + to_string(slot).  That is only
+    // correct when the incoming pins are already A1..An with no gaps, which is
+    // true of nextpnr's own packing and false of any netlist whose pins have
+    // been permuted before import: a --no-pack replay of a routed design, i.e.
+    // every DPR RM rebuild.  assignCellInfo() COMPACTS the connected pins
+    // (pack.cc:1436-1441), so the ordinal is neither the logical index nor the
+    // physical one.  On a LUT2 imported as A3<-I1, A5<-I0, A6<-VCC tie, the
+    // three occupied pins compact to slots 0,1,2 and the labels come out
+    // I0,I1,I2: the "I2" is a port the cell does not have -- fasm.cc's
+    // get_lut_init() refuses it -- and, silently, the two real inputs SWAP,
+    // which is a wrong truth table with no error at all.
+    //
+    // The logical identity of a net is a property of the CELL, not of the pin
+    // it happens to occupy, so snapshot the labels by net and carry them
+    // across.  A pin with no label (a VCC tie has no logical counterpart) stays
+    // unlabelled, exactly as it arrived.
+    auto snapshot_orig_ports = [&](CellInfo *c, std::unordered_map<IdString, std::string> &out) {
+        if (c == nullptr)
+            return;
+        for (IdString a : {id_A1, id_A2, id_A3, id_A4, id_A5, id_A6}) {
+            NetInfo *pn = get_net_or_empty(c, a);
+            if (pn == nullptr)
+                continue;
+            IdString ak = id("X_ORIG_PORT_" + a.str(this));
+            if (!c->attrs.count(ak))
+                continue;
+            std::string tok = c->attrs.at(ak).as_string();
+            if (tok.empty())
+                continue;
+            auto &slot = out[pn->name];
+            slot += (slot.empty() ? "" : " ") + tok;
+        }
+    };
+    // Census: measured, not predicted.  `relabel_wrong` is how many labels the
+    // old ordinal rule would have got wrong on THIS design -- the size of the
+    // defect, reported by the build that would have suffered it.
+    int remerged = 0, relabel_kept = 0, relabel_ordinal = 0, relabel_wrong = 0;
     for (auto &ts : tileStatus) {
         if (ts.lts == nullptr)
             continue;
@@ -1391,6 +1430,45 @@ void Arch::fixupPlacement()
                             l6 ? nameOf(l6) : "-", l6 ? int(l6->belStrength) : -1);
                 continue;
             }
+            std::unordered_map<IdString, std::string> lut5_orig, lut6_orig;
+            snapshot_orig_ports(lut5, lut5_orig);
+            snapshot_orig_ports(lut6, lut6_orig);
+            ++remerged;
+            // Write the logical label for `net` at `port`, carrying it over from
+            // the snapshot.  Falls back to the historic ordinal derivation only
+            // for a cell that arrived with no labels at all, so a netlist this
+            // pass has always been the sole labeller of is untouched.
+            auto write_orig = [&](CellInfo *c, IdString port, IdString net,
+                                  const std::unordered_map<IdString, std::string> &snap,
+                                  const std::unordered_map<IdString, std::vector<int>> &slots) {
+                IdString ak = id("X_ORIG_PORT_" + port.str(this));
+                std::string ordinal;
+                if (slots.count(net)) {
+                    bool first = true;
+                    for (auto inp : slots.at(net)) {
+                        ordinal += (first ? "I" : " I") + std::to_string(inp);
+                        first = false;
+                    }
+                }
+                auto it = snap.find(net);
+                if (it == snap.end()) {
+                    if (snap.empty()) {
+                        c->attrs[ak] = ordinal;
+                        ++relabel_ordinal;
+                    } else {
+                        // An unlabelled pin -- a constant tie -- has no logical
+                        // counterpart and must not acquire one.
+                        c->attrs.erase(ak);
+                        if (!ordinal.empty())
+                            ++relabel_wrong;
+                    }
+                    return;
+                }
+                c->attrs[ak] = it->second;
+                ++relabel_kept;
+                if (it->second != ordinal)
+                    ++relabel_wrong;
+            };
             // Disconnect LUT inputs, and re-connect them to not overlap
             IdString ports[6] = {id_A1, id_A2, id_A3, id_A4, id_A5, id_A6};
             for (auto p : ports) {
@@ -1409,13 +1487,7 @@ void Arch::fixupPlacement()
                         lut5->ports[ports[index]].type = PORT_IN;
                     }
                     connect_port(getCtx(), nets.at(i).get(), lut5, ports[index]);
-                    lut5->attrs[id("X_ORIG_PORT_" + ports[index].str(this))] = std::string("");
-                    bool first = true;
-                    for (auto inp : lut5Inputs[i]) {
-                        lut5->attrs[id("X_ORIG_PORT_" + ports[index].str(this))].str +=
-                                (first ? "I" : " I") + std::to_string(inp);
-                        first = false;
-                    }
+                    write_orig(lut5, ports[index], i, lut5_orig, lut5Inputs);
                 }
                 if (lut6 && lut6Inputs.count(i)) {
                     if (!lut6->ports.count(ports[index])) {
@@ -1423,14 +1495,7 @@ void Arch::fixupPlacement()
                         lut6->ports[ports[index]].type = PORT_IN;
                     }
                     connect_port(getCtx(), nets.at(i).get(), lut6, ports[index]);
-
-                    lut6->attrs[id("X_ORIG_PORT_" + ports[index].str(this))] = std::string("");
-                    bool first = true;
-                    for (auto inp : lut6Inputs[i]) {
-                        lut6->attrs[id("X_ORIG_PORT_" + ports[index].str(this))].str +=
-                                (first ? "I" : " I") + std::to_string(inp);
-                        first = false;
-                    }
+                    write_orig(lut6, ports[index], i, lut6_orig, lut6Inputs);
                 }
                 ++index;
             }
@@ -1451,6 +1516,10 @@ void Arch::fixupPlacement()
             }
         }
     }
+    if (remerged)
+        log_info("LUT input remerge: %d slot(s); labels carried %d, ordinal-derived %d, "
+                 "corrected %d\n",
+                 remerged, relabel_kept, relabel_ordinal, relabel_wrong);
     for (auto cell : sorted(cells)) {
         CellInfo *ci = cell.second;
         if (ci->type == id("PSS_ALTO_CORE")) {
