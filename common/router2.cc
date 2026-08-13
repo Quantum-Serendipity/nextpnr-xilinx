@@ -28,6 +28,7 @@
 
 #include "router2.h"
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <deque>
 #include <fstream>
@@ -66,6 +67,11 @@ struct Router2
         int total_route_us = 0;
         float max_crit = 0;
         int fail_count = 0;
+        // Unit 7.4: this net has an endpoint in the reconfigurable module, so
+        // every pip it binds must lie inside the partition rectangle. Resolved
+        // once in setup_nets() from cfg.partition_nets; a per-pip name lookup
+        // would be on the hottest path in the router.
+        bool partition = false;
     };
 
     struct WireScore
@@ -122,6 +128,13 @@ struct Router2
 
     Context *ctx;
     Router2Cfg cfg;
+
+    // Unit 7.4 veto counters. Atomic because route_arc() runs on up to eight
+    // worker threads; relaxed ordering is right -- these are pure counters, no
+    // other state is published through them, and they are read only after the
+    // routing loop has joined.
+    std::atomic<int64_t> partition_veto_fwd{0};
+    std::atomic<int64_t> partition_veto_bwd{0};
 
     Router2(Context *ctx, const Router2Cfg &cfg) : ctx(ctx), cfg(cfg) {}
 
@@ -207,6 +220,20 @@ struct Router2
             nets.at(i).bb.y0 = std::max(nets.at(i).bb.y0 - cfg.bb_margin_y, 0);
             nets.at(i).bb.x1 = std::min(nets.at(i).bb.x1 + cfg.bb_margin_x, ctx->getGridDimX());
             nets.at(i).bb.y1 = std::min(nets.at(i).bb.y1 + cfg.bb_margin_y, ctx->getGridDimY());
+            // Unit 7.4. Intersect AFTER the margin, never before. The margin is
+            // 4 per side on xilinx -- xilinx/arch.cc overwrites bb_margin_x/y
+            // immediately after constructing Router2Cfg, so the header's
+            // default of 3 is dead on this path -- and the four lines above
+            // apply it unconditionally. A clamp placed before them would be
+            // widened straight back out by 4 tiles on every side, which on
+            // 7-series is a whole CLB column plus its INT.
+            if (cfg.partition_active && cfg.partition_nets.count(ni->name)) {
+                nets.at(i).partition = true;
+                nets.at(i).bb.x0 = std::max(nets.at(i).bb.x0, cfg.partition_x0);
+                nets.at(i).bb.y0 = std::max(nets.at(i).bb.y0, cfg.partition_y0);
+                nets.at(i).bb.x1 = std::min(nets.at(i).bb.x1, cfg.partition_x1);
+                nets.at(i).bb.y1 = std::min(nets.at(i).bb.y1, cfg.partition_y1);
+            }
             i++;
         }
     }
@@ -272,6 +299,36 @@ struct Router2
     };
 
     bool hit_test_pip(ArcBounds &bb, Loc l) { return l.x >= bb.x0 && l.x <= bb.x1 && l.y >= bb.y0 && l.y <= bb.y1; }
+
+    // Unit 7.4: the partition containment predicate.
+    //
+    // DELIBERATELY NOT FOLDED INTO THE BOUNDING BOX. Three separate paths lift
+    // or ignore the box, each of them verified at source rather than assumed:
+    //
+    //  1. route_arc()'s no-bb retry calls itself with is_bb=false (the
+    //     ARC_RETRY_WITHOUT_BB handler in route_net), which switches off the
+    //     only live box test -- at exactly the moment routing is hardest and
+    //     the router is most tempted to wander. A containment guarantee that
+    //     evaporates under congestion is not a guarantee.
+    //  2. The backwards BFS earlier in route_arc() has NO box test at all. It
+    //     filters on availability, reservation and congestion, then binds the
+    //     whole path it found. With xilinx's backwards_max_iter = 200 (and
+    //     20x that for nets with >40 users) it reaches a long way off-region.
+    //  3. update_congestion() grows the box every ten failures, bounded only
+    //     by the die.
+    //
+    // So the box is advisory and this predicate is mandatory. Intersecting the
+    // box with the rectangle is still worth doing -- it prunes the A* search
+    // space -- but it is an optimisation, not the mechanism.
+    //
+    // Pip locations and the rectangle are the same coordinate space: both are
+    // tile (grid_x, grid_y), getPipLocation() being tile % width / tile / width.
+    bool pip_in_partition(PipId pip) const
+    {
+        Loc l = ctx->getPipLocation(pip);
+        return l.x >= cfg.partition_x0 && l.x <= cfg.partition_x1 && l.y >= cfg.partition_y0 &&
+               l.y <= cfg.partition_y1;
+    }
 
     double curr_cong_weight, hist_cong_weight, estimate_weight;
 
@@ -807,6 +864,16 @@ struct Router2
                 did_something = true;
                 if (!ctx->checkPipAvail(uh) && ctx->getBoundPipNet(uh) != net)
                     continue;
+                // Unit 7.4, backwards BFS. This search had NO bounding-box test
+                // of any kind before this line -- it is not that the box was
+                // lifted here, it was never applied -- and on success the block
+                // below binds every pip on the path it found. That made it the
+                // widest of the four ways an RM net could leave its rectangle,
+                // and the only one the unit's original scoping did not name.
+                if (nd.partition && !pip_in_partition(uh)) {
+                    partition_veto_bwd.fetch_add(1, std::memory_order_relaxed);
+                    continue;
+                }
                 if (cpip != PipId() && cpip != uh)
                     continue; // don't allow multiple pips driving a wire with a net
                 int next = wire_to_idx.at(ctx->getPipSrcWire(uh));
@@ -910,6 +977,13 @@ struct Router2
 #else
                 if (is_bb && !hit_test_pip(nd.bb, ctx->getPipLocation(dh)))
                     continue;
+                // Unit 7.4, forward A*. Note this is NOT guarded by is_bb: the
+                // no-bb retry sets is_bb=false and would otherwise lift the
+                // containment along with the box.
+                if (nd.partition && !pip_in_partition(dh)) {
+                    partition_veto_fwd.fetch_add(1, std::memory_order_relaxed);
+                    continue;
+                }
                 if (!ctx->checkPipAvail(dh) && ctx->getBoundPipNet(dh) != net)
                     continue;
 #endif
@@ -1091,6 +1165,20 @@ struct Router2
                 net_data.bb.y0 = std::max(net_data.bb.y0 - 1, 0);
                 net_data.bb.x1 = std::min(net_data.bb.x1 + 1, ctx->getGridDimX());
                 net_data.bb.y1 = std::min(net_data.bb.y1 + 1, ctx->getGridDimY());
+                // Unit 7.4, escape 1. Growth is bounded only by the die, so an
+                // RM net that fails ten times would otherwise walk its box out
+                // of the partition one tile per side per ten failures. Re-clamp
+                // after every expansion. Containment does not depend on this --
+                // pip_in_partition() is checked per pip regardless -- but
+                // letting the box grow past the rectangle would send the A*
+                // exploring tiles it can never legally use, which is pure
+                // wasted routing effort and a misleading debug picture.
+                if (net_data.partition) {
+                    net_data.bb.x0 = std::max(net_data.bb.x0, cfg.partition_x0);
+                    net_data.bb.y0 = std::max(net_data.bb.y0, cfg.partition_y0);
+                    net_data.bb.x1 = std::min(net_data.bb.x1, cfg.partition_x1);
+                    net_data.bb.y1 = std::min(net_data.bb.y1, cfg.partition_y1);
+                }
             }
         }
     }
@@ -1552,6 +1640,21 @@ struct Router2
                           overused_wires, iter - 1, stall_iters);
             }
         } while (!failed_nets.empty());
+        // Unit 7.4. Emit the clamp census UNCONDITIONALLY whenever the rectangle
+        // is active, exactly like the placement ROI's veto counters and for the
+        // same reason: "no RM net left the rectangle" is a STATIC observation,
+        // equally true of a clamp that refused ten thousand pips and of a clamp
+        // that was never consulted because partition_nets was empty or the
+        // predicate never ran. The veto counts separate "the mechanism held"
+        // from "nothing tried to leave". Non-zero counts here are the evidence
+        // that the clamp is load-bearing; the acceptance script asserts on them,
+        // not merely on the absence of an out-of-region pip.
+        if (cfg.partition_active)
+            log_info("partition route clamp: %d net(s) governed, %lld pip(s) vetoed (%lld forward A*, %lld backwards "
+                     "BFS), rectangle (%d,%d)-(%d,%d)\n",
+                     int(cfg.partition_nets.size()), (long long)(partition_veto_fwd + partition_veto_bwd),
+                     (long long)partition_veto_fwd, (long long)partition_veto_bwd, cfg.partition_x0, cfg.partition_y0,
+                     cfg.partition_x1, cfg.partition_y1);
         if (cfg.perf_profile) {
             std::vector<std::pair<int, IdString>> nets_by_runtime;
             for (auto &n : nets_by_udata) {
