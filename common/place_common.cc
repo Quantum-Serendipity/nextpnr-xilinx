@@ -133,6 +133,18 @@ bool place_single_cell(Context *ctx, CellInfo *cell, bool require_legality)
                         wirelen += ctx->rng(25);
                     if (wirelen <= best_ripup_wirelen) {
                         CellInfo *curr_cell = ctx->getBoundBelCell(bel);
+                        // checkBelAvail() false does NOT imply "occupied". On
+                        // xilinx it is also false for an EMPTY bel that is
+                        // outside the partition rectangle (xilinx/arch.h
+                        // checkBelAvail) or in NEXTPNR_BEL_BLACKLIST. Such a bel
+                        // is unusable AND unrippable, so skip it rather than
+                        // dereferencing a null occupant. Unreachable on ecp5,
+                        // ice40 and generic, where the predicate is exactly
+                        // "bound_cell != nullptr", and unreachable on xilinx
+                        // with neither env var set -- so this costs nothing and
+                        // changes nothing when the rectangle is inactive.
+                        if (curr_cell == nullptr)
+                            continue;
                         if (curr_cell->belStrength < STRENGTH_STRONG) {
                             best_ripup_wirelen = wirelen;
                             ripup_bel = bel;
@@ -234,6 +246,17 @@ class ConstraintLegaliseWorker
         }
         if (!ctx->checkBelAvail(locBel)) {
             CellInfo *confCell = ctx->getConflictingBelCell(locBel);
+            // Unavailable but EMPTY -- outside the partition rectangle, or bel-
+            // blacklisted. This must REJECT the location, not fall through.
+            // Falling through would insert it into usedLocations and then into
+            // `solution`, and legalise_cell() binds every entry of `solution`
+            // unconditionally (the bindBel below the confl_cell null check),
+            // consulting neither isValidBelForCell nor isBelLocationValid for
+            // the cell it just bound. That is a hole straight through the
+            // rectangle, so the answer is "not a valid location".
+            if (confCell == nullptr) {
+                return false;
+            }
             if (confCell->belStrength >= STRENGTH_STRONG) {
                 return false;
             }
