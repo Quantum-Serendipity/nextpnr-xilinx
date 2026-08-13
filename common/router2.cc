@@ -1089,8 +1089,57 @@ struct Router2
             auto &usr = net->users.at(i);
             WireId dst_wire = ctx->getNetinfoSinkWire(net, usr);
             // Case of arcs that were pre-routed strongly (e.g. clocks)
-            if (net->wires.count(dst_wire) && net->wires.at(dst_wire).strength > STRENGTH_STRONG)
-                return ARC_SUCCESS;
+            //
+            // Reaching this line means check_arc_routing() has ALREADY decided this
+            // arc is not connected to the net's source wire, while its sink is bound
+            // above STRENGTH_STRONG.  A genuinely complete pre-routed clock arc
+            // continues at the check above and never gets here, so this branch only
+            // ever sees arcs that are already broken.
+            //
+            // The historic `return ARC_SUCCESS` did two things, one of them intended.
+            // Intended: keep ripup_arc() off a frozen fragment -- tearing up a clock
+            // spine is exactly the disaster the guard was added to prevent.
+            // Not intended: abandon the whole net.  ARC_SUCCESS is enumerator 0 of
+            // ArcRouteResult, so in this bool function it returns FALSE, and it
+            // returns out of the per-sink loop before the route_arcs loop below runs
+            // -- so every sibling arc already collected is dropped too, and every
+            // later sink is never examined.  Silently: no counter moves, no warning
+            // is printed, and the run still exits 0 with a truncated net in the FASM
+            // (docs/fragment-lock-truncation.md).
+            //
+            // Separate the two.  Skip the ripup, keep the routing: hand the arc to
+            // route_arc() and let it succeed or fail on the merits.
+            //
+            // This does NOT make a source-omitting fragment lock route.  Measured
+            // (docs/fragment-lock-graft.md): it still fails, but now it fails LOUDLY
+            // -- "Failed to route arc 0 of net 'rm_out[0]', from
+            // SITEWIRE/SLICE_X52Y124/A6LUT_O6 to SITEWIRE/SLICE_X82Y124/A5FFMUX_OUT",
+            // rc 255 -- instead of exiting 0 with a dead net in the FASM.  Turning a
+            // silent wrong answer into a named failure is the whole of this change.
+            //
+            // It still fails because a DRIVERLESS locked fragment violates an
+            // assumption router2 makes in three further places, each on its own
+            // sufficient to keep the net dead:
+            //   :1008      the forward A* admits a wire this net already occupies
+            //              only via its recorded driver pip; a bindWire-claimed
+            //              fragment root records PipId(), so no real pip can enter
+            //              it, and every path to the sink runs through it.  The
+            //              no-bounding-box retry drains the whole reachable graph
+            //              and still cannot get there.
+            //   :852       the backwards BFS merges onto existing routing only when
+            //              that routing's root IS src_wire.
+            //   :1303/1326 bind_and_check returns early when the sink is already
+            //              bound, and its walk-back breaks on the first bound wire
+            //              -- which in this orientation is the sink itself.
+            // Relaxing :1008 alone was tried and REVERTED: the router then reports
+            // success while the Arch keeps the truncated net, i.e. it puts the
+            // silence back.  Fixing this properly means changing "a net's existing
+            // routing is always connected to its driver" everywhere it is assumed,
+            // which is a project, not a patch.
+            if (net->wires.count(dst_wire) && net->wires.at(dst_wire).strength > STRENGTH_STRONG) {
+                t.route_arcs.push_back(i);
+                continue;
+            }
             // Ripup arc to start with
             ripup_arc(net, i);
             t.route_arcs.push_back(i);
