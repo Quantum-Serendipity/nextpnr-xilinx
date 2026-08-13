@@ -554,6 +554,19 @@ class SAPlacer
                     } else {
                         uint64_t score = ctx->rng64();
                         CellInfo *bound_cell = ctx->getBoundBelCell(bel);
+                        // The partition rectangle introduces a case upstream
+                        // could not produce: checkBelAvail() false for a bel
+                        // that is EMPTY (outside the rectangle).  Before it,
+                        // false here meant "occupied" and bound_cell was
+                        // necessarily non-null, so this dereference was safe.
+                        // Skip rather than crash.  Not reachable on the DPR
+                        // flow -- place_initial only ever sees unbound cells,
+                        // which on --no-pack are exactly the RM set, and
+                        // enforcement point 2 has already vetoed the bel above
+                        // -- but reachable for any cell created after the RM
+                        // snapshot, i.e. on any packed flow.
+                        if (bound_cell == nullptr)
+                            return;
                         if (score <= best_ripup_score && bound_cell->belStrength < STRENGTH_STRONG) {
                             best_ripup_score = score;
                             ripup_target = bound_cell;
