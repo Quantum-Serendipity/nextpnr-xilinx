@@ -1141,47 +1141,26 @@ bool Arch::isValidBelForCell(CellInfo *cell, BelId bel) const
             get_net_or_empty(cell, id_A6) != nullptr)
             return false;
     }
-    // NEXTPNR_EXCLUDE_STAMPED_BBOX: keep unstamped cells out of the bounding
-    // box of the pre-placed (BEL-attr) fabric cells -- the frozen macro's
-    // region, whose LOCKED routing makes it unroutable for foreign logic.
-    // Lazy: computed on the first query for an unstamped cell, at which point
-    // constraint placement has already bound all stamped cells.
-    static bool excl_en = getenv("NEXTPNR_EXCLUDE_STAMPED_BBOX") != nullptr;
-    if (excl_en && !cell->attrs.count(id("BEL")) &&
-        cell->name.str(this).find("$PACKER_") == std::string::npos) {
-        // packer const drivers (GND/VCC legalisation LUTs) must be placeable
-        // next to their loads, including inside the locked macro region
-        static int ex0 = -2, ey0 = 0, ex1 = 0, ey1 = 0;
-        if (ex0 == -2) {
-            ex0 = -1;
-            for (auto &cp : cells) {
-                CellInfo *ci = cp.second.get();
-                if (ci->bel == BelId() || !ci->attrs.count(id("BEL")))
-                    continue;
-                std::string t = ci->type.str(this);
-                if (t.substr(0, 6) != "SLICE_" && t.substr(0, 4) != "RAMD" && t != "CARRY4")
-                    continue;
-                Loc l = getBelLocation(ci->bel);
-                if (ex0 < 0) {
-                    ex0 = ex1 = l.x;
-                    ey0 = ey1 = l.y;
-                } else {
-                    ex0 = std::min(ex0, l.x);
-                    ex1 = std::max(ex1, l.x);
-                    ey0 = std::min(ey0, l.y);
-                    ey1 = std::max(ey1, l.y);
-                }
-            }
-            if (ex0 >= 0)
-                log_info("isValidBelForCell: excluding unstamped cells from bbox (%d,%d)-(%d,%d)\n", ex0, ey0, ex1,
-                         ey1);
-        }
-        if (ex0 >= 0) {
-            Loc l = getBelLocation(bel);
-            if (l.x >= ex0 && l.x <= ex1 && l.y >= ey0 && l.y <= ey1)
-                return false;
-        }
-    }
+    // NEXTPNR_EXCLUDE_STAMPED_BBOX was here, and is RETIRED rather than
+    // repaired.  Unit 7.6 step 3 scoped a repair -- swap its attrs["BEL"]
+    // predicate for the RM snapshot, swap its derived bbox for the partition
+    // rectangle, invert the sense -- but carrying that out produces:
+    //
+    //     if (is_rm_cell(cell) && bel_outside_roi(bel)) return false;
+    //
+    // which is token-identical to the partition check at the head of this same
+    // function (:1073-1076), including the $PACKER_ carve-out, because
+    // snapshot_rm_cells() already drops $PACKER_* names.  Sitting ~75 lines
+    // BELOW it, the repaired knob could never fire: the earlier check has
+    // already returned.  A repair whose product is unreachable code is not a
+    // repair, and shipping it would have added a fifth mechanism that looks
+    // live and is not.
+    //
+    // The knob was also inert as written -- it gated on attrs["BEL"], which
+    // archInfoToAttributes() erases in favour of NEXTPNR_BEL, so on the
+    // round-tripped netlist a DPR static import IS it saw zero stamped cells
+    // and derived an empty bbox.  Its sense was inverted from what containment
+    // needs, too: it rejected bels INSIDE its box.
     return true;
 }
 

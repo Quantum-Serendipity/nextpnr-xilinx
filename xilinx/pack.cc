@@ -1396,53 +1396,27 @@ bool Arch::pack()
         packer.pack_lutffs();
     }
 
-    // Confine FRESH (unstamped) fabric logic to a compact region hugging the
-    // frozen macro.  Without this the SA placer scatters the sparse fresh cells
-    // (arp_ctrl + reset/clock glue) across the WHOLE die -- e.g. a 6-bit reset
-    // counter split X8..X210 / Y132..Y327 -- so cpu_clk combinational paths span
-    // the chip, fmax fails, the reset counter never settles and the design is
-    // stuck in reset (phy_reset held -> board dark).  NEXTPNR_FRESH_REGION_MARGIN
-    // = N expands the stamped-cell bbox by N tiles and pins every unstamped
-    // SLICE/CARRY cell inside it (IO/clock/GT stay free -- they must reach pads).
-    if (const char *mg = getenv("NEXTPNR_FRESH_REGION_MARGIN")) {
-        int margin = atoi(mg);
-        int x0 = 1 << 30, y0 = 1 << 30, x1 = -1, y1 = -1;
-        for (auto &cell : cells) {
-            CellInfo *ci = cell.second.get();
-            auto it = ci->attrs.find(id("BEL"));
-            if (it == ci->attrs.end())
-                continue; // fresh cell: not part of the stamped-macro bbox
-            std::string t = ci->type.str(this);
-            if (t.substr(0, 6) != "SLICE_" && t != "CARRY4")
-                continue;
-            BelId b = getBelByName(id(it->second.as_string()));
-            if (b == BelId())
-                continue;
-            Loc l = getBelLocation(b);
-            x0 = std::min(x0, l.x); x1 = std::max(x1, l.x);
-            y0 = std::min(y0, l.y); y1 = std::max(y1, l.y);
-        }
-        if (x1 >= 0) {
-            x0 = std::max(0, x0 - margin);           y0 = std::max(0, y0 - margin);
-            x1 = std::min(getGridDimX() - 1, x1 + margin);
-            y1 = std::min(getGridDimY() - 1, y1 + margin);
-            IdString rname = id("fresh_region");
-            createRectangularRegion(rname, x0, y0, x1, y1);
-            int n = 0;
-            for (auto &cell : cells) {
-                CellInfo *ci = cell.second.get();
-                if (ci->attrs.count(id("BEL")))
-                    continue; // stamped/frozen: leave where it is
-                std::string t = ci->type.str(this);
-                if (t.substr(0, 6) != "SLICE_" && t != "CARRY4")
-                    continue; // only fabric logic; IO/clock/GT reach pads freely
-                ci->region = region.at(rname).get();
-                ++n;
-            }
-            log_info("NEXTPNR_FRESH_REGION_MARGIN=%d: fresh region (%d,%d)-(%d,%d), "
-                     "constrained %d fresh cells\n", margin, x0, y0, x1, y1, n);
-        }
-    }
+    // NEXTPNR_FRESH_REGION_MARGIN was here, and is RETIRED -- its job now runs
+    // unconditionally at the head of Arch::place(), off the partition rectangle
+    // and the RM snapshot.
+    //
+    // The idea was right and the placement was fatal.  Confining fresh logic to
+    // a compact region genuinely matters: without it the placer scatters sparse
+    // fresh cells across the whole die (a 6-bit reset counter split
+    // X8..X210 / Y132..Y327), combinational paths span the chip, and the design
+    // never leaves reset.  But this block sat at the tail of Arch::pack() and
+    // derived its bbox from attrs["BEL"], so on the DPR flow it was dead TWICE:
+    // --no-pack skips pack() entirely (common/command.cc computes do_pack from
+    // it), and archInfoToAttributes() erases BEL in favour of NEXTPNR_BEL, so a
+    // round-tripped netlist -- which a DPR static import IS -- carries no BEL
+    // for the derivation to find.  Correction 139.  Repairing the predicate in
+    // place would have changed nothing, because the enclosing function is not
+    // called.
+    //
+    // It could not stay here for a second reason: Arch::pack() sets
+    // packed_since_rm_snapshot, and check_partition_nets() refuses to run under
+    // a stale RM set.  Any flow that reached this code would have invalidated
+    // the snapshot the rectangle depends on.
 
     assignArchInfo();
     attrs[id("step")] = std::string("pack");

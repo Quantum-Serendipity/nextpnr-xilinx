@@ -837,6 +837,15 @@ class SAPlacer
     // out of the bounding box of pre-placed (BEL-attr) fabric cells -- i.e.
     // the frozen macro's region, whose routing is LOCKED so densely that
     // arcs into it are unroutable for foreign logic.
+    //
+    // NOT a partition-containment mechanism, and must not be pressed into
+    // service as one.  The xilinx twin of this code was retired in favour of
+    // the partition rectangle (xilinx/arch_place.cc, Unit 7.6 step 3); this
+    // copy is left alone because it is arch-shared, but on the xilinx DPR flow
+    // it is inert twice over -- the env var is unset, and setup_exclusion_bbox()
+    // is only called from the `if (!refine)` arm, which HeAP's placer1_refine
+    // entry never enters.  Containment there is bel_outside_roi() at
+    // checkBelAvail / isValidBelForCell / isBelLocationValid.
     int excl_x0 = -1, excl_y0 = -1, excl_x1 = -1, excl_y1 = -1;
     void setup_exclusion_bbox()
     {

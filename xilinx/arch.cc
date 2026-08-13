@@ -845,6 +845,65 @@ bool Arch::getBudgetOverride(const NetInfo *net_info, const PortRef &sink, delay
 
 bool Arch::place()
 {
+    // Steer the solver into the partition rectangle, in addition to forbidding
+    // everything outside it.
+    //
+    // The three veto points (checkBelAvail, isValidBelForCell,
+    // isBelLocationValid) close every bind path, but they can only ever say NO
+    // to a location that has already been chosen.  They do not constrain
+    // `cell_locs`, so HeAP's analytic solve and its cut-spreader are free to
+    // park an RM cell's coordinates far outside the rectangle, and placer1's SA
+    // goes on proposing moves there for the whole refinement.
+    //
+    // Measured, 5 seeds, congested vehicle (docs/region-steering.md):
+    //   SA moves rejected by the rectangle   1747 -> 0        (deterministic)
+    //   router2 bounding-box growths         14.8 -> 2.8 mean (5/5 seeds down)
+    //   router2 time                         -21% mean        (4/5 seeds down)
+    //   fmax                                 NO EFFECT: 42.81 -> 43.03 mean
+    //                                        against a +-1.9 spread, 3 up 2 down
+    // The fmax column is there because a single seed showed a 3% regression and
+    // that turned out to be noise.  Four seeds more was cheaper than being
+    // wrong about it.
+    //
+    // ci->region is the only handle that changes what gets PROPOSED.  It is
+    // read as genuine steering in four live places: the per-iteration clamp on
+    // the analytic solution (common/placer_heap.cc:827-835, which feeds back
+    // through cell_pos() into the next build_equations()), the cut-spreader's
+    // bin rescale (:1794-1800), the strict legaliser's ring radius (:954-961),
+    // and placer1's SA move diameter and origin (common/placer1.cc:884-893 --
+    // live under placer1_refine, where bel_excluded and locked_bels are not).
+    //
+    // Steering only.  ci->region MUST NOT be the enforcement mechanism
+    // (correction 140): region_bounds is a bounding box, and a cell whose
+    // region is unset is unconstrained, so nothing here weakens the vetoes.
+    // The set is the same rectangle and the same RM snapshot they use, and
+    // createRectangularRegion's bounds are inclusive exactly as
+    // bel_outside_roi's are, so the steered set cannot disagree with the
+    // enforced one.
+    //
+    // This replaces NEXTPNR_FRESH_REGION_MARGIN, which did the same thing from
+    // a bbox derived off attrs["BEL"] at the tail of Arch::pack() -- dead
+    // twice over on this flow, because archInfoToAttributes() erases BEL and
+    // because --no-pack skips pack() entirely (correction 139).
+    if (roi_active()) {
+        IdString rname = id("partition_region");
+        createRectangularRegion(rname, roi_x0, roi_y0, roi_x1, roi_y1);
+        int steered = 0;
+        for (auto &cell : cells) {
+            CellInfo *ci = cell.second.get();
+            if (!is_rm_cell(ci))
+                continue;
+            ci->region = region.at(rname).get();
+            ++steered;
+        }
+        // Unconditional, like every other partition census in this file: a
+        // mechanism that is silent when it does nothing cannot be told apart
+        // from one that never ran.  "0 steered" is a RESULT -- it means the RM
+        // snapshot is empty, which is worth seeing.
+        log_info("partition region: steering %d RM cell(s) into (%d,%d)-(%d,%d), %d bel(s) in region\n", steered,
+                 roi_x0, roi_y0, roi_x1, roi_y1, int(region.at(rname)->bels.size()));
+    }
+
     std::string placer = str_or_default(settings, id("placer"), defaultPlacer);
 
     if (placer == "heap") {
