@@ -903,11 +903,85 @@ struct Arch : BaseCtx
         return false;
     }
 
+    // NEXTPNR_PARTITION_ROI=<file>: confine reconfigurable-module (RM) logic to
+    // a partition rectangle given in prjxray grid_x/grid_y TILE coordinates.
+    //
+    // The file is the same prjxray ROI object `fasm2frames --roi` and
+    // `--roi-strict` already consume -- {"info": {"GRID_X_MIN": .., "GRID_X_MAX":
+    // .., "GRID_Y_MIN": .., "GRID_Y_MAX": ..}} -- so placement, routing and frame
+    // emission read ONE rectangle from ONE file instead of three that drift
+    // apart.  scripts/roi_snap.py emits exactly this, already snapped to the
+    // frame lattice.
+    //
+    // TILE coordinates, never slice coordinates.  SLICE_X40Y0 and SLICE_X41Y0
+    // are both sites of CLBLL_R_X25Y0, so a slice-space boundary can split a CLB
+    // tile column -- not a legal DFX partition boundary, and the cause of 250 of
+    // the 338 detouring nets in docs/static-lock-convergence.md section 8.2.
+    //
+    // nextpnr's Loc IS prjxray grid space, so no conversion is needed or wanted:
+    // xilinx/python/xilinx_device.py reads grid_x/grid_y straight out of
+    // tilegrid.json, xilinx/python/bbaexport.py writes tile_insts row-major over
+    // (y, x), and getBelLocation() below recovers them by divmod on
+    // chip_info->width.  Note that TILE-NAME X/Y is a different system with the
+    // same extents (INT_L_X32Y100 is grid (81,103)); do not mix them.
+    mutable int roi_x0 = -1, roi_y0 = -1, roi_x1 = -1, roi_y1 = -1;
+    mutable bool roi_loaded = false;
+    void load_partition_roi() const;
+
+    bool roi_active() const
+    {
+        if (!roi_loaded)
+            load_partition_roi();
+        return roi_x0 >= 0;
+    }
+
+    bool bel_outside_roi(BelId bel) const
+    {
+        if (bel == BelId() || !roi_active())
+            return false;
+        int x = bel.tile % chip_info->width, y = bel.tile / chip_info->width;
+        return x < roi_x0 || x > roi_x1 || y < roi_y0 || y > roi_y1;
+    }
+
+    // The RM cell set, snapshotted at import before anything binds a bel.
+    //
+    // Deliberately NOT derived from an attribute at the point of use.
+    // Arch::place() ends with archInfoToAttributes(), which stamps NEXTPNR_BEL
+    // onto EVERY bound cell -- so both "has a bel" and "has NEXTPNR_BEL" are
+    // valid static/RM discriminators BEFORE placement and tautologies after it.
+    // Three separate places in this tree re-derive the distinction from
+    // attrs["BEL"], each with its own type filter, and all three are inert on a
+    // round-tripped netlist because archInfoToAttributes erases that attribute.
+    // This set is taken once, at customAfterLoad, and is the single answer.
+    // std::unordered_set, not hashlib's pool<>: pool requires a T::hash()
+    // member and this tree's IdString has none (it is keyed through
+    // std::hash<IdString>, which is how ctx->cells works).
+    std::unordered_set<IdString> rm_cells;
+    bool rm_snapshot_taken = false;
+    void snapshot_rm_cells();
+
+    bool is_rm_cell(const CellInfo *ci) const
+    {
+        return rm_snapshot_taken && ci != nullptr && rm_cells.count(ci->name);
+    }
+
     bool checkBelAvail(BelId bel) const
     {
         if (usp_bel_hard_unavail(bel))
             return false;
         NPNR_ASSERT(bel != BelId());
+        // Partition ROI, enforcement point 1 of 3.  Bel-only and deliberately
+        // cell-agnostic: checkBelAvail is consulted BEFORE a bind and never to
+        // re-validate one already made, so a static cell the import bound
+        // outside the rectangle is untouched by this.  This is the point that
+        // keeps out-of-rectangle bels out of HeAP's fast_bels snapshot
+        // (common/placer_heap.cc:473, :492), which is the strongest single
+        // effect the rectangle has -- but it is a ONE-SHOT snapshot taken in
+        // build_fast_bels(), and placer1's fast_bels is not filtered at all, so
+        // it cannot be the only enforcement point.  See points 2 and 3 in
+        // xilinx/arch_place.cc.
+        if (bel_outside_roi(bel))
+            return false;
         return tileStatus[bel.tile].boundcells[bel.index] == nullptr;
     }
 
