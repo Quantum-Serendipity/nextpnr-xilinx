@@ -1929,8 +1929,21 @@ struct FasmBackend
 
     void write_cfg()
     {
+        // ICAP_WIDTH is a TILE-level 6-bit field (X8 = 0b000111, X16 = 0b111000,
+        // X32 = 0b000000), not a per-site one, so it is emitted once per tile and
+        // the first ICAPE2 seen in a tile owns it.  The value carries the cell
+        // alongside the width so a disagreement can name both cells.
+        std::unordered_map<int, std::pair<std::string, CellInfo *>> icap_width_by_tile;
+
         for (auto &cell : ctx->cells) {
             CellInfo *ci = cell.second.get();
+            // An unbound cell has BelId{-1, -1} and get_tile_name() would index
+            // tile_insts[-1].  It is also the "only for actually-bound bels"
+            // discipline that the phantom-BUFGCTRL guard exists to enforce (see
+            // bufgctrl_bound_slots): a per-site enable emitted for a site with
+            // no cell on it is a bit set in real silicon.
+            if (ci->bel == BelId())
+                continue;
             auto tile_name = get_tile_name(ci->bel.tile);
             if (!boost::starts_with(tile_name, "CFG_CENTER_"))
                 continue;
@@ -1951,13 +1964,39 @@ struct FasmBackend
             }
 
             if (ci->type == id_ICAP_ICAP) {
-                push("ICAP");
+                // ENABLE_TR is PER SITE, and the site name is already the tag
+                // component: getBelSite() gives "ICAP_X0Y1", and prjxray splits
+                // a feature line on the FIRST dot only, so the emitted
+                // CFG_CENTER_MID_X46Y84.ICAP_X0Y1.ENABLE_TR resolves against
+                // the db key CFG_CENTER_MID.ICAP_X0Y1.ENABLE_TR.  Vivado sets
+                // these three bits for whichever of ICAP_X0Y0/ICAP_X0Y1 carries
+                // an ICAPE2; nextpnr emitted neither, so the site came up
+                // disabled and the ICAP was inert.
+                push(ctx->getBelSite(ci->bel));
+                write_bit("ENABLE_TR");
+                pop();
+
                 std::string width = str_or_default(ci->params, id_ICAP_WIDTH, "X32");
                 if (width != "X32" && width != "X16" && width != "X8")
                     log_error("Unknown ICAP_WIDTH of '%s\n'. Allowed values are: X32, X16 and X8.", width.c_str());
-                if (width == "X16") write_bit("ICAP_WIDTH_X16");
-                if (width == "X8") write_bit("ICAP_WIDTH_X8");
-                pop();
+                // One field, two possible cells.  Emitting the width per cell put
+                // BOTH tags on one tile for a two-ICAPE2 design and programmed
+                // 0b111111, which is not any width's encoding -- see
+                // work/icap/probe-two/top.fasm in the toolchain repo.
+                auto seen = icap_width_by_tile.emplace(ci->bel.tile, std::make_pair(width, ci));
+                if (!seen.second) {
+                    if (seen.first->second.first != width)
+                        log_error("ICAPE2 '%s' has ICAP_WIDTH=%s but '%s' in the same tile %s has "
+                                  "ICAP_WIDTH=%s. ICAP_WIDTH is a tile-level field and cannot hold "
+                                  "both; give every ICAPE2 in a tile the same width.\n",
+                                  ctx->nameOf(ci), width.c_str(), ctx->nameOf(seen.first->second.second),
+                                  tile_name.c_str(), seen.first->second.first.c_str());
+                } else {
+                    push("ICAP");
+                    if (width == "X16") write_bit("ICAP_WIDTH_X16");
+                    if (width == "X8") write_bit("ICAP_WIDTH_X8");
+                    pop();
+                }
             }
 
             if (ci->type == id_STARTUP_STARTUP) {
