@@ -1676,8 +1676,20 @@ struct FasmBackend
                 write_bit("IFF.ZSRVAL_Q2");
             }
         } else if (ci->type == ctx->id("OLOGICE2_OUTFF") || ci->type == ctx->id("OLOGICE3_OUTFF")) {
+            // prjxray characterises ODDR.DDR_CLK_EDGE.SAME_EDGE as a lone bit
+            // (LIOI3.OLOGIC_Y0 31_92) with no OPPOSITE_EDGE counterpart, so an
+            // absent bit IS OPPOSITE_EDGE and no third value can be expressed.
+            // Falling through silently emitted an OPPOSITE_EDGE bitstream for a
+            // design that asked for SAME_EDGE_PIPELINED -- correct rc, wrong
+            // hardware. The ILOGICE3_IFF arm above rejects the same string
+            // loudly because IFF.DDR_CLK_EDGE has both bits; this one did not.
             std::string edge = str_or_default(ci->params, ctx->id("DDR_CLK_EDGE"), "OPPOSITE_EDGE");
-            if (edge == "SAME_EDGE") write_bit("ODDR.DDR_CLK_EDGE.SAME_EDGE");
+            if (edge == "SAME_EDGE")
+                write_bit("ODDR.DDR_CLK_EDGE.SAME_EDGE");
+            else if (edge != "OPPOSITE_EDGE")
+                log_error("unsupported clock edge parameter for cell '%s' at %s: %s. Supported are: SAME_EDGE and "
+                          "OPPOSITE_EDGE\n",
+                          ci->name.c_str(ctx), site.c_str(), edge.c_str());
 
             write_bit("ODDR_TDDR.IN_USE");
             write_bit("OQUSED");
