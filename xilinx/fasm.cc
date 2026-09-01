@@ -2727,6 +2727,7 @@ struct FasmBackend
                       ci->name.c_str(ctx), divide.c_str());
         }
 
+        cur_tile = ci->bel.tile;
         push(get_tile_name(ci->bel.tile));
         push("BUFR_Y" + std::to_string(xy.y));
         write_bit("IN_USE");
@@ -2773,6 +2774,7 @@ struct FasmBackend
         // y minus the lowest BUFIO y of the tile).
         auto xy = ctx->getSiteLocInTile(ci->bel);
 
+        cur_tile = ci->bel.tile;
         push(get_tile_name(ci->bel.tile));
         push("BUFIO_Y" + std::to_string(xy.y));
         write_bit("IN_USE");
