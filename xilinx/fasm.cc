@@ -683,7 +683,7 @@ struct FasmBackend
                 log_to_bit[lut_inputs[j].str(ctx)] = j;
             for (int j = 0; j < 6; j++) {
                 // Get the LUT physical to logical mapping
-                auto &p2l = phys_to_log[j];
+                phys_to_log[j];
                 if (!lut->attrs.count(ctx->id("X_ORIG_PORT_" + phys_inputs[j].str(ctx))))
                     continue;
                 std::string orig = lut->attrs.at(ctx->id("X_ORIG_PORT_" + phys_inputs[j].str(ctx))).as_string();
