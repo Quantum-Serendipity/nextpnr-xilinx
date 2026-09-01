@@ -253,11 +253,19 @@ NPNR_PACKED_STRUCT(struct CellPropDelayPOD {
     int32_t max_delay;
 });
 
+// Written into the chipdb by python/nextpnr_structs.py NextpnrTmgChkType; the
+// two must stay in step.
 enum TimingCheckType : int32_t
 {
     TIMING_CHECK_SETUP = 0,
     TIMING_CHECK_HOLD = 1,
     TIMING_CHECK_WIDTH = 2,
+    // Constrain an asynchronous control pin against the clock, not a data pin.
+    // Distinct codes because an artix7 SLICEL SR recovery is 0.358ns against a
+    // D setup of -0.045ns -- a consumer that confused them would be out by an
+    // order of magnitude, in the unsafe direction.
+    TIMING_CHECK_RECOVERY = 3,
+    TIMING_CHECK_REMOVAL = 4,
 };
 
 NPNR_PACKED_STRUCT(struct CellTimingCheckPOD {
@@ -1797,8 +1805,15 @@ struct Arch : BaseCtx
     // Perform placement validity checks, returning false on failure (all
     // implemented in arch_place.cc)
 
+    // min_delay_out is the chipdb's fast corner. Opt-in, because cell arcs are
+    // otherwise left min == max (see archdefs.h DelayInfo) and populating them
+    // wholesale would change every existing hold result as a side effect.
     bool xc7_cell_timing_lookup(int tt_id, int inst_id, IdString variant, IdString from_port, IdString to_port,
-                                DelayInfo &delay) const;
+                                DelayInfo &delay, delay_t *min_delay_out = nullptr) const;
+    bool xc7_cell_timing_check_lookup(int tt_id, int inst_id, IdString variant, TimingCheckType type,
+                                      IdString sig_port, delay_t &value) const;
+    // prjxray's SDF CELLTYPE for the FF this cell is bound to.
+    IdString xc7FFTimingVariant(const CellInfo *cell) const;
 
     // Whether or not a given cell can be placed at a given Bel
     // This is not intended for Bel type checks, but finer-grained constraints

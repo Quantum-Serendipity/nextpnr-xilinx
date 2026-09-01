@@ -1,7 +1,21 @@
 from enum import *
+from collections import Counter
+import sys
 import constid
 import bels
 import parse_sdf
+
+# SDF check kinds parse_sdf understood but the chipdb has no code for. Reported
+# by report_unrepresented_checks() at the end of the export so that a construct
+# the timing database carries cannot leave the pipeline unremarked -- which is
+# how every SETUP and HOLD in prjxray-db went missing until 2026-09-01.
+unrepresented_checks = Counter()
+
+
+def report_unrepresented_checks():
+	if unrepresented_checks:
+		print("nextpnr_structs: SDF checks with no chipdb code: {}".format(
+			", ".join("{} x{}".format(k, v) for k, v in sorted(unrepresented_checks.items()))), file=sys.stderr)
 
 class NextpnrPipType(Enum):
 	TILE_ROUTING = 0
@@ -137,10 +151,26 @@ class NextpnrPropDelay:
 			max(ic.rising.maxv, ic.falling.maxv)
 		)
 
+# Mirrors enum TimingCheckType in xilinx/arch.h; the values are written into the
+# chipdb, so the two must stay in step.
 class NextpnrTmgChkType(Enum):
-	TIMING_CHECK_SETUP = 0
-	TIMING_CHECK_HOLD  = 1
-	TIMING_CHECK_WIDTH = 2
+	TIMING_CHECK_SETUP    = 0
+	TIMING_CHECK_HOLD     = 1
+	TIMING_CHECK_WIDTH    = 2
+	TIMING_CHECK_RECOVERY = 3
+	TIMING_CHECK_REMOVAL  = 4
+
+# RECOVERY/REMOVAL get their own codes rather than reusing SETUP/HOLD: they
+# constrain an asynchronous control pin, not a data pin, and a consumer that
+# could not tell them apart would apply an SR recovery (0.358ns on an artix7
+# SLICEL) as if it were a D setup (-0.045ns).
+SDF_CHECK_KIND_TO_CHKTYPE = {
+	"SETUP":    NextpnrTmgChkType.TIMING_CHECK_SETUP,
+	"HOLD":     NextpnrTmgChkType.TIMING_CHECK_HOLD,
+	"WIDTH":    NextpnrTmgChkType.TIMING_CHECK_WIDTH,
+	"RECOVERY": NextpnrTmgChkType.TIMING_CHECK_RECOVERY,
+	"REMOVAL":  NextpnrTmgChkType.TIMING_CHECK_REMOVAL,
+}
 
 class NextpnrTimingCheck:
 	def __init__(self, chktype, sig_port, clock_port, min_value, max_value):
@@ -150,17 +180,13 @@ class NextpnrTimingCheck:
 		self.min_value = int(min_value * del_scale)
 		self.max_value = int(max_value * del_scale)
 	@staticmethod
-	def from_sdf_setuphold(sh):
-		return [
-			NextpnrTimingCheck(NextpnrTmgChkType.TIMING_CHECK_SETUP, sh.pin, sh.clock,
-				sh.setup.minv, sh.setup.maxv),
-			NextpnrTimingCheck(NextpnrTmgChkType.TIMING_CHECK_HOLD, sh.pin, sh.clock,
-				sh.hold.minv, sh.hold.maxv),
-		]
-	@staticmethod
-	def from_sdf_width(w):
-		NextpnrTimingCheck(NextpnrTmgChkType.TIMING_CHECK_WIDTH, sh.clock, sh.clock,
-				w.width.minv, w.width.maxv)
+	def from_sdf_check(chk):
+		# None for a kind the chipdb has no slot for (PERIOD); the caller counts
+		# those, so a construct the SDF carries never disappears unremarked.
+		chktype = SDF_CHECK_KIND_TO_CHKTYPE.get(chk.kind)
+		if chktype is None:
+			return None
+		return NextpnrTimingCheck(chktype, chk.pin, chk.clock, chk.value.minv, chk.value.maxv)
 
 class NextpnrCellTiming:
 	def __init__(self, variant_name):
@@ -169,21 +195,25 @@ class NextpnrCellTiming:
 		self.checks = []
 	def sort(self):
 		# Sort delays and checks by pin constid; so we can do a binary search in nextpnr
-		# to save time
+		# to save time. Checks get no binary search -- Arch::xc7_cell_timing_check_lookup
+		# scans them, there being at most four per FF variant -- so the type is here
+		# only to make the ordering total, and hence the bba reproducible.
 		self.delays.sort(key=lambda d: (d.to_port, d.from_port))
-		self.checks.sort(key=lambda c: (c.sig_port, c.clock_port))
+		self.checks.sort(key=lambda c: (c.sig_port, c.clock_port, c.chktype.value))
 	@staticmethod
 	def from_sdf_cell(sdfc):
 		cell = NextpnrCellTiming(sdfc.type)
 		for entry in sdfc.entries:
 			if isinstance(entry, parse_sdf.IOPath):
 				cell.delays.append(NextpnrPropDelay.from_sdf_iopath(entry))
-			elif isinstance(entry, parse_sdf.SetupHoldCheck):
-				cell.checks.append(NextpnrTimingCheck.from_sdf_setuphold(entry))
-			elif isinstance(entry, parse_sdf.WidthCheck):
-				cell.checks.append(NextpnrTimingCheck.from_sdf_width(entry))
+			elif isinstance(entry, parse_sdf.TimingCheck):
+				chk = NextpnrTimingCheck.from_sdf_check(entry)
+				if chk is None:
+					unrepresented_checks[entry.kind] += 1
+				else:
+					cell.checks.append(chk)
 			else:
-				assert False, "unknown SDF entry type"
+				assert False, "unknown SDF entry type " + type(entry).__name__
 		for interconn in sorted(sdfc.interconnect.values(), key=lambda ic: (ic.to_net, ic.from_net)):
 			cell.delays.append(NextpnrPropDelay.from_sdf_interconn(interconn))
 		cell.sort()

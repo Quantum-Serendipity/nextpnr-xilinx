@@ -3241,19 +3241,79 @@ TimingPortClass Arch::getPortTimingClass(const CellInfo *cell, IdString port, in
 TimingClockingInfo Arch::getPortClockingInfo(const CellInfo *cell, IdString port, int index) const
 {
     TimingClockingInfo info;
-    // FF (SLICE_FFX/FDRE-family) timing.  Was a flat 0.1ns stub for all three,
-    // which under-set clk->Q (real slow-corner ~0.26ns) and made hold analysis
-    // impossible.  Values below are the golden-Vivado xc7 -2 calibration
-    // (arcs.tsv per-type slow corner: FDRE clk->Q ~0.26, setup ~0.05, hold
-    // ~0.14ns).  DelayInfo is single-valued today (min==max) so these are the
-    // slow/late corner; the min/early (hold) corner scales by ~0.45 once
-    // DelayInfo carries a separate min (Phase-1 hold pass).
+    // Fallback for an FF the chipdb has no timing for.  One triple for every
+    // FF in the device: the golden-Vivado xc7 -2 calibration (arcs.tsv slow
+    // corner: FDRE clk->Q 0.259, setup 0.05, hold 0.143ns).  Kept because the
+    // per-cell lookup below misses on any chipdb built before 2026-09-01 --
+    // those carry zero timing checks (1215 variants, 4767 propagation delays,
+    // 0 checks in xc7a100tcsg324.bin at pin 3e6f173), because python/parse_sdf.py
+    // matched only the merged SETUPHOLD form and prjxray-db writes SETUP and
+    // HOLD separately.  It also still covers xcup, which has no cell timing.
     info.setup = getDelayFromNS(0.05);
     info.hold = getDelayFromNS(0.143);    // hold requirement: use as-is (min==max)
     info.clockToQ = getDelayFromNS(0.259);
     info.clockToQ.min = getDelayFromNS(0.117).delay;  // fast-corner clk->Q for hold
     info.clock_port = xc7 ? id_CK : id_CLK;
     info.edge = RISING_EDGE;
+
+    if (!xc7 || cell->type != id_SLICE_FFX || cell->bel == BelId())
+        return info;
+    int tt_id = locInfo(cell->bel).timing_index;
+    int inst_id = locInfo(cell->bel).bel_data[cell->bel.index].timing_inst;
+    IdString variant = xc7FFTimingVariant(cell);
+
+    if (port == id_Q) {
+        // prjxray spells the FF clock pin CLK even where nextpnr calls the port
+        // CK, so the chipdb key is id_CLK on both sides of the arc.
+        DelayInfo ctq;
+        delay_t ctq_min = 0;
+        if (xc7_cell_timing_lookup(tt_id, inst_id, variant, id_CLK, id_Q, ctq, &ctq_min)) {
+            info.clockToQ = ctq;
+            info.clockToQ.min = ctq_min;
+        }
+        return info;
+    }
+    if (port == info.clock_port)
+        return info;
+
+    delay_t v = 0;
+    if (port == id_SR) {
+        // SR's constraint against the clock is recovery/removal, and prjxray
+        // holds it on the set/reset variants (REG_INIT_FF_QH / _QL), not on the
+        // register variant -- which has checks for DIN and CE only.  Taking the
+        // worse of the two directions: on artix7 SLICEL, QH recovery is 0.358ns
+        // and QL 0.404ns, so picking either arbitrarily understates one design
+        // in two.
+        delay_t rec = 0, rem = 0;
+        bool got_rec = false, got_rem = false;
+        static const char *const halves[] = {"_QH", "_QL"};
+        for (const char *half : halves) {
+            IdString sr_variant = id(variant.str(this) + half);
+            if (xc7_cell_timing_check_lookup(tt_id, inst_id, sr_variant, TIMING_CHECK_RECOVERY, id_SR, v)) {
+                rec = got_rec ? std::max(rec, v) : v;
+                got_rec = true;
+            }
+            if (xc7_cell_timing_check_lookup(tt_id, inst_id, sr_variant, TIMING_CHECK_REMOVAL, id_SR, v)) {
+                rem = got_rem ? std::max(rem, v) : v;
+                got_rem = true;
+            }
+        }
+        // Assigned, not max()'d against the fallback: removal is -0.248ns on
+        // artix7 and the 0.143ns fallback would win a max() and silently
+        // replace the measurement.
+        if (got_rec)
+            info.setup.delay = rec;
+        if (got_rem)
+            info.hold.delay = rem;
+        return info;
+    }
+
+    // D is DIN in prjxray's pin naming; CE is CE in both.
+    IdString sig = (port == id_D) ? id("DIN") : port;
+    if (xc7_cell_timing_check_lookup(tt_id, inst_id, variant, TIMING_CHECK_SETUP, sig, v))
+        info.setup.delay = v;
+    if (xc7_cell_timing_check_lookup(tt_id, inst_id, variant, TIMING_CHECK_HOLD, sig, v))
+        info.hold.delay = v;
     return info;
 }
 
@@ -3320,7 +3380,7 @@ boost::optional<const Tres &> db_binary_search(const Tres *list, int count, Tget
 } // namespace
 
 bool Arch::xc7_cell_timing_lookup(int tt_id, int inst_id, IdString variant, IdString from_port, IdString to_port,
-                                  DelayInfo &delay) const
+                                  DelayInfo &delay, delay_t *min_delay_out) const
 {
     if (tt_id == -1 || inst_id == -1)
         return false;
@@ -3339,7 +3399,54 @@ bool Arch::xc7_cell_timing_lookup(int tt_id, int inst_id, IdString variant, IdSt
     if (!found_delay)
         return false;
     delay.delay = found_delay->max_delay;
+    if (min_delay_out != nullptr)
+        *min_delay_out = found_delay->min_delay;
     return true;
+}
+
+bool Arch::xc7_cell_timing_check_lookup(int tt_id, int inst_id, IdString variant, TimingCheckType type,
+                                        IdString sig_port, delay_t &value) const
+{
+    if (tt_id == -1 || inst_id == -1)
+        return false;
+    const InstanceTimingPOD &inst = chip_info->timing_data->tile_cell_timings[tt_id].instances[inst_id];
+    auto found_var = db_binary_search(
+            inst.celltypes.get(), inst.num_celltypes, [](const CellTimingPOD &ct) { return ct.variant_name; },
+            variant.index);
+    if (!found_var)
+        return false;
+
+    // Linear, not db_binary_search: the checks are sorted by (sig_port,
+    // clock_port) with the type only as a tiebreaker, so a search keyed on the
+    // type cannot be used, and one keyed on the pair would have to walk the run
+    // anyway. The variants this is called for hold four checks (SETUP/HOLD on
+    // DIN and CE) or two (RECOVERY/REMOVAL on SR).
+    const CellTimingPOD &ct = *found_var;
+    for (int i = 0; i < ct.num_checks; i++) {
+        const CellTimingCheckPOD &chk = ct.checks[i];
+        if (chk.check_type != int32_t(type) || chk.sig_port != sig_port.index)
+            continue;
+        // The late column. A timing check is a requirement, so its worst case is
+        // the larger value, for setup and for hold alike -- unlike a delay,
+        // where the two corners bound opposite ends of an arrival window.
+        value = chk.max_value;
+        return true;
+    }
+    return false;
+}
+
+IdString Arch::xc7FFTimingVariant(const CellInfo *cell) const
+{
+    // prjxray names a SLICE timing cell after the Vivado site element, not
+    // after the FDRE-family primitive that packs into it:
+    // fuzzers/011-clb-ffconfig/generate.py:69-70 emits "SLICE_X13Y137/AFF
+    // REG_INIT" and "SLICE_X12Y137/D5FF FF_INIT".
+    if ((locInfo(cell->bel).bel_data[cell->bel.index].z & 0xF) == BEL_FF2)
+        return id("FF_INIT"); // the A5FF..D5FF half, which has no latch mode
+    // Read the attribute rather than ffInfo.is_latch: ffInfo is a union member
+    // that only assignArchInfo() populates, and getPortClockingInfo has no way
+    // to know whether that has run for this cell.
+    return cell->attrs.count(id_X_FF_AS_LATCH) ? id("REG_INIT_LAT") : id("REG_INIT_FF");
 }
 
 #ifdef WITH_HEAP

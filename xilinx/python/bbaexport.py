@@ -50,6 +50,10 @@ def main():
 			if ntt.cell_timing is not None:
 				timing.add_tile(ntt.cell_timing)
 	timing.sort_tiles()
+	report_unrepresented_checks()
+	n_checks = sum(len(v.checks) for t in timing.tiles for i in t.instances for v in i.variants)
+	print("bbaexport: cell timing: {} tile types, {} timing checks".format(len(timing.tiles), n_checks),
+		file=sys.stderr)
 
 	# Import tile instances
 	tile_insts = []
