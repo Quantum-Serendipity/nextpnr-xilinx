@@ -362,7 +362,13 @@ struct Property
     }
     std::string as_string() const
     {
-        NPNR_ASSERT(is_string);
+        // An INTEGER-valued property is a perfectly good string: render it.
+        // A JSON netlist may legitimately carry a number where this arch reads
+        // a string (an integer cell parameter such as CLKOUT2_DIVIDE or
+        // SS_MOD_PERIOD), and asserting turns that into an abort during load
+        // with no indication of which parameter is at fault.
+        if (!is_string)
+            return std::to_string(intval);
         return str;
     }
     const char *c_str() const
@@ -861,7 +867,7 @@ struct Context : Arch, DeterministicRNG
 
     WireId getNetinfoSourceWire(const NetInfo *net_info) const;
     WireId getNetinfoSinkWire(const NetInfo *net_info, const PortRef &sink) const;
-    delay_t getNetinfoRouteDelay(const NetInfo *net_info, const PortRef &sink) const;
+    delay_t getNetinfoRouteDelay(const NetInfo *net_info, const PortRef &sink, bool min_delay = false) const;
 
     // provided by router1.cc
     bool checkRoutedDesign() const;

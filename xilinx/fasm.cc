@@ -1235,12 +1235,35 @@ struct FasmBackend
             // is_riob18 branch only emitted one or the other; this restructure
             // emits both on HP banks.
             if (slew == "SLOW") {
-                // On HP banks Vivado encodes SSTL15/SSTL135 SLOW with the
-                // per-standard bits only (segbits_riob18.db); the general
-                // LVCMOS-family group is used for LVCMOS/LVTTL (and for the
-                // unused half of an active HP tile).  Emitting both makes
-                // fasm2frames hit FasmInconsistentBits (SSTL bits overlap
-                // the general group with opposite polarity).
+                // HP banks (LIOB18/RIOB18) DO NOT HAVE A ".SLEW.SLOW" FEATURE.
+                // The database models slew there as ONE SHARED BIT named
+                // "...SLEW.FAST_SLOW"; segbits_liob18_sing.db offers exactly
+                // LVCMOS12_LVCMOS15_LVCMOS18.SLEW.FAST_SLOW and
+                // LVCMOS15.SLEW.FAST, and nothing else.  Emitting .SLEW.SLOW
+                // here produced a name no segbit matches, so fasm2frames
+                // dropped it -- visibly only as a "key not found" line that
+                // XRAY_ALLOW_MISSING_FEATURES=1 downgrades to a warning, and
+                // the pad came out misconfigured.  Confirmed against a WORKING
+                // Vivado bitstream read back with bit2fasm: it carries
+                // LIOB18_SING_X81Y51.IOB_Y1.LVCMOS12_LVCMOS15_LVCMOS18.SLEW.FAST_SLOW
+                // and no .SLEW.SLOW anywhere.
+                // The wide family bit IS valid on plain LIOB18/LIOB33 -- it is
+                // in segbits_liob18.db.  Gating it on !is_hp_bank stripped it
+                // from every HP output pad (48 -> 28 SLEW lines) and the board
+                // went from RX-alive to completely blank.  Only the _SING tile
+                // variant lacks it, which is the single "key not found" line
+                // that started this; do NOT generalise from that one tile.
+                //
+                // The one narrower exclusion that IS correct: on an HP bank
+                // Vivado encodes SSTL15/SSTL135 SLOW with the per-standard bits
+                // only (segbits_riob18.db, and the is_hp_bank block just below
+                // writes them); the general LVCMOS-family group covers
+                // LVCMOS/LVTTL and the unused half of an active HP tile.
+                // Emitting both makes fasm2frames hit FasmInconsistentBits --
+                // the SSTL bits overlap the general group with the opposite
+                // polarity.  Note this excludes HP+SSTL only, NOT all of
+                // is_hp_bank, which is the generalisation the paragraph above
+                // rules out.
                 bool is_hp_sstl_slow =
                     is_hp_bank &&
                     (iostandard == "SSTL15" || iostandard == "SSTL135");
@@ -1266,6 +1289,7 @@ struct FasmBackend
             // HP-bank OBUF "glue" — fires once per active output site.
             if (is_hp_bank)
                 write_bit("OBUF_HP_BANK_GLUE");
+
         }
 
         if (is_input) {
@@ -3219,6 +3243,18 @@ struct FasmBackend
         return fnd->second.as_bool();
     }
 
+    // Is a GTXE2_COMMON placed in this tile?  Used to decide who owns the
+    // shared IBUFDS_GTE2.CLKSWING_CFG bits -- see write_ibufds_gte2.
+    bool tile_has_gtxe2_common(int tile)
+    {
+        for (auto &cell : ctx->cells) {
+            CellInfo *c = cell.second.get();
+            if (c->type == id_GTXE2_COMMON && c->bel != BelId() && c->bel.tile == tile)
+                return true;
+        }
+        return false;
+    }
+
     void write_ibufds_gte2(CellInfo * ci)
     {
         push(get_tile_name(ci->bel.tile));
@@ -3233,7 +3269,31 @@ struct FasmBackend
         if (!clkrcv_trst) log_warning("%s/%s: According to ug482, CLKRCV_TRST should always be on\n",
                                        ci->hierpath.c_str(ctx), ci->name.c_str(ctx));
         write_bit("CLKRCV_TRST", clkrcv_trst);
-        pop(2);
+        pop();
+
+        // CLKSWING_CFG belongs to the reference-clock BUFFER, but prjxray puts
+        // its bits in the GTXE2_COMMON feature space, not in IBUFDS_GTE2_Y*.
+        // So it was written ONLY by write_gtx_pll -- i.e. only when the design
+        // happens to instantiate a GTXE2_COMMON.
+        //
+        // A design that uses the per-channel CPLL instead of the QPLL has no
+        // COMMON cell at all (LiteEth's K7_1000BASEX is one), and then nothing
+        // wrote these bits: the refclk buffer came up with swing config 0
+        // where Vivado writes 0b11, silently, on every such design.  Found by
+        // importing a routed design back into Vivado, whose DRC named the
+        // missing attribute (ADEF-446) on a board that was otherwise working.
+        //
+        // Write it here when no COMMON in this tile will, and stay out of the
+        // way when one does -- two writers would emit the feature twice.
+        if (!tile_has_gtxe2_common(ci->bel.tile)) {
+            push("GTXE2_COMMON");
+            auto clkswing_cfg = int_or_default(ci->params, ctx->id("CLKSWING_CFG"), 3);
+            if (clkswing_cfg != 3) log_warning("%s/%s: According to ug476, CLKSWING_CFG should always be 0b11\n",
+                                               ci->hierpath.c_str(ctx), ci->name.c_str(ctx));
+            write_int_vector("IBUFDS_GTE2.CLKSWING_CFG[1:0]", clkswing_cfg, 2);
+            pop();
+        }
+        pop();
     }
 
     void write_gtp_pll(CellInfo *ci)

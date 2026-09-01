@@ -134,38 +134,65 @@ BelId Arch::getBelByName(IdString name) const
 
     setup_byname();
 
+    // Accept BOTH spellings: "SITE/BEL" and the three-part "SITE/SITETYPE/BEL"
+    // that a physical netlist uses for IO.
+    //
+    // ORDER MATTERS.  This chipdb names an IO bel WITH its site-type prefix --
+    // "IOB18/PAD", "IOB18M/DCITERMDISABLE_GND" -- so for "IOB_X1Y276/IOB18/PAD"
+    // the bel to look up is "IOB18/PAD", not "PAD".  Dropping the middle
+    // component unconditionally therefore failed to resolve every IO pad, and
+    // the empty BelId it returned was fed to getBelSite(), which indexes the
+    // chipdb out of range and hands back a GARBAGE site name -- that name was
+    // then concatenated into the buffer's own BEL attribute and only surfaced
+    // in the placer as an unprintable "No Bel named '\325<\265/IOB33/OUTBUF'".
+    // Try the full remainder first and only then the stripped form, so both
+    // spellings resolve and neither shadows the other.
     auto split = split_identifier_name(name.str(this));
-    if (site_by_name.count(split.first)) {
-        int tile, site;
-        std::tie(tile, site) = site_by_name.at(split.first);
-        auto &tile_info = chip_info->tile_types[chip_info->tile_insts[tile].type];
-        IdString belname = id(split.second);
-        for (int i = 0; i < tile_info.num_bels; i++) {
-            if (tile_info.bel_data[i].site == site && tile_info.bel_data[i].name == belname.index) {
-                ret.tile = tile;
-                ret.index = i;
-                break;
-            }
-        }
-    } else if (tile_by_name.count(split.first)) {
-        // Guarded to match the site_by_name branch above. An unrecognised name --
-        // a typo in a BEL attribute, most often -- used to reach .at() and throw
-        // an uncaught std::out_of_range, aborting with a libc++ message and no
-        // hint as to which cell was at fault. Returning an empty BelId instead
-        // lets the caller's own diagnostic run: placer_heap.cc:386 already says
-        // "No Bel named '<name>' located for this chip (processing BEL attribute
-        // on '<cell>')", which is the message the user needs.
-        int tile = tile_by_name.at(split.first);
-        auto &tile_info = chip_info->tile_types[chip_info->tile_insts[tile].type];
-        IdString belname = id(split.second);
-        for (int i = 0; i < tile_info.num_bels; i++) {
-            if (tile_info.bel_data[i].name == belname.index) {
-                ret.tile = tile;
-                ret.index = i;
-                break;
-            }
-        }
+    std::vector<std::string> candidates{split.second};
+    {
+        size_t slash = split.second.find('/');
+        if (slash != std::string::npos)
+            candidates.push_back(split.second.substr(slash + 1));
     }
+    for (const auto &cand : candidates) {
+        IdString belname = id(cand);
+        if (site_by_name.count(split.first)) {
+            int tile, site;
+            std::tie(tile, site) = site_by_name.at(split.first);
+            auto &tile_info = chip_info->tile_types[chip_info->tile_insts[tile].type];
+            for (int i = 0; i < tile_info.num_bels; i++) {
+                if (tile_info.bel_data[i].site == site && tile_info.bel_data[i].name == belname.index) {
+                    ret.tile = tile;
+                    ret.index = i;
+                    break;
+                }
+            }
+        } else if (tile_by_name.count(split.first)) {
+            // Guarded to match the site_by_name branch above. An unrecognised name --
+            // a typo in a BEL attribute, most often -- used to reach .at() and throw
+            // an uncaught std::out_of_range, aborting with a libc++ message and no
+            // hint as to which cell was at fault. Returning an empty BelId instead
+            // lets the caller's own diagnostic run: placer_heap.cc:386 already says
+            // "No Bel named '<name>' located for this chip (processing BEL attribute
+            // on '<cell>')", which is the message the user needs.
+            int tile = tile_by_name.at(split.first);
+            auto &tile_info = chip_info->tile_types[chip_info->tile_insts[tile].type];
+            for (int i = 0; i < tile_info.num_bels; i++) {
+                if (tile_info.bel_data[i].name == belname.index) {
+                    ret.tile = tile;
+                    ret.index = i;
+                    break;
+                }
+            }
+        }
+        if (ret != BelId())
+            break;
+    }
+    // An unknown site/tile returns an EMPTY BelId, which every caller already
+    // handles -- placer1 answers with "No Bel named 'X' ... on cell 'Y'".
+    // tile_by_name.at() instead threw std::out_of_range out of the placer,
+    // reporting neither the name nor the cell, and the name it was given was
+    // unprintable anyway.
 
     return ret;
 }
@@ -303,6 +330,27 @@ PipId Arch::getPipByName(IdString name) const
                 ret.tile = tile;
                 ret.index = i;
                 break;
+            }
+        }
+    } else if (s.find("->") != std::string::npos) {
+        // "SRCWIRE->DSTWIRE", which is the form getPipName() PRINTS for a
+        // fabric pip.  Without this branch the printer and the parser are not
+        // inverses: getPipName writes wire NAMES joined by "->", while the code
+        // below expects "TILE/<src_index>.<dst_index>" with numeric indices, so
+        // nextpnr could not read back routing it had written itself.  That made
+        // the ROUTING net attribute (common/nextpnr.cc, bindPip on load) unusable
+        // for xc7 -- it asserted in split_identifier_name_dot on the first pip.
+        // applyFixedRoutes already resolves this same spelling by name; do the
+        // same here so a routed JSON round-trips.
+        size_t arrow = s.find("->");
+        WireId src = getWireByName(id(s.substr(0, arrow)));
+        WireId dst = getWireByName(id(s.substr(arrow + 2)));
+        if (src != WireId() && dst != WireId()) {
+            for (auto pip : getPipsDownhill(src)) {
+                if (getPipDstWire(pip) == dst) {
+                    ret = pip;
+                    break;
+                }
             }
         }
     } else {
@@ -854,6 +902,57 @@ bool Arch::place()
 {
     std::string placer = str_or_default(settings, id("placer"), defaultPlacer);
 
+    // PLACEMENT IS OPT-IN ON THIS ARCH.  Designs here arrive fully placed --
+    // place_lef stamps a BEL on every cell and hands over --fixed-routes -- so
+    // an unplaced cell is a DEFECT in whatever produced the netlist, not work
+    // for a placer to absorb.  Silently placing the remainder is how a run
+    // spent 51 minutes inside HeAP on ~23 cells nobody knew were unstamped.
+    //
+    // So unless --placer was given explicitly, refuse to place and NAME the
+    // cells.  Pass "--placer sa" to opt in when placement really is wanted.
+    if (!bool_or_default(settings, id("placer_explicit"), false)) {
+        std::vector<CellInfo *> unplaced;
+        for (auto &cell : cells) {
+            CellInfo *ci = cell.second.get();
+            // Pseudo constant drivers are bound by the constant router, never
+            // by a placer, so they are legitimately without a bel here.
+            if (ci->type == id_PSEUDO_GND || ci->type == id_PSEUDO_VCC)
+                continue;
+            // A cell CONSTRAINED to another is positioned by its parent, not by
+            // a placer: the dist-RAM expansion of a stamped RAM256X1S is four
+            // RAMS64E plus an F7/F7/F8 tree, all constr_abs_z children of a
+            // base that inherited the macro's BEL.  Demanding a BEL attribute
+            // on each of them would reject a design that is in fact fully
+            // determined.
+            if (ci->constr_parent != nullptr)
+                continue;
+            // place_lef's CE-buffer promotion invents $cebuf$N cells and stamps
+            // a site for the BUFHCE and BUFR forms, but leaves the BUFG form
+            // unplaced ON PURPOSE for a placer to site -- place_lef_core.ml has
+            // no BUFGCTRL site allocator, so that branch is a bare
+            // "ignore (add_buf bit \"BUFG\" sinks)" with no ftstamps entry.
+            // These are produced BY the placement step, not evidence that the
+            // netlist and the placement disagree, so they are exempt: the
+            // placer below still sites them exactly as it did before placement
+            // became opt-in.  ibex hits this (9 of them); ethmin does not, only
+            // because it runs with TOPO_BUFG_MAX=0 and creates none.
+            if (ci->name.str(this).rfind("$cebuf$", 0) == 0)
+                continue;
+            if (ci->bel == BelId() && !ci->attrs.count(id("BEL")))
+                unplaced.push_back(ci);
+        }
+        if (!unplaced.empty()) {
+            log_info("Unplaced cells (showing up to 20 of %d):\n", int(unplaced.size()));
+            for (size_t i = 0; i < std::min<size_t>(20, unplaced.size()); i++)
+                log_info("    %s (%s)\n", unplaced[i]->name.c_str(this), unplaced[i]->type.c_str(this));
+            log_error("%d cell(s) have no BEL and no placement was requested.  This flow expects a "
+                      "FULLY PLACED design (place_lef stamps every cell); an unplaced cell means the "
+                      "netlist and the placement disagree.  Re-run with '--placer sa' if placing them "
+                      "here is genuinely what you want.\n",
+                      int(unplaced.size()));
+        }
+    }
+
     if (placer == "heap") {
         PlacerHeapCfg cfg(getCtx());
         cfg.criticalityExponent = 7;
@@ -1147,7 +1246,8 @@ void Arch::applyFixedRoutes(const std::string &filename)
         return s.substr(a, b - a + 1);
     };
 
-    int nbound = 0, nlines = 0, miss_net = 0, miss_tile = 0, miss_pip = 0, conflict = 0, malformed = 0;
+    int nbound = 0, nlines = 0, miss_net = 0, miss_tile = 0, miss_pip = 0, conflict = 0, malformed = 0,
+        redundant = 0;
     std::unordered_set<NetInfo *> fixed_nets;
 
     // hierarchy-seam-normalised net lookup: Vivado-extracted names join levels
@@ -1215,7 +1315,17 @@ void Arch::applyFixedRoutes(const std::string &filename)
             continue;
         int home = bp.tile;
         std::function<void(WireId, int)> rec = [&](WireId w, int depth) {
-            WireId cw = canonicalWireId(chip_info, w.tile, w.index);
+            if (w == WireId())
+                return;
+            // A NODAL wire is already canonical and encodes tile == -1 (see
+            // canonicalWireId / wireInfo).  Re-canonicalising one indexes
+            // tile_insts[-1] and returns a garbage WireId, which segfaults in
+            // getPipsDownhill.  This bites whenever the driver's own belpin wire
+            // is nodal: `home` is then -1, so the "same tile" containment test
+            // below (d.tile != home) MATCHES other nodal wires instead of
+            // excluding them, and the walk recurses straight into shared INT
+            // routing with an invalid wire.
+            WireId cw = w.tile < 0 ? w : canonicalWireId(chip_info, w.tile, w.index);
             // A wire reachable from TWO different drivers is a shared OUTMUX
             // (xMUX) output that several cells could drive -- mapping it to one
             // driver is a guess that binds the wrong net, so mark it ambiguous
@@ -1225,7 +1335,11 @@ void Arch::applyFixedRoutes(const std::string &filename)
                 drv_net[cw] = ni;
             else if (it->second != ni)
                 it->second = nullptr;
-            if (depth <= 0)
+            // home < 0 means the driver belpin is itself nodal, so "stay in the
+            // driver's tile" cannot be expressed -- every nodal wire would
+            // compare equal to it.  Record the mapping and stop, which is what
+            // the containment test was there to achieve.
+            if (depth <= 0 || home < 0)
                 return;
             for (auto pip : getPipsDownhill(cw)) { // pips attach to the canonical wire
                 WireId d = getPipDstWire(pip);
@@ -1303,6 +1417,84 @@ void Arch::applyFixedRoutes(const std::string &filename)
     }
     log_info("    fixed-routes: %d/%zu route-nets resolved by driver topology\n", topo_hits, byname.size());
 
+    // ---- slice output mux (xMUX) as a SITE pip ---------------------------
+    // A Vivado node route crosses the slice's combinational output mux
+    // ("CLBLM_R_X129Y5/CLBLM_L_D -> .../CLBLM_L_DMUX").  prjxray marks those 10
+    // per CLB tile type is_pseudo=1 -- correctly, they are not interconnect --
+    // so the chipdb carries no TILE pip and the wire-name scan above finds
+    // nothing.  nextpnr models the same mux as a SITE pip feeding the site wire
+    // "<lane>MUX", which is what makes fasm.cc emit <lane>OUTMUX.<sel>.
+    //
+    // Resolve through the NET'S DRIVER BEL rather than by parsing the tile wire
+    // name: one CLB tile holds two slices and only the name prefix
+    // (CLBLM_L_ vs CLBLM_M_, CLBLL_L_ vs CLBLL_LL_) distinguishes them, which is
+    // fragile.  The driver is by definition in the site whose mux this is.
+    int xmux_hits = 0, xmux_fail = 0;
+    auto xmux_site_pip = [&](NetInfo *net, const std::string &srcname,
+                             const std::string &dstname) -> PipId {
+        size_t sl = dstname.rfind('/');
+        std::string w = (sl == std::string::npos) ? dstname : dstname.substr(sl + 1);
+        // short name must end "<A-D>MUX" (excludes CLBLM_IMUX*, GFAN etc.)
+        if (w.size() < 4 || w.compare(w.size() - 3, 3, "MUX") != 0)
+            return PipId();
+        char lane = w[w.size() - 4];
+        if (lane < 'A' || lane > 'D')
+            return PipId();
+        if (net == nullptr || net->driver.cell == nullptr)
+            return PipId();
+        BelId bel = net->driver.cell->bel;
+        if (bel == BelId())
+            return PipId();
+        // the "<lane>MUX" wire belonging to the DRIVER's own site
+        auto &l = locInfo(bel);
+        auto &bd = l.bel_data[bel.index];
+        IdString want = id(std::string(1, lane) + "MUX");
+        WireId xmux;
+        for (int i = 0; i < l.num_wires; i++) {
+            auto &wd = l.wire_data[i];
+            if (wd.site == bd.site && wd.name == want.index) {
+                xmux.tile = bel.tile;
+                xmux.index = i;
+                break;
+            }
+        }
+        if (xmux == WireId())
+            return PipId();
+        // Pick the uphill site pip carrying THIS net.  Prefer a source already
+        // bound to it; otherwise fall back to the source the Vivado wire name
+        // implies -- "<tile>_COUT" is the carry out (CY), anything else is the
+        // LUT's direct output (O6).  Never guess beyond that: a wrong mux
+        // selection silently mis-routes rather than failing loudly.
+        // Site source wire names are LANE-QUALIFIED: the D6LUT's output is
+        // "D6LUT_O6", not "O6", and the carry out feeding DMUX is "CARRY4_CO3"
+        // (the prjxray feature spells the same selection DOUTMUX.CY).
+        bool from_cout = srcname.size() >= 4 &&
+                         srcname.compare(srcname.size() - 4, 4, "COUT") == 0;
+        std::string implied = from_cout
+                                      ? "CARRY4_CO" + std::to_string(lane - 'A')
+                                      : std::string(1, lane) + "6LUT_O6";
+        PipId by_name;
+        for (auto p : getPipsUphill(xmux)) {
+            WireId s = getPipSrcWire(p);
+            if (getBoundWireNet(s) == net)
+                return p;
+            if (wireInfo(s).name == id(implied).index && by_name == PipId())
+                by_name = p;
+        }
+        if (by_name != PipId()) {
+            xmux_hits++;
+            return by_name;
+        }
+        if (xmux_fail++ < 5) {
+            std::string avail;
+            for (auto p : getPipsUphill(xmux))
+                avail += std::string(" ") + IdString(wireInfo(getPipSrcWire(p)).name).str(this);
+            log_warning("fixed-routes: xMUX %c of %s: no source '%s' (have:%s)\n", lane,
+                        nameOf(net), implied, avail.c_str());
+        }
+        return PipId();
+    };
+
     std::string line;
     while (std::getline(in, line)) {
         auto hash = line.find('#');
@@ -1331,6 +1523,21 @@ void Arch::applyFixedRoutes(const std::string &filename)
             auto nn = norm_nets.find(norm_name(netname));
             if (nn != norm_nets.end())
                 net = nn->second;
+        }
+        if (net == nullptr) {
+            // CONSTANT nets have no shared name: Vivado calls them GND/VCC (or
+            // <const0>/<const1>), the packer calls them $PACKER_GND_NET /
+            // $PACKER_VCC_NET.  Nor can driver topology find them -- a const net
+            // is multi-source, one tie-off per region, with no driver cell.
+            // Map them explicitly so an imported route can carry the tie-off
+            // distribution instead of leaving it to routeVcc()'s fill pass.
+            const char *pk = nullptr;
+            if (netname == "GND" || netname == "<const0>" || netname == "\\<const0>")
+                pk = "$PACKER_GND_NET";
+            else if (netname == "VCC" || netname == "<const1>" || netname == "\\<const1>")
+                pk = "$PACKER_VCC_NET";
+            if (pk != nullptr)
+                net = getNetByAlias(id(pk));
         }
         if (net == nullptr) {
             if (miss_net++ < 20)
@@ -1370,6 +1577,8 @@ void Arch::applyFixedRoutes(const std::string &filename)
                         pip = p;
                         break;
                     }
+            if (pip == PipId())
+                pip = xmux_site_pip(net, srcname, dstname);
             if (pip == PipId()) {
                 if (miss_pip++ < 20)
                     log_warning("fixed-routes: no pip %s->%s\n", srcname.c_str(), dstname.c_str());
@@ -1434,6 +1643,27 @@ void Arch::applyFixedRoutes(const std::string &filename)
                             getPipName(pip).str(this).c_str(), nameOf(sn != nullptr && sn != net ? sn : dn));
             continue;
         }
+        // A wire has exactly ONE driver.  If dst already belongs to this net it
+        // may already be DRIVEN -- routeClock() runs before us and routes the
+        // dedicated clock backbone, so a whole-design import (which carries the
+        // clock nets too, they are TYPE == SIGNAL in Vivado) can offer a second,
+        // fabric-side source for a BUFGCTRL input the backbone already feeds.
+        // The check above only rejects a different NET, so the second pip was
+        // bound and the FASM selected two sources for one mux -- fasm2frames
+        // then aborts with FasmInconsistentBits (measured: 3 BUFGCTRL I0 muxes,
+        // each CK_MUXED* from routeClock plus IMUX* from the import).
+        if (dn == net) {
+            bool already_driven = false;
+            for (auto up : getPipsUphill(dst))
+                if (getBoundPipNet(up) != nullptr) {
+                    already_driven = true;
+                    break;
+                }
+            if (already_driven) {
+                redundant++;
+                continue;
+            }
+        }
         if (sn == nullptr)
             bindWire(src, net, STRENGTH_LOCKED);
         if (dn == nullptr)
@@ -1442,8 +1672,12 @@ void Arch::applyFixedRoutes(const std::string &filename)
         fixed_nets.insert(net);
         nbound++;
     }
-    log_info("    fixed-routes: bound %d/%d pips (net-miss %d, tile-miss %d, pip-miss %d, conflict %d, malformed %d)\n",
-             nbound, nlines, miss_net, miss_tile, miss_pip, conflict, malformed);
+    log_info("    fixed-routes: bound %d/%d pips (net-miss %d, tile-miss %d, pip-miss %d, conflict %d, malformed %d, "
+             "redundant-driver %d)\n",
+             nbound, nlines, miss_net, miss_tile, miss_pip, conflict, malformed, redundant);
+    if (xmux_hits > 0 || xmux_fail > 0)
+        log_info("    fixed-routes: %d xMUX pseudo-pips resolved to site pips (%d unresolved)\n", xmux_hits,
+                 xmux_fail);
 
     // LUT-pin TEMPLATE: align every frozen LUT's input ports to the physical
     // input sitewire each net's locked (inter-slice) route actually delivers it
@@ -1461,8 +1695,30 @@ void Arch::applyFixedRoutes(const std::string &filename)
     // aligning each cell independently to the shared per-sitewire net stays
     // consistent.  Only fixed (locked-route-fed) LUTs are touched: a fresh LUT's
     // inputs carry no fixed net, so dnet stays null and it is skipped.
+    // REPLICATE MODE: when the netlist, the placement AND the routing all come
+    // from the same external implementation, each LUT's INIT and its pin
+    // assignment are ALREADY mutually consistent -- Vivado's word is
+    // authoritative and there is nothing to reconcile.  The template exists for
+    // the opposite case (our own placement fed by a foreign route), and it
+    // re-permutes INIT along with the ports, which is the known-buggy path
+    // noted above.  Skip it entirely; set NEXTPNR_FIXEDROUTES_PINSWAP=1 to force
+    // the old behaviour for comparison.
+    // Two INDEPENDENT switches: skipping the pin swap must NOT imply skipping
+    // the router.  The intra-site last mile (xFFMUX / xOUTMUX / input crossbar)
+    // exists only as SITE pips, which an external node-level route never
+    // contains -- and those muxes are emitted from BOUND site wires, so if
+    // router2 never runs they are never selected.  Measured: a
+    // ROUTE_FIXED_ONLY fasm had 24 FFMUX features where a routed build has
+    // 2235, i.e. essentially every flip-flop left with an unconfigured D mux --
+    // dead on hardware.  So allow "keep Vivado's pin assignment" while still
+    // letting the router complete the last mile.
+    bool replicate = getenv("NEXTPNR_FIXEDROUTES_NO_PINSWAP") != nullptr ||
+                     (getenv("NEXTPNR_ROUTE_FIXED_ONLY") != nullptr &&
+                      getenv("NEXTPNR_FIXEDROUTES_PINSWAP") == nullptr);
     int pin_swaps = 0;
     for (auto &cellp : cells) {
+        if (replicate)
+            break;
         CellInfo *ci = cellp.second.get();
         if (ci->type != id("SLICE_LUTX") || ci->bel == BelId())
             continue;
@@ -1470,6 +1726,25 @@ void Arch::applyFixedRoutes(const std::string &filename)
         if (zpos != BEL_6LUT && zpos != BEL_5LUT)
             continue;
         int npin = (zpos == BEL_6LUT) ? 6 : 5;
+        // Snapshot net -> ORIGINAL logical port (I0..I5) before any swap.  The
+        // FASM INIT permutation is driven entirely by X_ORIG_PORT_A*, and the
+        // hand-rolled label shuffling below loses a label whenever the target
+        // pin was empty (orig_tgt == "" so X_ORIG_PORT_A<src> is erased and not
+        // restored) -- that input then reads as don't-care and the emitted truth
+        // table changes popcount.  Measured against Vivado's own netlist: only
+        // 82 of 2265 LUT INITs survived, vs 1792 with no swapping at all.
+        // Rederiving every label from the FINAL port assignment makes the
+        // labels correct by construction, whatever the swaps did.
+        std::unordered_map<NetInfo *, std::string> net_orig;
+        for (int k = 1; k <= 6; k++) {
+            IdString pk = id("A" + std::to_string(k));
+            IdString ak = id("X_ORIG_PORT_A" + std::to_string(k));
+            if (!ci->attrs.count(ak) || !ci->ports.count(pk))
+                continue;
+            NetInfo *n = ci->ports.at(pk).net;
+            if (n != nullptr)
+                net_orig[n] = ci->attrs.at(ak).as_string();
+        }
         // Align all inputs: nextpnr's router treats each belpin as fixed to its
         // tile input (A6-only leaves A1..A5 mismatched -> hooking collides ->
         // 516-overused livelock), so the swap IS needed for routing.  KNOWN BUG:
@@ -1550,8 +1825,31 @@ void Arch::applyFixedRoutes(const std::string &filename)
                 ci->attrs[oa_src] = orig_tgt;
             pin_swaps++;
         }
+        // Rebuild X_ORIG_PORT_A* from where the nets ACTUALLY ended up, so the
+        // INIT permutation in get_lut_init matches the final pin assignment.
+        for (int k = 1; k <= 6; k++) {
+            IdString pk = id("A" + std::to_string(k));
+            IdString ak = id("X_ORIG_PORT_A" + std::to_string(k));
+            NetInfo *n = ci->ports.count(pk) ? ci->ports.at(pk).net : nullptr;
+            // Only REWRITE labels for pins that carry a net; never erase.
+            // Erasing a netless pin's label costs 430 extra unrouted arcs
+            // (516 -> 946 with everything else equal): X_ORIG_PORT drives the
+            // FASM INIT permutation but is also read when deciding how a LUT's
+            // inputs may be permuted, so removing it changes routing. A stale
+            // label on a pin with no net cannot mis-permute INIT anyway --
+            // get_lut_init only consults log_to_bit for nets that exist.
+            if (n == nullptr)
+                continue;
+            auto it = net_orig.find(n);
+            if (it != net_orig.end())
+                ci->attrs[ak] = Property(it->second);
+        }
     }
-    log_info("    fixed-routes: %d LUT-pin template swaps\n", pin_swaps);
+    if (replicate)
+        log_info("    fixed-routes: LUT-pin template SKIPPED (replicate mode -- the imported "
+                 "netlist's INIT and pin assignment are authoritative)\n");
+    else
+        log_info("    fixed-routes: %d LUT-pin template swaps\n", pin_swaps);
 
     // Complete the last mile of every locked arc.  With the hard-macro
     // contract (router2 now RESERVES locked wires to their own net rather
@@ -2117,11 +2415,50 @@ bool Arch::route()
     // dedicated-resource search and the GT refclk arc falls to (and fails
     // in) router2.  Safe now that fixed-routes carries DATA nets only
     // (SIGNAL-typed); the macro clock trees are (re)built by routeClock.
-    routeClock();
+    // Skip routeClock when the imported routing IS the routing: it builds a
+    // clock tree that competes with the one being imported, and the two
+    // disagree on which BUFG input to select.
+    if (getenv("NEXTPNR_ROUTE_FIXED_ONLY") == nullptr)
+        routeClock();
+    else
+        log_info("    route-fixed-only: skipping routeClock (import supplies the clock nets)\n");
     {
         std::string fixed = str_or_default(settings, id("fixed-routes"), "");
         if (!fixed.empty())
             applyFixedRoutes(fixed);
+    }
+    // NEXTPNR_ROUTE_FIXED_ONLY=1: treat the IMPORTED routing AS the routing and
+    // run no general router at all.  Replaying a complete external route (e.g.
+    // a Vivado implementation via dcp2routes) leaves router2 nothing useful to
+    // do -- every inter-site pip is already bound and LOCKED -- while it still
+    // spends hours failing to "complete" arcs whose wires it may not touch.
+    //
+    // --route-clock-only is NOT a substitute: it returns before routeVcc(), and
+    // the fixed-routes file carries SIGNAL nets only (dcp2routes filters on
+    // Vivado's TYPE == SIGNAL), so every constant tie-off would be left
+    // unrouted and the bitstream dead.  Run the same finishing passes the
+    // normal path does -- routeVcc() as the fill, then fixupRouting() -- so the
+    // FASM is complete.
+    if (getenv("NEXTPNR_ROUTE_FIXED_ONLY") != nullptr) {
+        findSourceSinkLocations();
+        // routeVcc() is SKIPPED here, not worked around.  A complete imported
+        // route already carries the constant nets; running our own pass over
+        // them puts two selections on one mux (fasm2frames dies with "wanted to
+        // clear bit ... but was set by", naming a BUFG input), and the previous
+        // fix -- filtering those nets out of the import -- threw away 542 real
+        // clock features to dodge the clash.  Skipping the pass keeps the
+        // import whole, which is the point of a replay.
+        // NEXTPNR_FIXED_ROUTE_VCC=1 restores it for an import that genuinely
+        // omits the constant nets.
+        if (getenv("NEXTPNR_FIXED_ROUTE_VCC") != nullptr)
+            routeVcc();
+        else
+            log_info("    route-fixed-only: skipping routeVcc (import supplies the constant nets)\n");
+        fixupRouting();
+        getCtx()->settings[getCtx()->id("route")] = 1;
+        archInfoToAttributes();
+        log_info("    route-fixed-only: imported routing kept as-is; no general router run\n");
+        return true;
     }
     // --route-clock-only: nextpnr routes just the dedicated clock backbone
     // (IBUFDS->BUFG input on CCIO->CMT->HROW->CK_MUXED, and BUFG->global) and
@@ -2132,6 +2469,11 @@ bool Arch::route()
         archInfoToAttributes();
         return true;
     }
+    // Dedicated pad connections (GT serial pins, refclk) have no pips in the
+    // chipdb, so the router cannot reach them.  Declare them pre-routed BEFORE
+    // it runs -- doing it in fixupRouting() is too late, the arcs have already
+    // been attempted and skipped.
+    bindDedicatedPads();
     findSourceSinkLocations();
 
     bool result;
@@ -2156,15 +2498,31 @@ bool Arch::route()
     // exited 255; as a post-router fill it only consumes leftover resources.
     routeVcc();
     fixupRouting();
-    // router1 runs its own final timing analysis; the router2 flow
-    // historically ended without one, so the last "Max frequency" lines the
-    // user saw were the placer's pre-route ESTIMATES (printed mid-flow by
-    // placer1's refinement pass) presented as the result.  Analyse the
-    // actually-routed design: real net delays, per-clock Fmax, and the
-    // critical path breakdown.
-    if (router == "router2")
+    // POST-ROUTE timing.  Only router1 runs timing_analysis after routing, so
+    // with router2 the ONLY "Max frequency" lines in the log come from
+    // placer1's post-placement call -- an estimate built from
+    // estimateDelay(), before a single wire is chosen.  Every Fmax quoted for
+    // a router2 build is therefore a placement estimate, not routed timing,
+    // which is a poor objective to optimise against.
+    //
+    // Both sides of the merge fixed that, and both are kept.  Upstream makes
+    // it unconditional for router2, which is the right default.  Ours stays as
+    // the else-if because it is the only route to the analysis for router1 --
+    // where the estimate problem is the same -- and because
+    // NEXTPNR_POST_ROUTE_TIMING is a NOTABLE name that
+    // scripts/assert-no-escape-hatches.sh --verify-names requires to be
+    // present in this source; taking upstream's form alone deletes it.
+    //   NEXTPNR_POST_ROUTE_TIMING=1  re-run the analysis on the real routing
+    //   NEXTPNR_CRIT_PATH_REPORT=1   also dump the critical path stage by stage
+    if (router == "router2") {
         timing_analysis(getCtx(), true /* slack_histogram */, true /* print_fmax */, true /* print_path */,
                         false /* warn_on_failure */);
+    } else if (getenv("NEXTPNR_POST_ROUTE_TIMING") != nullptr) {
+        log_info("Post-route timing analysis:\n");
+        timing_analysis(getCtx(), false /* slack_histogram */, true /* print_fmax */,
+                        getenv("NEXTPNR_CRIT_PATH_REPORT") != nullptr /* print_path */,
+                        false /* warn_on_failure */);
+    }
     getCtx()->settings[getCtx()->id("route")] = 1;
     archInfoToAttributes();
     return result;
@@ -2504,9 +2862,17 @@ TimingPortClass Arch::getPortTimingClass(const CellInfo *cell, IdString port, in
 TimingClockingInfo Arch::getPortClockingInfo(const CellInfo *cell, IdString port, int index) const
 {
     TimingClockingInfo info;
-    info.setup = getDelayFromNS(0.1);
-    info.hold = getDelayFromNS(0.1);
-    info.clockToQ = getDelayFromNS(0.1);
+    // FF (SLICE_FFX/FDRE-family) timing.  Was a flat 0.1ns stub for all three,
+    // which under-set clk->Q (real slow-corner ~0.26ns) and made hold analysis
+    // impossible.  Values below are the golden-Vivado xc7 -2 calibration
+    // (arcs.tsv per-type slow corner: FDRE clk->Q ~0.26, setup ~0.05, hold
+    // ~0.14ns).  DelayInfo is single-valued today (min==max) so these are the
+    // slow/late corner; the min/early (hold) corner scales by ~0.45 once
+    // DelayInfo carries a separate min (Phase-1 hold pass).
+    info.setup = getDelayFromNS(0.05);
+    info.hold = getDelayFromNS(0.143);    // hold requirement: use as-is (min==max)
+    info.clockToQ = getDelayFromNS(0.259);
+    info.clockToQ.min = getDelayFromNS(0.117).delay;  // fast-corner clk->Q for hold
     info.clock_port = xc7 ? id_CK : id_CLK;
     info.edge = RISING_EDGE;
     return info;
@@ -2597,19 +2963,64 @@ bool Arch::xc7_cell_timing_lookup(int tt_id, int inst_id, IdString variant, IdSt
     return true;
 }
 
-#ifdef WITH_HEAP
-const std::string Arch::defaultPlacer = "heap";
-#else
+// HeAP IS RETIRED ON THIS ARCH.  Everything here arrives PLACED -- place_lef
+// stamps a BEL on every cell and hands nextpnr --fixed-routes -- so there is
+// nothing for an analytic placer to solve, and measured it does not merely add
+// no value: it spent 51 MINUTES on the ~23 unstamped cells of the ethmin core
+// before being killed, because the constrained majority gives its solver
+// nothing to spread against.
+//
+// It used to be the DEFAULT, so any invocation that forgot "--placer sa" got it
+// silently -- which is exactly how that 51-minute run happened
+// (build_hardmacro_ethmin.sh passes no --placer).  Defaulting to sa makes the
+// flow's real placer the one you get when you say nothing.
+//
+// The implementation is still compiled and still selectable on the other
+// arches; only this arch's default and menu change.  To put it back, add "heap"
+// to availablePlacers below.
 const std::string Arch::defaultPlacer = "sa";
-#endif
 
-const std::vector<std::string> Arch::availablePlacers = {"sa",
-#ifdef WITH_HEAP
-                                                         "heap"
-#endif
-};
+// ...and it is back, because removing it broke the demos that have no placer
+// of their own.  johnson and the uartram calculator go stock yosys -> nextpnr
+// with no place_lef stage, so they relied on the DEFAULT placer being heap.
+// With heap gone they first hit the unplaced-cell gate, and with "--placer sa"
+// they route-fail instead: sa does not honour the MUXF7 slot rule, so a lut0
+// output cannot reach its mux7 at SLICE_X159Y155/F7BMUX.
+//
+// sa stays the DEFAULT -- that part was right, and it is what makes a forgotten
+// "--placer" give the flow's real placer rather than a 51-minute heap run on a
+// hard-macro design.  heap is merely selectable again, for the designs that
+// want a placer at all.
+const std::vector<std::string> Arch::availablePlacers = {"sa", "heap"};
 
 const std::string Arch::defaultRouter = "router2";
 const std::vector<std::string> Arch::availableRouters = {"router1", "router2"};
+
+void Arch::load_bel_blacklist() const
+{
+    blacklist_bels_loaded = true;
+    const char *f = getenv("NEXTPNR_BEL_BLACKLIST");
+    if (f == nullptr)
+        return;
+    std::ifstream in(f);
+    if (!in)
+        return;
+    std::string ln;
+    int n = 0, miss = 0;
+    while (std::getline(in, ln)) {
+        while (!ln.empty() && (ln.back() == '\r' || ln.back() == ' '))
+            ln.pop_back();
+        if (ln.empty() || ln[0] == '#')
+            continue;
+        BelId b = getBelByName(id(ln));
+        if (b == BelId()) {
+            miss++;
+            continue;
+        }
+        blacklist_bels.insert((int64_t(b.tile) << 32) | uint32_t(b.index));
+        n++;
+    }
+    log_info("bel blacklist: reserved %d bel(s) from %s (%d unresolved)\n", n, f, miss);
+}
 
 NEXTPNR_NAMESPACE_END
