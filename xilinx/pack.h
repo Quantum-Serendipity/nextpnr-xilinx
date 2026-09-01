@@ -119,7 +119,7 @@ struct XilinxPacker
     void pack_inverters();
     std::vector<std::pair<IdString, IdString>> split_lut6_2();
     void constrain_lut6_2_pairs(const std::vector<std::pair<IdString, IdString>> &pairs);
-    void pack_luts();
+    void pack_luts(const std::vector<std::pair<IdString, IdString>> &lut6_2_pairs);
     void pack_ffs();
     void pack_lutffs();
 
@@ -213,6 +213,8 @@ struct XC7Packer : public XilinxPacker
     bool has_illegal_fanout(NetInfo *carry);
     void pack_carries();
     void pack_carries_atomic();   // Vivado-compatible direct CARRY4 packer
+    // Carry-O fabric-fanout relocation (ALU chains: O and CO both tapped)
+    void relocate_carry_o_fabric();
 
     // IO
     CellInfo *insert_ibuf(IdString name, IdString type, NetInfo *i, NetInfo *o);
@@ -238,9 +240,17 @@ struct XC7Packer : public XilinxPacker
     void pack_idelayctrl();
 
     // Clocking
+    // create_clock lands on the net the XDC names (the pad); carry it through
+    // IBUF/BUFG/BUFH/BUFR/... and derive PLLE2/MMCME2 outputs so every clock
+    // domain the flops see is analysed against the constraint the design
+    // states instead of the --freq default (openXC7/nextpnr-xilinx#155).
+    void propagate_clock_constraints();
     void prepare_clocking();
     void pack_plls();
     void pack_gbs();
+    // Bind every pad-fed BUFIO to the one site its pad can reach; run from
+    // pack_gbs(), after pack_io() has placed the pads.
+    void constrain_bufios();
     void pack_clocking();
 
     // CFG

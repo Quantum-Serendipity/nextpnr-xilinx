@@ -515,10 +515,49 @@ void XC7Packer::pack_carries_atomic()
                     // is THIS O[z] (single FF sink).  Leave anything exotic
                     // (multiple FF sinks, pinned, already clustered) to the
                     // generic packer.
+                    //
+                    // Control-set guard: all FFs co-located into one carry
+                    // slice share the slice's LSR (the legaliser rejects a
+                    // half-tile whose FFs carry different clk/sr/ce).  An
+                    // adder whose sum FFs use different resets would make the
+                    // anchor slice permanently invalid and the whole carry
+                    // chain unplaceable; skip such FFs (the generic packer
+                    // then places them in a control-set-compatible slice).
                     if (sum_ff != nullptr && !ambiguous &&
                         !sum_ff->attrs.count(ctx->id("BEL")) &&
                         sum_ff->constr_parent == nullptr &&
                         sum_ff->constr_children.empty()) {
+                        // Full control-set key: FFs sharing a carry slice
+                        // must agree on clk, ce, set/reset nets AND their
+                        // inversion/latch/sync flavours (the legaliser checks
+                        // all of them per half-tile).
+                        auto ctrl_key = [&](CellInfo *ff) {
+                            std::vector<IdString> key;
+                            for (IdString p : {ctx->id("C"), ctx->id("CLK"), ctx->id("CE"), ctx->id("R"),
+                                               ctx->id("S"), ctx->id("CLR"), ctx->id("PRE")}) {
+                                NetInfo *n = get_net_or_empty(ff, p);
+                                key.push_back(n ? n->name : IdString());
+                            }
+                            for (IdString p : {ctx->id("IS_CLK_INVERTED"), ctx->id("IS_R_INVERTED"),
+                                               ctx->id("IS_S_INVERTED"), ctx->id("IS_PRE_INVERTED"),
+                                               ctx->id("IS_CLR_INVERTED")})
+                                key.push_back(bool_or_default(ff->params, p, false) ? ctx->id("$inv") : IdString());
+                            if (ff->attrs.count(ctx->id("X_FF_AS_LATCH")))
+                                key.push_back(ctx->id("$latch"));
+                            if (ff->attrs.count(ctx->id("X_FFSYNC")))
+                                key.push_back(ctx->id("$sync"));
+                            return key;
+                        };
+                        bool sr_ok = true;
+                        auto new_key = ctrl_key(sum_ff);
+                        for (auto child : anchor->constr_children)
+                            if ((child->constr_z & 0xF) == BEL_FF && ctrl_key(child) != new_key)
+                                sr_ok = false;
+                        if (!sr_ok) {
+                            if (getenv("DBG_CARRYFF"))
+                                log_info("CARRYFF SKIP %s for %s.O[%d] ctrlset-mismatch\n",
+                                         ctx->nameOf(sum_ff), ctx->nameOf(prev), z);
+                        } else {
                         anchor->constr_children.push_back(sum_ff);
                         sum_ff->constr_parent = anchor;
                         sum_ff->constr_x = 0;
@@ -528,6 +567,7 @@ void XC7Packer::pack_carries_atomic()
                         if (getenv("DBG_CARRYFF"))
                             log_info("CARRYFF %s -> %s.O[%d] @ lane %d (z<<4|FF)\n",
                                      ctx->nameOf(sum_ff), ctx->nameOf(prev), z, z);
+                        }
                     } else if (getenv("DBG_CARRYFF") && sum_ff != nullptr) {
                         log_info("CARRYFF SKIP %s for %s.O[%d] amb=%d pinned=%d constr=%d\n",
                                  ctx->nameOf(sum_ff), ctx->nameOf(prev), z, ambiguous,
@@ -988,6 +1028,449 @@ void XC7Packer::pack_carries()
             continue;
         xform_cell(c4_rules, ci);
     }
+}
+
+// Carry-O fabric-fanout relocation for ALU chains.
+//
+// A chain sub-slice whose carry SUM (O) AND carry-out (CO) both have fabric
+// fanout is unplaceable: both need the subslice's single output path
+// (xc7_logic_tile_valid's mux_output_used / co_uses_mux contention check;
+// router-confirmed unroutable -- 51 overused wires when relaxed).  The
+// yosys/ABC $alu decomposition produces such taps (e.g. the MAC datapath of
+// ddr3-test-arty-s7).  Restructure:
+//
+//  - the sum is S ^ CIN; for a non-head bit its CIN is an internal carry
+//    (not fabric-reachable), so SPLIT the CARRY4 at the contended bit: the
+//    bit becomes the head of a new CARRY4 whose CIN is the previous carry
+//    (now a fabric net);
+//  - duplicate the sum into an ordinary LUT (S ^ CIN, 2-input XOR) and
+//    re-point the O net's fabric users at it; the CARRY4 O pin keeps only
+//    the local sum-FF (XOR-direct path).
+//
+// The duplicate LUT is unconstrained, so the general placer puts it in any
+// slice with a free output mux.  Opt out with NEXTPNR_NO_CARRY_O_RELOC.
+void XC7Packer::relocate_carry_o_fabric()
+{
+    if (getenv("NEXTPNR_NO_CARRY_O_RELOC"))
+        return;
+    if (!ctx->nets.count(ctx->id("$PACKER_GND_NET")) || !ctx->nets.count(ctx->id("$PACKER_VCC_NET")))
+        return;
+    NetInfo *gnd = ctx->nets.at(ctx->id("$PACKER_GND_NET")).get();
+    NetInfo *vcc = ctx->nets.at(ctx->id("$PACKER_VCC_NET")).get();
+    static const std::unordered_set<IdString> ff_types{
+        ctx->id("FDRE"), ctx->id("FDSE"), ctx->id("FDCE"), ctx->id("FDPE"),
+        ctx->id("FDRSE")};
+    int relocated = 0, split_carries = 0, skipped = 0;
+
+    // bit = GLOBAL bit index within the original 4-bit CARRY4.  Every cell
+    // (original or split) keeps global port indices 0..3: the COUT->CIN
+    // spine only exists between physical CO3 and CIN, so a split cell with
+    // ports renumbered from 0 puts its carry exit on CO(3-off), which has
+    // no route to the next cell's CIN (seen as an unroutable CO2->CIN arc
+    // on litex ddr3).  Lanes outside a cell's real bit range are
+    // pass-through filled instead.
+    auto pname = [&](const char *p, int bit) {
+        return ctx->id(std::string(p) + std::to_string(bit));
+    };
+    auto o_has_fabric = [&](CellInfo *c4, int bit) {
+        // ANY user (sum FFs included): a lone FF is only mux-free when it
+        // lands in the carry's own subslice, which the placer is not
+        // guaranteed to honour after a split -- and the validity check
+        // re-evaluates the carry bit against both eighths of the pair.
+        NetInfo *o = get_net_or_empty(c4, pname("O", bit));
+        return o != nullptr && !o->users.empty();
+    };
+    auto co_has_fabric = [&](CellInfo *c4, int bit) {
+        NetInfo *co = get_net_or_empty(c4, pname("CO", bit));
+        if (co == nullptr)
+            return false;
+        if (bit == 3) { // physical COUT: CIN users ride the spine
+            for (auto &u : co->users)
+                if (u.port != ctx->id("CIN"))
+                    return true;
+            return false;
+        }
+        return !co->users.empty();
+    };
+    auto next_in_chain = [&](CellInfo *c4) -> CellInfo * {
+        for (int b = 0; b < 4; b++) {
+            NetInfo *co = get_net_or_empty(c4, ctx->id("CO" + std::to_string(b)));
+            if (!co)
+                continue;
+            for (auto &u : co->users)
+                if (u.cell->type == ctx->id("CARRY4") && u.port == ctx->id("CIN"))
+                    return u.cell;
+        }
+        return nullptr;
+    };
+
+    // Duplicate the sum (S ^ CIN) into a LUT; the O net keeps only FF sinks.
+    auto relocate_sum = [&](CellInfo *c4, int bit, NetInfo *cin_net, CellInfo *root) {
+        NetInfo *s = get_net_or_empty(c4, pname("S", bit));
+        NetInfo *o = get_net_or_empty(c4, pname("O", bit));
+        if (s == nullptr || cin_net == nullptr || o == nullptr)
+            return;
+        std::unique_ptr<NetInfo> sum_copy{new NetInfo};
+        sum_copy->name = ctx->id(o->name.str(ctx) + "$sum$" + std::to_string(++autoidx));
+        std::unique_ptr<CellInfo> lut =
+                create_lut(ctx, o->name.str(ctx) + "$sumLUT$" + std::to_string(++autoidx),
+                           {s, cin_net}, sum_copy.get(), Property(6));
+        // Re-point EVERY user (including any sum-FF: xc7_logic_tile_valid
+        // re-evaluates the carry bits against both slice halves (eighths
+        // 0..3 and 4..7), and a lone FF on the O net claims the output mux
+        // against the other half's null ff1 -- leaving the CARRY4 O pin
+        // with an empty net avoids all claims).  The sum LUT computes the
+        // identical S^CIN value.
+        std::vector<PortRef> users(o->users.begin(), o->users.end());
+        int moved = 0;
+        for (auto &u : users) {
+            disconnect_port(ctx, u.cell, u.port);
+            connect_port(ctx, sum_copy.get(), u.cell, u.port);
+            moved++;
+        }
+        // A moved sum-FF must leave the cluster too: anchored in the
+        // carry's own lane, its D would now have to arrive from the fabric
+        // sum LUT through the slice's input mux, whose only fabric path
+        // (the lane's X bypass) can be claimed by the carry's DI --
+        // leaving the arc unroutable (seen on litex ddr3 as a failed
+        // route into DFFMUX_OUT).  Like the sum LUT itself, the general
+        // placer finds them a routable home.
+        for (auto &u : users) {
+            if (!(u.port == ctx->id("D") && ff_types.count(u.cell->type)))
+                continue;
+            CellInfo *ff = u.cell;
+            if (ff->constr_parent != root)
+                continue;
+            root->constr_children.erase(
+                    std::remove(root->constr_children.begin(), root->constr_children.end(), ff),
+                    root->constr_children.end());
+            ff->constr_parent = nullptr;
+            ff->constr_x = ff->UNCONSTR;
+            ff->constr_y = ff->UNCONSTR;
+            ff->constr_z = ff->UNCONSTR;
+            ff->constr_abs_z = false;
+        }
+        // Leave the sum LUT unconstrained: the general placer puts it in any
+        // slice with a free output mux (the validity check rejects carry
+        // tiles), while a fixed relative row can collide with another chain's
+        // absolute position and displace one of its LUTs.
+        IdString nname = sum_copy->name;
+        ctx->nets[nname] = std::move(sum_copy);
+        new_cells.push_back(std::move(lut));
+        relocated++;
+        if (getenv("DBG_CARRYO"))
+            log_info("CARRO %s.O%d -> sum LUT (S^CIN), %d fabric users moved\n",
+                     ctx->nameOf(c4), bit, moved);
+    };
+
+    // Split c4 at global bit i: bits i..3 move to a new full-width CARRY4
+    // whose CIN carries the old CO[i-1] value via a dedicated COUT->CIN
+    // link.  Both cells pass the carry through their empty lanes with
+    // S=VCC: in the MUXCY, CO = S ? CIN : DI, so S must be HIGH to
+    // propagate (the earlier S=GND fill selected DI and silently zeroed
+    // the carry -- O, not CO, is what passes CIN when S is low).
+    //
+    // A CARRY4 S pin is physically driven by the corresponding 6LUT O6;
+    // there is no direct constant input.  Atomic carry packing normally
+    // inserts and constrains a feed-through LUT for a constant S, but this
+    // split happens afterwards.  Do the same for every synthetic
+    // pass-through lane here.  Connecting $PACKER_VCC_NET directly to S
+    // routes in nextpnr's graph but emits no LUT INIT, leaving the hardware
+    // carry stage without the required high propagate value.
+    //
+    // Moved LUT/FF constraints are re-anchored onto the new CARRY4 (rows
+    // assigned by the chain renumber).
+    auto split_at = [&](CellInfo *c4, int i, CellInfo *root) -> CellInfo * {
+        std::unique_ptr<CellInfo> nb{new CellInfo};
+        nb->name = ctx->id(c4->name.str(ctx) + "$split$" + std::to_string(++autoidx));
+        nb->type = ctx->id("CARRY4");
+        auto declare = [&](IdString name, PortType t) {
+            nb->ports[name].name = name;
+            nb->ports[name].type = t;
+        };
+        declare(ctx->id("CIN"), PORT_IN);
+        for (int b = 0; b < 4; b++) {
+            for (const char *p : {"S", "DI"})
+                declare(pname(p, b), PORT_IN);
+            for (const char *p : {"O", "CO"})
+                declare(pname(p, b), PORT_OUT);
+        }
+        // Move global bits i..3 FIRST -- the range includes CO3, so the
+        // COUT->CIN link must only be created once the move is done.
+        // (Creating it before let the move loop steal the link net back
+        // onto the new cell: a CO->CIN self-loop, a driverless chain net,
+        // and a broken CO->CIN walk that left every split row-less -- the
+        // legaliser livelock on the litex ddr3 designs.  On a re-split the
+        // steal becomes the WANTED effect: CO3 holds the link to the upper
+        // split, and moving it re-chains it through the new cell.)
+        for (int b = i; b < 4; b++) {
+            for (const char *p : {"S", "DI", "O", "CO"}) {
+                IdString port = pname(p, b);
+                NetInfo *net = get_net_or_empty(c4, port);
+                disconnect_port(ctx, c4, port);
+                if (net != nullptr)
+                    connect_port(ctx, net, nb.get(), port);
+            }
+        }
+        // Dedicated COUT->CIN spine link: the model has no fabric pips into
+        // CIN, so a link via the old CO[i-1] fabric net is unroutable.
+        std::unique_ptr<NetInfo> link{new NetInfo};
+        link->name = ctx->id(c4->name.str(ctx) + "$carry$" + std::to_string(++autoidx));
+        connect_port(ctx, link.get(), c4, ctx->id("CO3"));
+        connect_port(ctx, link.get(), nb.get(), ctx->id("CIN"));
+        IdString lname = link->name;
+        ctx->nets[lname] = std::move(link);
+        // Pass-through fills: c4's freed head i..3 carries CO[i-1] up to its
+        // CO3; nb's empty tail 0..i-1 carries its CIN up to bit i.  Realise
+        // each S=1 with a local 6LUT, just like pack_carries_atomic() does
+        // for constant S inputs before relocation.
+        for (int b = i; b < 4; b++) {
+            connect_port(ctx, vcc, c4, pname("S", b));
+            PortRef pr{c4, pname("S", b)};
+            auto s_feed = feed_through_lut(vcc, {pr});
+            CellInfo *s_lut = s_feed.get();
+            root->constr_children.push_back(s_lut);
+            s_lut->constr_parent = root;
+            s_lut->constr_x = 0;
+            s_lut->constr_y = 0;
+            s_lut->constr_abs_z = true;
+            s_lut->constr_z = (b << 4) | BEL_6LUT;
+            new_cells.push_back(std::move(s_feed));
+            connect_port(ctx, gnd, c4, pname("DI", b));
+        }
+        for (int b = 0; b < i; b++) {
+            connect_port(ctx, vcc, nb.get(), pname("S", b));
+            PortRef pr{nb.get(), pname("S", b)};
+            auto s_feed = feed_through_lut(vcc, {pr});
+            CellInfo *s_lut = s_feed.get();
+            root->constr_children.push_back(s_lut);
+            s_lut->constr_parent = root;
+            s_lut->constr_x = 0;
+            s_lut->constr_y = 0;
+            s_lut->constr_abs_z = true;
+            s_lut->constr_z = (b << 4) | BEL_6LUT;
+            new_cells.push_back(std::move(s_feed));
+            connect_port(ctx, gnd, nb.get(), pname("DI", b));
+        }
+        // re-anchor the moved LUT/FF constraints onto the new CARRY4
+        for (int b = i; b < 4; b++) {
+            for (const char *p : {"S", "DI"}) {
+                NetInfo *net = get_net_or_empty(nb.get(), pname(p, b));
+                if (net == nullptr || net->driver.cell == nullptr)
+                    continue;
+                CellInfo *drv = net->driver.cell;
+                if (drv->constr_parent == nullptr)
+                    continue;
+                drv->constr_z = (b << 4) | (drv->constr_z & 0xF);
+                drv->constr_y = 0;
+            }
+            NetInfo *o = get_net_or_empty(nb.get(), pname("O", b));
+            if (o != nullptr) {
+                for (auto &u : o->users) {
+                    if (!(u.port == ctx->id("D") && ff_types.count(u.cell->type)))
+                        continue;
+                    if (u.cell->constr_parent == nullptr)
+                        continue;
+                    // Force the FF slot: the pre-split anchor may carry an
+                    // unrelated low nibble (e.g. a RSTINV slot from an early
+                    // adoption) that must not leak into the new lane.
+                    u.cell->constr_z = (b << 4) | BEL_FF;
+                    u.cell->constr_y = 0;
+                }
+            }
+        }
+        nb->constr_parent = root;
+        root->constr_children.push_back(nb.get());
+        nb->constr_x = 0;
+        nb->constr_abs_z = true;
+        nb->constr_z = BEL_CARRY4;
+        CellInfo *ret = nb.get();
+        new_cells.push_back(std::move(nb));
+        return ret;
+    };
+
+    // Find chain roots (CIN not driven by another CARRY4's CO).
+    std::vector<CellInfo *> roots;
+    for (auto cell : sorted(ctx->cells)) {
+        CellInfo *ci = cell.second;
+        if (ci->type != ctx->id("CARRY4"))
+            continue;
+        NetInfo *cin = get_net_or_empty(ci, ctx->id("CIN"));
+        bool is_root = (cin == nullptr) || (cin->driver.cell == nullptr) ||
+                       (cin->driver.cell->type != ctx->id("CARRY4"));
+        if (is_root)
+            roots.push_back(ci);
+    }
+
+    for (auto *root : roots) {
+        if (root->attrs.count(ctx->id("BEL")))
+            continue; // imported (Vivado-proven) placement: leave alone
+        // NOTE: roots deliberately keep constr_x/y UNCONSTR.  An earlier
+        // revision pinned each root to a distinct row via
+        // constr_y = -(chain_seq + chain_seq/25), but on a parentless cell
+        // constr_y is an ABSOLUTE grid position (place_common's
+        // get_constraints_distance) -- a negative row can never be
+        // satisfied, so the final constraint check failed the moment
+        // placement completed.  The overlap scenario the pin targeted
+        // (a LUT shared between two chains, adopted by one and bound by
+        // the other's BFS) is handled by the legaliser's leaf relocation
+        // instead.
+        // work items: (CARRY4, global bit offset)
+        std::vector<std::pair<CellInfo *, int>> work;
+        for (CellInfo *c = root; c != nullptr; c = next_in_chain(c))
+            work.emplace_back(c, 0);
+        while (!work.empty()) {
+            auto [c4, off] = work.back();
+            work.pop_back();
+            if (c4->attrs.count(ctx->id("BEL")))
+                continue;
+            for (int i = 3; i >= off; i--) {
+                if (!o_has_fabric(c4, i) || !co_has_fabric(c4, i))
+                    continue;
+                if (i == off) {
+                    NetInfo *cin = get_net_or_empty(c4, ctx->id("CIN"));
+                    // A chain root whose carry-in was a constant has its CIN/CYINIT
+                    // pins disconnected by the PRECYINIT fix in pack_carries().
+                    // The constant value is recorded in PRECYINIT_CONST; use it as
+                    // the sum LUT's CIN input so the root bit's O fabric fanout is
+                    // relocated like any other bit.  Without this, bit 0 keeps an
+                    // O->fabric user alongside CO->fabric (the next bit's sum LUT),
+                    // which violates the single-OUTMUX budget.
+                    if (cin == nullptr) {
+                        if (c4->params.count(ctx->id("PRECYINIT_CONST"))) {
+                            int val = int_or_default(c4->params, ctx->id("PRECYINIT_CONST"), 0);
+                            cin = (val != 0) ? vcc : gnd;
+                        }
+                    }
+                    // Only relocate when bit 0 actually has a fabric O sink that
+                    // contends for OUTMUX; in-position sum FFs are local and do not
+                    // trigger the contention.  This keeps registered adders/counters
+                    // (v4/v10) on the direct XOR->FF path and preserves their fasm.
+                    bool needs_relocate = cin != nullptr;
+                    if (needs_relocate && i == off) {
+                        NetInfo *o = get_net_or_empty(c4, pname("O", i));
+                        if (o != nullptr) {
+                            bool only_ff = true;
+                            for (auto &u : o->users)
+                                if (!(u.port == ctx->id("D") && ff_types.count(u.cell->type))) {
+                                    only_ff = false;
+                                    break;
+                                }
+                            if (only_ff)
+                                needs_relocate = false;
+                        }
+                    }
+                    if (needs_relocate)
+                        relocate_sum(c4, i, cin, root);
+                } else {
+                    // Includes i == 3: a one-bit split makes bit 3 a new chain
+                    // head whose CIN (the old CO[2]) becomes fabric-reachable.
+                    NetInfo *co_prev = get_net_or_empty(c4, pname("CO", i - 1));
+                    if (co_prev == nullptr)
+                        continue;
+                    CellInfo *c4b = split_at(c4, i, root);
+                    split_carries++;
+                    relocate_sum(c4b, i, co_prev, root);
+                    work.emplace_back(c4b, i);
+                }
+            }
+        }
+        // renumber the chain's row offsets (HCLK-skip formula, as pack_carries)
+        int idx = 0;
+        for (CellInfo *c = root; c != nullptr; c = next_in_chain(c)) {
+            if (c == root) {
+                idx++;
+                continue; // root keeps UNCONSTR x/y (only z is pinned)
+            }
+            if (c->attrs.count(ctx->id("BEL"))) {
+                idx++;
+                continue;
+            }
+            c->constr_y = -(idx + idx / 25);
+            idx++;
+        }
+        // Lane members follow their carry by NETLIST relation (the S/DI
+        // driver LUTs and O-sink FFs clustered under this root), never by
+        // matching y values: split lanes and original chain rows live in
+        // the same small negative integers, so any value-matching shift
+        // cross-assigns lanes between owners (observed on litex ddr3:
+        // lanes pinned to rows -7/-8 where no CARRY4 sits, and two LUTs
+        // booked onto one (x,y,z) -- unroutable carry S inputs).
+        for (CellInfo *c = root; c != nullptr; c = next_in_chain(c)) {
+            if (c->attrs.count(ctx->id("BEL")))
+                continue;
+            int row_y = (c == root) ? 0 : c->constr_y;
+            for (int b = 0; b < 4; b++) {
+                for (const char *p : {"S", "DI"}) {
+                    NetInfo *net = get_net_or_empty(c, ctx->id(std::string(p) + std::to_string(b)));
+                    if (net == nullptr || net->driver.cell == nullptr)
+                        continue;
+                    CellInfo *drv = net->driver.cell;
+                    if (drv->constr_parent != root || drv->type == ctx->id("CARRY4"))
+                        continue;
+                    drv->constr_y = row_y;
+                }
+                NetInfo *o = get_net_or_empty(c, ctx->id("O" + std::to_string(b)));
+                if (o == nullptr)
+                    continue;
+                for (auto &u : o->users) {
+                    if (!(u.port == ctx->id("D") && ff_types.count(u.cell->type)))
+                        continue;
+                    if (u.cell->constr_parent != root)
+                        continue;
+                    u.cell->constr_y = row_y;
+                }
+            }
+        }
+    }
+
+    if (relocated || split_carries || skipped)
+        log_info("   Carry-O relocation: %d sum(s) duplicated, %d CARRY4 split(s), %d bit(s) skipped (unrelocatable)\n",
+                 relocated, split_carries, skipped);
+
+    flush_cells();
+    if (getenv("DBG_CARRYO")) {
+        for (auto &cell : ctx->cells) {
+            CellInfo *ci = cell.second.get();
+            if (ci->type != ctx->id("CARRY4"))
+                continue;
+            std::string ports;
+            for (int b = 0; b < 4; b++) {
+                NetInfo *o = get_net_or_empty(ci, ctx->id("O" + std::to_string(b)));
+                NetInfo *co = get_net_or_empty(ci, ctx->id("CO" + std::to_string(b)));
+                ports += " [b" + std::to_string(b) + " O=";
+                if (o) {
+                    ports += std::to_string(o->users.size());
+                    for (auto &u : o->users)
+                        ports += u.cell->type.str(ctx) + " ";
+                } else
+                    ports += "-";
+                ports += " CO=";
+                if (co) {
+                    ports += std::to_string(co->users.size());
+                    for (auto &u : co->users)
+                        ports += u.cell->type.str(ctx) + " ";
+                } else
+                    ports += "-";
+                ports += "]";
+            }
+            log_info("CARRO-C4 %s%s\n", ctx->nameOf(ci), ports.c_str());
+            log_info("CARRO-C4P %s parent=%d nchild=%d y=%d\n", ctx->nameOf(ci),
+                     int(ci->constr_parent != nullptr), int(ci->constr_children.size()), ci->constr_y);
+            for (int b = 0; b < 4; b++) {
+                NetInfo *o = get_net_or_empty(ci, ctx->id("O" + std::to_string(b)));
+                if (!o) continue;
+                for (auto &u : o->users) {
+                    if (!(u.port == ctx->id("D") && (u.cell->type == ctx->id("FDRE") || u.cell->type == ctx->id("FDSE") ||
+                                                      u.cell->type == ctx->id("FDCE") || u.cell->type == ctx->id("FDPE"))))
+                        continue;
+                    log_info("CARRO-FF %s.O%d -> %s parent=%d y=%d z=%x\n", ctx->nameOf(ci), b, ctx->nameOf(u.cell),
+                             int(u.cell->constr_parent != nullptr), u.cell->constr_y, u.cell->constr_z);
+                }
+            }
+        }
+    }
+
 }
 
 NEXTPNR_NAMESPACE_END

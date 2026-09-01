@@ -147,7 +147,14 @@ BelId Arch::getBelByName(IdString name) const
                 break;
             }
         }
-    } else {
+    } else if (tile_by_name.count(split.first)) {
+        // Guarded to match the site_by_name branch above. An unrecognised name --
+        // a typo in a BEL attribute, most often -- used to reach .at() and throw
+        // an uncaught std::out_of_range, aborting with a libc++ message and no
+        // hint as to which cell was at fault. Returning an empty BelId instead
+        // lets the caller's own diagnostic run: placer_heap.cc:386 already says
+        // "No Bel named '<name>' located for this chip (processing BEL attribute
+        // on '<cell>')", which is the message the user needs.
         int tile = tile_by_name.at(split.first);
         auto &tile_info = chip_info->tile_types[chip_info->tile_insts[tile].type];
         IdString belname = id(split.second);
@@ -2888,15 +2895,22 @@ bool Arch::route()
     // so a violation aborts BEFORE the offending routing is stamped back into
     // the ROUTING attribute and becomes re-importable.
     check_partition_routing();
-    // POST-ROUTE timing.  Only router1 runs timing_analysis after routing, so
-    // with router2 the ONLY "Max frequency" lines in the log come from
-    // placer1's post-placement call -- an estimate built from
-    // estimateDelay(), before a single wire is chosen.  Every Fmax quoted for
-    // a router2 build is therefore a placement estimate, not routed timing,
-    // which is a poor objective to optimise against.
-    //   NEXTPNR_POST_ROUTE_TIMING=1  re-run the analysis on the real routing
-    //   NEXTPNR_CRIT_PATH_REPORT=1   also dump the critical path stage by stage
-    if (getenv("NEXTPNR_POST_ROUTE_TIMING") != nullptr) {
+    // router1 runs its own final timing analysis; the router2 flow
+    // historically ended without one, so the last "Max frequency" lines the
+    // user saw were the placer's pre-route ESTIMATES (printed mid-flow by
+    // placer1's refinement pass) presented as the result.  Analyse the
+    // actually-routed design: real net delays, per-clock Fmax, and the
+    // critical path breakdown.
+    if (router == "router2") {
+        timing_analysis(getCtx(), true /* slack_histogram */, true /* print_fmax */, true /* print_path */,
+                        false /* warn_on_failure */);
+    } else if (getenv("NEXTPNR_POST_ROUTE_TIMING") != nullptr) {
+        // router1's own analysis is not driven by these knobs, so the opt-in
+        // re-run is still the only way to get a post-route Fmax with a
+        // critical-path breakdown on that router.  It no longer covers
+        // router2: the branch above analyses that flow unconditionally.
+        //   NEXTPNR_POST_ROUTE_TIMING=1  re-run the analysis on the real routing
+        //   NEXTPNR_CRIT_PATH_REPORT=1   also dump the critical path stage by stage
         log_info("Post-route timing analysis:\n");
         timing_analysis(getCtx(), false /* slack_histogram */, true /* print_fmax */,
                         getenv("NEXTPNR_CRIT_PATH_REPORT") != nullptr /* print_path */,
