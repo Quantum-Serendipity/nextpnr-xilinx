@@ -562,6 +562,25 @@ void Arch::setup_pip_blacklist()
                     blacklist_pips[td.type].insert(j);
             }
         }
+        // CLK_PERF<0..3>: the CMT performance-path taps are in the chipdb but in
+        // no bit database, so a route through one is unencodable and fasm2frames
+        // raises FasmLookupError.  Measured 2026-09-02 against prjxray-db
+        // sidecar/wave-b-db @ 3063ddf: 20 CLK_PERF-destination pips in
+        // CMT_TOP_L_LOWER_B and 20 in CMT_TOP_R_LOWER_B, in each of artix7,
+        // kintex7, spartan7, virtex7 and zynq7 -- and 0 files under
+        // */ppips_*.db or */segbits_*.db mention CLK_PERF in any of the five
+        // (control: CLK_MMCM, 30 such files; CLK_MMCM as a pip destination in
+        // the same two tile types, 14 + 14).  This is a separate `if`, not an
+        // arm of the CMT_TOP_R chain above, because the L side carries the same
+        // 20 pips and that chain never reaches CMT_TOP_L.
+        if (boost::starts_with(type, "CMT_TOP_")) {
+            for (int j = 0; j < td.num_pips; j++) {
+                auto &pd = td.pip_data[j];
+                std::string dest_name = IdString(td.wire_data[pd.dst_index].name).str(this);
+                if (boost::contains(dest_name, "CLK_PERF"))
+                    blacklist_pips[td.type].insert(j);
+            }
+        }
     }
     // NEXTPNR_PIP_BLACKLIST_TILE=<file>: reserve individual pips in NAMED tile
     // instances (one "TILENAME.DST.SRC" per line), for pips whose config bit
