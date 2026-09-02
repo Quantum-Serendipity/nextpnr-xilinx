@@ -21,10 +21,13 @@
 #include <algorithm>
 #include <boost/algorithm/string.hpp>
 #include <boost/range/adaptor/reversed.hpp>
+#include <cctype>
 #include <cmath>
 #include <cstring>
 #include <fstream>
+#include <map>
 #include <queue>
+#include <set>
 #include "log.h"
 #include "nextpnr.h"
 #include "placer1.h"
@@ -3384,6 +3387,201 @@ void Arch::load_bel_blacklist() const
     log_info("bel blacklist: reserved %d bel(s) from %s (%d unresolved)\n", n, f, miss);
 }
 
+// A structural scan of the ROI object. It records the byte offset of every
+// key's value and, walking the same members, refuses any key the ROI parser
+// does not act on.
+//
+// UNKNOWN-KEY REJECTION IS THE MECHANISM, not a special case for any one key.
+// The flat find("\"GRID_X_MIN\"") this replaces accepted a file whose four
+// rectangles lived in a `regions` array, took the FIRST GRID_X_MIN, and placed
+// every region in slot 0 at rc 0 -- a green log and a routed design measuring a
+// population nobody asked for. Any key Arch does not read is that same hazard,
+// so the accepted set is closed rather than open.
+//
+// Still not a general JSON parser and still no JSON dependency in Arch: it
+// understands objects, arrays, strings and opaque scalars, which is the whole
+// of the prjxray ROI schema. Values are located, not decoded.
+struct RoiJsonScan
+{
+    const std::string &s;
+    const char *fn;
+    size_t p = 0;
+
+    // container path -> the member names legal directly inside it. "" is the
+    // root object. A path present as a key here is walked into; one absent is a
+    // leaf whose value is located but not interpreted.
+    std::map<std::string, std::set<std::string>> containers;
+    // Legal containers whose contents Arch never reads. The subtree is skipped
+    // wholesale, so the producer may add fields inside without this parser
+    // having to be taught them.
+    std::set<std::string> skip_subtree;
+    // Members of skip_subtree that are inert only while empty; see the
+    // ignore-list in load_partition_roi for why each one is on this list.
+    std::set<std::string> must_be_empty;
+
+    std::map<std::string, size_t> value_at; // key path -> first byte of its value
+
+    RoiJsonScan(const std::string &str, const char *file) : s(str), fn(file) {}
+
+    void ws()
+    {
+        while (p < s.size() && (s[p] == ' ' || s[p] == '\t' || s[p] == '\n' || s[p] == '\r'))
+            ++p;
+    }
+
+    void bad(const std::string &why) const
+    {
+        log_error("NEXTPNR_PARTITION_ROI: '%s' is not a well-formed ROI object: %s (at byte %d)\n", fn, why.c_str(),
+                  int(p));
+    }
+
+    // Escapes are copied verbatim rather than decoded. No key in the ROI schema
+    // contains one, and a key that does will fail to match the accepted set and
+    // is therefore refused rather than silently mis-read.
+    std::string str_lit()
+    {
+        ++p; // opening quote
+        std::string out;
+        while (p < s.size() && s[p] != '"') {
+            if (s[p] == '\\') {
+                if (p + 1 >= s.size())
+                    bad("unterminated escape in a string");
+                out.push_back(s[p++]);
+            }
+            out.push_back(s[p++]);
+        }
+        if (p >= s.size())
+            bad("unterminated string");
+        ++p; // closing quote
+        return out;
+    }
+
+    void skip_value()
+    {
+        ws();
+        if (p >= s.size())
+            bad("expected a value");
+        char c = s[p];
+        if (c == '"') {
+            str_lit();
+            return;
+        }
+        if (c == '{' || c == '[') {
+            int depth = 0;
+            while (p < s.size()) {
+                char d = s[p];
+                if (d == '"') {
+                    str_lit();
+                    continue;
+                }
+                if (d == '{' || d == '[') {
+                    ++depth;
+                    ++p;
+                    continue;
+                }
+                if (d == '}' || d == ']') {
+                    --depth;
+                    ++p;
+                    if (depth == 0)
+                        return;
+                    continue;
+                }
+                ++p;
+            }
+            bad("unterminated object or array");
+        }
+        while (p < s.size() && s[p] != ',' && s[p] != '}' && s[p] != ']' && s[p] != ' ' && s[p] != '\t' &&
+               s[p] != '\n' && s[p] != '\r')
+            ++p;
+    }
+
+    void walk_object(const std::string &path)
+    {
+        ws();
+        if (p >= s.size() || s[p] != '{')
+            bad(path.empty() ? std::string("the top level is not a JSON object")
+                             : ("\"" + path + "\" is not a JSON object"));
+        ++p;
+        ws();
+        if (p < s.size() && s[p] == '}') {
+            ++p;
+            return;
+        }
+        for (;;) {
+            ws();
+            if (p >= s.size() || s[p] != '"')
+                bad(path.empty() ? std::string("expected a key at the top level")
+                                 : ("expected a key inside \"" + path + "\""));
+            std::string key = str_lit();
+            std::string full = path.empty() ? key : path + "." + key;
+            ws();
+            if (p >= s.size() || s[p] != ':')
+                bad("key \"" + full + "\" has no value");
+            ++p;
+            ws();
+
+            // The refusal. Naming both the offending key and the container it
+            // was found in, because "regions" at the root and "regions" inside
+            // "info" are different mistakes.
+            const std::set<std::string> &legal = containers[path];
+            if (!legal.count(key)) {
+                std::string allowed;
+                for (const std::string &k : legal)
+                    allowed += (allowed.empty() ? "" : ", ") + k;
+                log_error("NEXTPNR_PARTITION_ROI: '%s' carries key \"%s\", which this ROI parser does not act on. "
+                          "Refusing rather than ignoring it: a key nextpnr does not read cannot influence placement, "
+                          "so accepting it would silently build a rectangle that is not the one the file describes. "
+                          "Legal %s: %s\n",
+                          fn, full.c_str(), path.empty() ? "top-level keys" : ("keys inside \"" + path + "\"").c_str(),
+                          allowed.c_str());
+            }
+
+            // Duplicate detection closes the other half of the same hazard: two
+            // GRID_X_MIN keys make the rectangle a function of which one the
+            // reader happens to reach first.
+            size_t val = p;
+            if (!value_at.emplace(full, val).second)
+                log_error("NEXTPNR_PARTITION_ROI: '%s' names \"%s\" more than once; the rectangle it describes is "
+                          "ambiguous\n",
+                          fn, full.c_str());
+
+            if (skip_subtree.count(full)) {
+                skip_value();
+                if (must_be_empty.count(full)) {
+                    // Inert only while empty -- verified on the raw bytes, so
+                    // "[]", "[ ]" and "[\n]" pass and anything with content,
+                    // or any non-array value, does not.
+                    for (size_t q = val; q < p; ++q) {
+                        char d = s[q];
+                        if (d == '[' || d == ']' || d == ' ' || d == '\t' || d == '\n' || d == '\r')
+                            continue;
+                        log_error("NEXTPNR_PARTITION_ROI: '%s' has a non-empty \"%s\". nextpnr does not act on it, "
+                                  "and unlike an empty one it is not inert: it makes a claim about the same "
+                                  "rectangle this run is placing into that the placer cannot see. Refusing rather "
+                                  "than ignoring it\n",
+                                  fn, full.c_str());
+                    }
+                }
+            } else if (containers.count(full)) {
+                walk_object(full);
+            } else {
+                skip_value();
+            }
+
+            ws();
+            if (p < s.size() && s[p] == ',') {
+                ++p;
+                continue;
+            }
+            if (p < s.size() && s[p] == '}') {
+                ++p;
+                return;
+            }
+            bad("expected ',' or '}' after \"" + full + "\"");
+        }
+    }
+};
+
 void Arch::load_partition_roi() const
 {
     // Set first, so a re-entrant roi_active() from the bel walk below cannot
@@ -3397,26 +3595,77 @@ void Arch::load_partition_roi() const
         log_error("NEXTPNR_PARTITION_ROI: cannot open '%s'\n", f);
     std::string all((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
 
-    // A key scan, not a JSON parse, and deliberately so. We need exactly four
-    // integers out of a file whose schema is owned by prjxray, we must not take
-    // a JSON dependency into Arch, and -- the reason that matters -- a real
-    // parser would happily accept a well-formed object with none of these keys
-    // and leave the rectangle silently absent. Every key is mandatory and a
-    // missing one is a hard error, so this mechanism cannot be half-configured.
-    auto grab = [&](const char *key, int &dst) {
-        std::string pat = std::string("\"") + key + "\"";
-        size_t p = all.find(pat);
-        if (p == std::string::npos)
-            log_error("NEXTPNR_PARTITION_ROI: '%s' has no \"%s\" key\n", f, key);
-        p = all.find(':', p + pat.size());
-        if (p == std::string::npos)
-            log_error("NEXTPNR_PARTITION_ROI: '%s' key \"%s\" has no value\n", f, key);
-        dst = int(strtol(all.c_str() + p + 1, nullptr, 10));
+    // THE keys Arch consumes, and the fields they land in. This table is the
+    // only enumeration of them: the scan below derives the accepted set from it
+    // and the reads below take their values through it, so adding a key here
+    // makes it legal and reading it in one edit. A second hand-written list of
+    // legal keys would be a second source of truth, and the first key added
+    // without touching it would be refused by a parser that reads it.
+    //
+    // Every key is mandatory and a missing one is a hard error, so this
+    // mechanism cannot be half-configured.
+    const std::pair<const char *, int *> consumed[] = {
+            {"info.GRID_X_MIN", &roi_x0},
+            {"info.GRID_X_MAX", &roi_x1},
+            {"info.GRID_Y_MIN", &roi_y0},
+            {"info.GRID_Y_MAX", &roi_y1},
     };
-    grab("GRID_X_MIN", roi_x0);
-    grab("GRID_X_MAX", roi_x1);
-    grab("GRID_Y_MIN", roi_y0);
-    grab("GRID_Y_MAX", roi_y1);
+
+    RoiJsonScan scan(all, f);
+    for (const auto &c : consumed) {
+        std::string path(c.first);
+        size_t dot = path.rfind('.');
+        scan.containers[path.substr(0, dot)].insert(path.substr(dot + 1));
+        scan.containers[""].insert(path.substr(0, dot));
+    }
+
+    // THE IGNORE-LIST. Keys the ROI object legitimately carries that Arch does
+    // not act on. Each entry is here because ignoring it provably cannot move a
+    // bel; anything not on it is refused.
+    //
+    // `ports` -- prjxray's ROI-harness boundary-port list
+    //   (prjxray/minitests/roi_harness/create_design_json.py:45). Nothing in
+    //   nextpnr routes ROI boundary ports, and fasm2frames.py never reads the
+    //   key at all, so an EMPTY list is inert. A populated one names wires
+    //   crossing the rectangle this run is placing into, so it is refused.
+    // `required_features` -- extra FASM features injected at frame assembly by
+    //   prjxray/utils/fasm2frames.py:190-192. nextpnr emits FASM and never
+    //   reads it back, so an EMPTY list is inert. A populated one sets bits
+    //   inside the same rectangle this run places into without the placer
+    //   knowing, so it is refused.
+    // `roi_snap` -- provenance written by scripts/roi_snap.py:569 (tool,
+    //   tilegrid, input_roi, snapped, frames): a record of how the rectangle
+    //   was derived, not an instruction. The whole subtree is skipped, so
+    //   roi_snap.py may add fields without this parser having to be taught them.
+    //
+    // Note what is NOT here: a general "provenance" or "comment" escape. An
+    // open ignore-list would readmit exactly the defect this scan exists to
+    // stop, because the next silently-unread key would arrive spelled as one.
+    for (const char *k : {"ports", "required_features", "roi_snap"}) {
+        scan.containers[""].insert(k);
+        scan.skip_subtree.insert(k);
+    }
+    scan.must_be_empty.insert("ports");
+    scan.must_be_empty.insert("required_features");
+
+    scan.walk_object("");
+    scan.ws();
+    if (scan.p != all.size())
+        log_error("NEXTPNR_PARTITION_ROI: '%s' has trailing content after the ROI object (at byte %d)\n", f,
+                  int(scan.p));
+
+    for (const auto &c : consumed) {
+        auto it = scan.value_at.find(c.first);
+        if (it == scan.value_at.end())
+            log_error("NEXTPNR_PARTITION_ROI: '%s' has no \"%s\" key\n", f, c.first);
+        // The value must actually be an integer. strtol answers 0 for a string
+        // or a null, which is a legal grid coordinate, so an unchecked read
+        // turns a typo into a rectangle in the corner of the device.
+        const char *v = all.c_str() + it->second;
+        if (!(isdigit((unsigned char)*v) || (*v == '-' && isdigit((unsigned char)v[1]))))
+            log_error("NEXTPNR_PARTITION_ROI: '%s' key \"%s\" is not an integer\n", f, c.first);
+        *c.second = int(strtol(v, nullptr, 10));
+    }
 
     if (roi_x0 < 0 || roi_y0 < 0 || roi_x1 < roi_x0 || roi_y1 < roi_y0)
         log_error("NEXTPNR_PARTITION_ROI: '%s' gives an empty or inverted rectangle "
