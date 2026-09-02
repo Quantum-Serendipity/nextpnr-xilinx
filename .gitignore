@@ -25,6 +25,9 @@ a.out
 *.il
 /generic/examples/blinky.png
 build/
+# A second build tree, so a regression can be measured against a binary that is
+# not the one a running flow resolves to.
+build-roi-strict/
 *.asc
 *.bin
 /Testing/*
