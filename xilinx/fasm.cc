@@ -1547,8 +1547,17 @@ struct FasmBackend
                     if (yLoc == 0)
                         write_bit("SSTL12_SSTL135_SSTL15.IN_DIFF");
                 } else {
-                    if (iostandard == "TDMS_33")
-                        write_bit("TDMS_33.IN_DIFF");
+                    // TMDS, not TDMS.  Both halves of this branch carried the
+                    // transposition, so it failed twice over: the comparison never
+                    // matched a real IOSTANDARD, and a TMDS_33 differential input
+                    // fell through to the LVDS_25 arm and was encoded as LVDS --
+                    // a wrong bit, not a missing one, which is why nothing ever
+                    // raised a lookup error.  prjxray-db spells it TMDS_33
+                    // (LIOB33/RIOB33.IOB_Y0.TMDS_33.IN_DIFF in artix7, kintex7,
+                    // spartan7 and zynq7); TDMS_33 appears in 0 database files
+                    // against 29 carrying TMDS_33.
+                    if (iostandard == "TMDS_33")
+                        write_bit("TMDS_33.IN_DIFF");
                     else
                         write_bit("LVDS_25_SSTL135_SSTL15.IN_DIFF");
                 }
