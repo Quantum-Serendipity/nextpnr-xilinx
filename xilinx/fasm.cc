@@ -1309,11 +1309,18 @@ struct FasmBackend
                     write_bit("LVCMOS15_SSTL15.DRIVE.I16_I_FIXED");
                 else if (iostandard == "LVCMOS18" && (drive == 12 || drive == 8))
                     write_bit("LVCMOS18.DRIVE.I12_I8");
-                else if ((iostandard == "LVCMOS33" && drive == 16) ||
-                         (iostandard == "LVTTL"    && drive == 16))
+                // prjxray-db names both patterns as covering DRIVE=12
+                // (I12_I8 and I12_I16), which cannot both be right.  The tie is
+                // broken by the four Vivado-built references in
+                // prjxray-db/artix7/harness/{arty-a7/{swbut,uart,pmod},basys3/swbut}:
+                // across all 35 LVCMOS33 output pads at Vivado's default drive
+                // the pattern is I12_I16, and I12_I8 does not occur once.  So 12
+                // belongs with 16 here, and I12_I8 is left to its other member, 8.
+                else if ((iostandard == "LVCMOS33" && (drive == 16 || drive == 12)) ||
+                         (iostandard == "LVTTL"    && (drive == 16 || drive == 12)))
                     write_bit("LVCMOS33_LVTTL.DRIVE.I12_I16");
-                else if ((iostandard == "LVCMOS33" && (drive == 8 || drive == 12)) ||
-                         (iostandard == "LVTTL"    && (drive == 8 || drive == 12)))
+                else if ((iostandard == "LVCMOS33" && drive == 8) ||
+                         (iostandard == "LVTTL"    && drive == 8))
                     write_bit("LVCMOS33_LVTTL.DRIVE.I12_I8");
                 else if ((iostandard == "LVCMOS33" && drive == 4) ||
                          (iostandard == "LVTTL"    && drive == 4))
@@ -1388,11 +1395,17 @@ struct FasmBackend
             // prjxray's DB has no SLEW.SLOW key for diff sites; emitting
             // it triggers FasmLookupError on round-trip.  Also skip if
             // is_output already covered the emit upstream.
-            if (!is_output && !is_diff && slew == "SLOW"
+            // The is_hp_bank guard is what the comment above always claimed but
+            // the condition did not check.  Measured against the Vivado-built
+            // reference in prjxray-db/artix7/harness/arty-a7/swbut/design.bit
+            // (xc7a35t, HR bank, LVCMOS33, PACKAGE_PIN + IOSTANDARD only):
+            // Vivado sets SLEW.SLOW on the 8 output pads and on none of the 9
+            // input pads, while we were setting it on all 17.  SLEW is an
+            // output-driver property; an input-only pad has no driver to slew.
+            if (!is_output && !is_diff && is_hp_bank && slew == "SLOW"
                 && iostandard != "LVDS_25" && iostandard != "TMDS_33") {
                 write_bit("LVCMOS12_LVCMOS15_LVCMOS18_LVCMOS25_LVCMOS33_LVTTL_SSTL135_SSTL15.SLEW.SLOW");
-                if (is_hp_bank)
-                    write_bit("LVCMOS12_LVCMOS15_LVCMOS18.SLEW.SLOW");
+                write_bit("LVCMOS12_LVCMOS15_LVCMOS18.SLEW.SLOW");
             }
             // HP-bank IBUF glue — fires per active input site (parallel to
             // OBUF_HP_BANK_GLUE).  For differential inputs Vivado uses a
@@ -1534,8 +1547,17 @@ struct FasmBackend
                     if (yLoc == 0)
                         write_bit("SSTL12_SSTL135_SSTL15.IN_DIFF");
                 } else {
-                    if (iostandard == "TDMS_33")
-                        write_bit("TDMS_33.IN_DIFF");
+                    // TMDS, not TDMS.  Both halves of this branch carried the
+                    // transposition, so it failed twice over: the comparison never
+                    // matched a real IOSTANDARD, and a TMDS_33 differential input
+                    // fell through to the LVDS_25 arm and was encoded as LVDS --
+                    // a wrong bit, not a missing one, which is why nothing ever
+                    // raised a lookup error.  prjxray-db spells it TMDS_33
+                    // (LIOB33/RIOB33.IOB_Y0.TMDS_33.IN_DIFF in artix7, kintex7,
+                    // spartan7 and zynq7); TDMS_33 appears in 0 database files
+                    // against 29 carrying TMDS_33.
+                    if (iostandard == "TMDS_33")
+                        write_bit("TMDS_33.IN_DIFF");
                     else
                         write_bit("LVDS_25_SSTL135_SSTL15.IN_DIFF");
                 }
@@ -1684,15 +1706,58 @@ struct FasmBackend
             write_bit("ISERDES.MODE.MASTER");
             write_bit("ISERDES.NUM_CE.N1");
 
-            // Switch IDELMUXE3 to include the IDELAY element, if we have an IDELAYE2 driving D
+            // Select the delayed or the direct input, on the mux that actually
+            // feeds the flip-flop.
+            //
+            // ILOGICE3 has two independent input muxes and they serve different
+            // outputs. From the site model:
+            //
+            //     IFF.D     <- IFFMUX_OUT <- IFFDELMUXE3_OUT
+            //                                  <- {DDLY, DINV_OUT, ZHOLD_IFF_INV_OUT}
+            //     O         <- IMUX       <- IDELMUXE3_OUT
+            //                                  <- {DDLY, DINV_OUT, ZHOLD_FABRIC_INV_OUT}
+            //
+            // IDELMUXE3 feeds ONLY the combinational O output. The register --
+            // the entire point of an IDDR -- is fed by IFFDELMUXE3, which this
+            // function did not write at all.
+            //
+            // For a plain IDDR that was harmless: the unwritten default is P1
+            // (DINV_OUT, direct), which is correct. zynq7 documents
+            // IFFDELMUXE3.P0 = 28_116 and virtex7 documents
+            // IFFDELMUXE3.P1 = !28_116, same bit inverted.
+            //
+            // For an IDDR fed by an IDELAYE2 it was a silent correctness bug:
+            // IDELMUXE3.P0 routed the delayed signal to the unused O output
+            // while the flip-flop kept sampling undelayed data. The delay was
+            // configured, occupied a site, and did nothing -- and a tap sweep
+            // built on it would have produced a flat, fully open eye for
+            // entirely the wrong reason.
             NetInfo *d = get_net_or_empty(ci, ctx->id("D"));
             if (d == nullptr || d->driver.cell == nullptr)
                 log_error("%s '%s' has disconnected D input\n", ci->type.c_str(ctx), ctx->nameOf(ci));
             CellInfo *drv = d->driver.cell;
-            if (boost::contains(drv->type.str(ctx), "IDELAYE2"))
-                write_bit("IDELMUXE3.P0");
-            else
-                write_bit("IDELMUXE3.P1");
+            bool delayed = boost::contains(drv->type.str(ctx), "IDELAYE2");
+
+            // The register path. This is the one that matters.
+            //
+            // Only P0 is written. P1 is deliberately left implicit: zynq7,
+            // artix7, kintex7 and spartan7 document only IFFDELMUXE3.P0
+            // (= 28_116 set); virtex7 additionally documents
+            // IFFDELMUXE3.P1 = !28_116, confirming P1 is simply that bit
+            // clear, which is the unwritten default. Emitting a literal
+            // "IFFDELMUXE3.P1" would make fasm2frames fail to resolve the
+            // feature on every family except virtex7.
+            if (delayed)
+                write_bit("IFFDELMUXE3.P0");
+
+            // The combinational path. Only meaningful when O is actually used;
+            // writing it unconditionally is what disguised the bug above.
+            if (get_net_or_empty(ci, ctx->id("O")) != nullptr) {
+                if (delayed)
+                    write_bit("IDELMUXE3.P0");
+                else
+                    write_bit("IDELMUXE3.P1");
+            }
 
             // Clock edge.  DDR_CLK_EDGE is a three-valued parameter encoded in two bits
             // (26_99 / 27_98 for LIOI3.ILOGIC_Y0), and the third value is the state where
@@ -1732,11 +1797,47 @@ struct FasmBackend
             if (srtype == "SYNC") write_bit("IFF.SRTYPE.SYNC"); else write_bit("IFF.SRTYPE.ASYNC");
 
             write_bit("IFF.ZINV_C", !bool_or_default(ci->params, ctx->id("IS_CLK_INVERTED"), false));
-            // NB (issue #114): the ISERDESE2 path below also writes IFF.ZINV_OCLK
-            // and IFFDELMUXE3, which this branch omits. Adding IFF.ZINV_OCLK here
-            // was tested on silicon and changed NOTHING -- the captured bytes were
-            // bit-identical with and without it (Q1 stuck 0, Q2 stuck 1 either way),
-            // so the missing OCLK bit is ruled out as the cause. Left unwritten.
+
+            // Relates to #114. NOT a claimed fix -- see the caveat below.
+            //
+            // What is established: on an ALINX AX7203 (xc7a200tfbg484-2), toggling
+            // IFFDELMUXE3.P0 changes what the two IDDR flops output. A/B/A, reflashing
+            // between variants, reproduced three times in both directions. So the bit
+            // has a real effect on this path.
+            //
+            // What is NOT established: which of the two states is the capturing one.
+            // The readout was four LEDs reported by position, and the position-to-led[]
+            // mapping was never pinned down, so "0,0 vs 1,1" does not by itself say which
+            // way round it goes. That measurement needs redoing with an indicator whose
+            // value is tied to state independently of which LED is which -- one LED,
+            // distinguishable blink rates.
+            //
+            // What the database says, which cuts against the polarity used here:
+            // IDELMUXE3 is an arity-2 pair (P0 = 29_101 set, P1 = !29_101), and above,
+            // P0 is written exactly when an IDELAYE2 drives D -- i.e. P0 means "take the
+            // delayed path". IFFDELMUXE3 has only .P0 documented (28_116), no .P1, so
+            // not writing it is the other state. The ISERDESE2 path below writes
+            // IFFDELMUXE3.P0 on (iobdelay == "IFD"), which is the same sense: P0 = take
+            // the delay element. On that reading an IDDR with no IDELAYE2 wants the bit
+            // CLEAR, and this branch's condition had it backwards.
+            //
+            // The write itself is NOT made here. HeroesLament fix/ilogic-iffdelmux
+            // writes IFFDELMUXE3.P0 in this same block on the opposite predicate
+            // (`if (delayed)`, ~90 lines above). The two patches merge cleanly and
+            // together emit the bit UNCONDITIONALLY -- twice for a delayed IDDR --
+            // which is the silent-wrongness this convoy exists to avoid. Unit 6.5
+            // kept the `delayed` predicate, on three grounds: it is the sense the
+            // ISERDESE2 path already used before either branch
+            // (write_bit("IFFDELMUXE3.P0", iobdelay == "IFD")); it is the sense the
+            // database paragraph above argues for; and this branch's own author
+            // wrote that his condition has it backwards, and titled the commit
+            // "without claiming a fix". The A/B/A silicon observation above stands
+            // as an observation -- it establishes that the bit does something on
+            // this path, not which state captures -- and the re-measurement it asks
+            // for is still owed.
+            //
+            // IFF.ZINV_OCLK is deliberately unwritten: adding it was tested on silicon
+            // separately and changed nothing, bit-identical captures either way.
             write_bit("ZINV_D", !bool_or_default(ci->params, ctx->id("IS_D_INVERTED"), false));
 
             // The IFF is physically a four-flop block shared with ISERDESE2, and the
@@ -2560,6 +2661,62 @@ struct FasmBackend
                         write_bit(std::string("BRAM36_") + pname + "_1");
                 }
                 pop();
+
+                // GUARD: x9 parity is not modelled correctly, so refuse rather
+                // than emit a silently-wrong bitstream.
+                //
+                // A RAMB36E1 at x9 is two RAMB18 halves at x4 (8 data bits) plus
+                // the RAMB36-scope leftover bit above for the 9th.  prjxray maps
+                // the site's parity pins ALTERNATELY across those halves:
+                //     DOPBDOP0 -> ...DOPBDOPL0     DOPBDOP1 -> ...DOPBDOPU0
+                // The 9th bit is not presented solely on index 0.  Measured on an
+                // xc7z020 (4096x26 capture buffer, three x9 RAMB36s): the parity
+                // bit reads back CORRECTLY on even addresses and as 0 on odd --
+                //     bit  8:  even 53.1% ones / odd 0.0%
+                //     bit 17:  even 53.1% ones / odd 0.0%
+                // while all 24 data bits, routed across both halves, are perfect.
+                // A design consuming only DOPBDOP[0] therefore gets a quietly
+                // wrong bit in half its words: it places, routes, builds, loads
+                // and runs.  That is the worst possible failure mode, so error.
+                //
+                // Same spirit as the is_ceused half-slice guard above: emit no
+                // bitstream rather than a broken one.
+                static const std::pair<const char *, const char *> x9_parity[] = {
+                        {"READ_WIDTH_A", "DOPADOP"},
+                        {"READ_WIDTH_B", "DOPBDOP"},
+                        {"WRITE_WIDTH_A", "DIPADIP"},
+                        {"WRITE_WIDTH_B", "DIPBDIP"},
+                };
+                for (auto &pp : x9_parity) {
+                    if (int_or_default(ci->params, ctx->id(pp.first), 0) != 9)
+                        continue;
+                    // Packed port names carry no bus brackets and no L/U suffix:
+                    // they are DOPBDOP0..3 / DIPADIP0..3.  The L/U split lives in
+                    // the SITE PIN map (DOPBDOP0 -> ...DOPBDOPL0, DOPBDOP1 ->
+                    // ...DOPBDOPU0), so index 0 reaches the lower half only.
+                    NetInfo *p0 = get_net_or_empty(ci, ctx->id(stringf("%s0", pp.second)));
+                    if (p0 == nullptr)
+                        continue;
+                    if (p0->name == ctx->id("$PACKER_GND_NET") || p0->name == ctx->id("$PACKER_VCC_NET"))
+                        continue;
+                    bool is_output = pp.second[1] == 'O';
+                    if (is_output ? p0->users.empty() : (p0->driver.cell == nullptr))
+                        continue;
+                    log_error("FASM: RAMB36E1 '%s' uses %s = 9 with parity bit %s0 in use (net '%s').\n"
+                              "  At x9 a RAMB36 is two RAMB18 halves and the site map sends %s0 to the "
+                              "LOWER half only (%s0 -> ...%sL0, %s1 -> ...%sU0).  The 9th bit alternates "
+                              "between halves by address, so a design reading only index 0 gets the "
+                              "correct value on even addresses and 0 on odd ones.\n"
+                              "  Measured on xc7z020 (4096x26 capture, three x9 RAMB36s): parity bits 8 "
+                              "and 17 read 53.1%% ones on even addresses and 0.0%% on odd, while all 24 "
+                              "data bits were bit-exact.\n"
+                              "  Refusing to emit a silently-corrupt bitstream.\n"
+                              "  Workaround: keep the array inside a single BRAM in a data-only width "
+                              "(bank a deep memory into 1024-deep x<=32 arrays), or widen it so yosys "
+                              "does not select a x9 mapping.\n",
+                              ci->name.c_str(ctx), pp.first, pp.second, p0->name.c_str(ctx),
+                              pp.second, pp.second, pp.second, pp.second, pp.second);
+                }
             }
             auto used_rdaddrcasc = used_wires_starting_with(tile, "BRAM_CASCOUT_ADDRARDADDR", false);
             auto used_wraddrcasc = used_wires_starting_with(tile, "BRAM_CASCOUT_ADDRBWRADDR", false);
@@ -2629,20 +2786,38 @@ struct FasmBackend
 
     void write_pll_clkout(const std::string &name, CellInfo *ci)
     {
-        // FIXME: variable duty cycle
-        int high = 1, low = 1, phasemux = 0, delaytime = 0, frac = 0;
+        int high = 1, low = 1, phasemux = 0, delaytime = 0;
         bool no_count = false, edge = false;
         double divide = float_or_default(ci, name + ((name == "CLKFBOUT") ? "_MULT" : "_DIVIDE"), 1);
+        // PLLE2 counters are integer-only; the fractional interpolator exists
+        // only in the MMCM.  A non-integer value here previously fell into a
+        // half-implemented FRAC path (writing FRAC bits the PLL cannot use,
+        // with FRAC_EN driven from the unrelated EDGE flag); refuse instead,
+        // as Vivado does.
+        if (floor(divide) != divide)
+            log_error("%s: PLLE2_ADV %s must be an integer (fractional divide requires an MMCME2)\n",
+                      ci->name.c_str(ctx), name.c_str());
         double phase = float_or_default(ci, name + "_PHASE", 1);
+        // Only the CLKOUTn counters have a user-visible duty cycle; DIVCLK and
+        // CLKFBOUT are fixed at 50%.
+        double duty =
+                name.compare(0, 6, "CLKOUT") == 0 ? float_or_default(ci, name + "_DUTY_CYCLE", 0.5) : 0.5;
         if (divide <= 1) {
             no_count = true;
         } else {
-            high = floor(divide / 2);
-            low = int(floor(divide) - high);
-            if (high != low)
-                edge = true;
-            if (name == "CLKOUT1" || name == "CLKFBOUT")
-                frac = floor(divide * 8) - floor(divide) * 8;
+            // The counter runs HIGH_TIME + LOW_TIME = divide cycles; EDGE
+            // stretches the high phase by one half VCO cycle at LOW_TIME's
+            // expense, giving half-cycle duty resolution (XAPP888).  Round
+            // the requested high time to the nearest half cycle.  For
+            // duty = 0.5 this reduces exactly to the previous
+            // floor(divide/2) / EDGE-on-odd behaviour.
+            int half_cycles = (int)floor(2.0 * duty * floor(divide) + 0.5);
+            high = half_cycles / 2;
+            edge = (half_cycles % 2) != 0;
+            if (high < 1 || high > int(floor(divide)) - 1)
+                log_error("%s: %s_DUTY_CYCLE=%f is out of the achievable range for divide=%d\n",
+                          ci->name.c_str(ctx), name.c_str(), duty, int(floor(divide)));
+            low = int(floor(divide)) - high;
             int phase_eights = floor((phase / 360) * divide * 8);
             phasemux = phase_eights % 8;
             delaytime = phase_eights / 8;
@@ -2666,10 +2841,6 @@ struct FasmBackend
             write_bit(name + "_CLKOUT2_EDGE[0]", edge);
             write_bit(name + "_CLKOUT2_NO_COUNT[0]", no_count);
             write_int_vector(name + "_CLKOUT2_DELAY_TIME[5:0]", delaytime, 6);
-            if (frac != 0) {
-                write_bit(name + "_CLKOUT2_FRAC_EN[0]", edge);
-                write_int_vector(name + "_CLKOUT2_FRAC[2:0]", frac, 3);
-            }
         }
     }
 
@@ -2788,9 +2959,17 @@ struct FasmBackend
         push(get_tile_name(ci->bel.tile));
         push("PLLE2_ADV");
         write_bit("IN_USE");
-        // FIXME: should be INV not ZINV (XRay error?)
-        write_bit("ZINV_PWRDWN", bool_or_default(ci->params, ctx->id("IS_PWRDWN_INVERTED"), false));
-        write_bit("ZINV_RST", bool_or_default(ci->params, ctx->id("IS_RST_INVERTED"), false));
+        // ZINV_* is prjxray's Z-INVERTED encoding: the bit is SET when the pin is
+        // NOT inverted.  Every other ZINV_ in this file writes !IS_x_INVERTED --
+        // ILOGIC/OLOGIC ZINV_D, ZINV_C, ZINV_OCLK, ZINV_ODATAIN, BUFGCTRL
+        // ZINV_CE0/S0, BUFHCE ZINV_CE, RAMB ZINV_*.  The CMT was the sole
+        // exception, under an old "FIXME: should be INV not ZINV (XRay error?)".
+        // It was not an XRay error.  Omitting ZINV_RST leaves the bit clear,
+        // which INVERTS RST, so a PLL with RST tied low is held in reset for
+        // ever and LOCKED never asserts.  INV_CLKINSEL below is genuinely an
+        // INV-encoded bit (note the name) and is correctly left un-negated.
+        write_bit("ZINV_PWRDWN", !bool_or_default(ci->params, ctx->id("IS_PWRDWN_INVERTED"), false));
+        write_bit("ZINV_RST", !bool_or_default(ci->params, ctx->id("IS_RST_INVERTED"), false));
         write_bit("INV_CLKINSEL", bool_or_default(ci->params, ctx->id("IS_CLKINSEL_INVERTED"), false));
         write_pll_clkout("DIVCLK", ci);
         write_pll_clkout("CLKFBOUT", ci);
@@ -2800,6 +2979,12 @@ struct FasmBackend
         write_pll_clkout("CLKOUT3", ci);
         write_pll_clkout("CLKOUT4", ci);
         write_pll_clkout("CLKOUT5", ci);
+
+        // Hold DONE until the PLL locks.  NOTE: the tile bit is emitted; any
+        // interaction with the global COR0 LOCK_CYCLE startup option is not
+        // modelled here and has not been verified on silicon.
+        if (bool_param_or_default(ci, "STARTUP_WAIT", false))
+            write_bit("STARTUP_WAIT");
 
         std::string comp = str_or_default(ci->params, ctx->id("COMPENSATION"), "INTERNAL");
         push("COMPENSATION");
@@ -2885,21 +3070,38 @@ struct FasmBackend
 
     void write_mmcm_clkout(const std::string &name, CellInfo *ci)
     {
-        // FIXME: variable duty cycle
         int high = 1, low = 1, phasemux = 0, delaytime = 0, frac = 0;
         bool no_count = false, edge = false;
         double divide = float_or_default(ci, name + ((name == "CLKFBOUT") ? "_MULT_F" :
                                                      (name == "CLKOUT0" ? "_DIVIDE_F" : "_DIVIDE")), 1);
         double phase = float_or_default(ci, name + "_PHASE", 1);
+        // Only the CLKOUTn counters have a user-visible duty cycle; DIVCLK and
+        // CLKFBOUT are fixed at 50%.
+        double duty =
+                name.compare(0, 6, "CLKOUT") == 0 ? float_or_default(ci, name + "_DUTY_CYCLE", 0.5) : 0.5;
         if (divide <= 1) {
             no_count = true;
         } else {
-            high = floor(divide / 2);
-            low = int(floor(divide) - high);
-            if (high != low)
-                edge = true;
             if (name == "CLKOUT0" || name == "CLKFBOUT")
                 frac = floor(divide * 8) - floor(divide) * 8;
+            // The fractional interpolator owns the waveform; a non-50% duty
+            // cannot be honoured alongside it (Vivado refuses it too).
+            if (frac != 0 && duty != 0.5)
+                log_error("%s: %s_DUTY_CYCLE must be 0.5 when the divide is fractional\n",
+                          ci->name.c_str(ctx), name.c_str());
+            // The counter runs HIGH_TIME + LOW_TIME = divide cycles; EDGE
+            // stretches the high phase by one half VCO cycle at LOW_TIME's
+            // expense, giving half-cycle duty resolution (XAPP888).  Round
+            // the requested high time to the nearest half cycle.  For
+            // duty = 0.5 this reduces exactly to the previous
+            // floor(divide/2) / EDGE-on-odd behaviour.
+            int half_cycles = (int)floor(2.0 * duty * floor(divide) + 0.5);
+            high = half_cycles / 2;
+            edge = (half_cycles % 2) != 0;
+            if (high < 1 || high > int(floor(divide)) - 1)
+                log_error("%s: %s_DUTY_CYCLE=%f is out of the achievable range for divide=%d\n",
+                          ci->name.c_str(ctx), name.c_str(), duty, int(floor(divide)));
+            low = int(floor(divide)) - high;
             int phase_eights = floor((phase / 360) * divide * 8);
             phasemux = phase_eights % 8;
             delaytime = phase_eights / 8;
@@ -2973,11 +3175,11 @@ struct FasmBackend
         push(get_tile_name(ci->bel.tile));
         push("MMCME2_ADV");
         write_bit("IN_USE");
-        // FIXME: should be INV not ZINV (XRay error?)
-        write_bit("ZINV_PWRDWN", bool_or_default(ci->params, id_IS_PWRDWN_INVERTED, false));
-        write_bit("ZINV_RST", bool_or_default(ci->params, id_IS_RST_INVERTED, false));
-        write_bit("ZINV_PSEN", bool_or_default(ci->params, id_IS_PSEN_INVERTED, false));
-        write_bit("ZINV_PSINCDEC", bool_or_default(ci->params, id_IS_PSINCDEC_INVERTED, false));
+        // See write_pll() for the reasoning.  ZINV_* is set when NOT inverted.
+        write_bit("ZINV_PWRDWN", !bool_or_default(ci->params, id_IS_PWRDWN_INVERTED, false));
+        write_bit("ZINV_RST", !bool_or_default(ci->params, id_IS_RST_INVERTED, false));
+        write_bit("ZINV_PSEN", !bool_or_default(ci->params, id_IS_PSEN_INVERTED, false));
+        write_bit("ZINV_PSINCDEC", !bool_or_default(ci->params, id_IS_PSINCDEC_INVERTED, false));
         write_bit("INV_CLKINSEL", bool_or_default(ci->params, id_IS_CLKINSEL_INVERTED, false));
         write_mmcm_clkout("DIVCLK", ci);
         write_mmcm_clkout("CLKFBOUT", ci);
@@ -2988,6 +3190,12 @@ struct FasmBackend
         write_mmcm_clkout("CLKOUT4", ci);
         write_mmcm_clkout("CLKOUT5", ci);
         write_mmcm_clkout("CLKOUT6", ci);
+
+        // Hold DONE until the MMCM locks.  NOTE: the tile bit is emitted; any
+        // interaction with the global COR0 LOCK_CYCLE startup option is not
+        // modelled here and has not been verified on silicon.
+        if (bool_param_or_default(ci, "STARTUP_WAIT", false))
+            write_bit("STARTUP_WAIT");
 
         std::string comp = str_or_default(ci->params, id_COMPENSATION, "INTERNAL");
         push("COMP");
@@ -3372,9 +3580,19 @@ struct FasmBackend
         write_int_vector("FILTREG1_RESERVED[11:0]", 0x8, 12);
 
         // Vivado uses 0x100 (integer counters) for non-fractional configs;
-        // golden bitstreams confirm.  0xffff (the old value) is the XAPP888
-        // "enable everything" setting and does not match Vivado output.
-        write_int_vector("POWER_REG_POWER_REG_POWER_REG[15:0]", 0x100, 16);
+        // golden bitstreams confirm.  When the fractional interpolator is in
+        // use (CLKFBOUT_MULT_F or a used CLKOUT0_DIVIDE_F with a non-zero
+        // eighth), XAPP888 requires the power register at 0xFFFF -- with
+        // 0x100 the FRAC bits are configured but the interpolator is
+        // powered down.
+        {
+            double mult_f = float_or_default(ci, "CLKFBOUT_MULT_F", 5.000);
+            double div0_f = float_or_default(ci, "CLKOUT0_DIVIDE_F", 1.000);
+            bool clkout0_used = get_net_or_empty(ci, ctx->id("CLKOUT0")) != nullptr;
+            bool frac_in_use = (floor(mult_f * 8) != floor(mult_f) * 8) ||
+                               (clkout0_used && floor(div0_f * 8) != floor(div0_f) * 8);
+            write_int_vector("POWER_REG_POWER_REG_POWER_REG[15:0]", frac_in_use ? 0xFFFF : 0x100, 16);
+        }
         write_bit("LOCKREG3_RESERVED[0]");
         write_int_vector("TABLE[9:0]", filter_lookup[clkfbout_mult - 1], 10);
         pop(2);
