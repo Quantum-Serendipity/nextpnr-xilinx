@@ -1834,12 +1834,25 @@ struct FasmBackend
             // not writing it is the other state. The ISERDESE2 path below writes
             // IFFDELMUXE3.P0 on (iobdelay == "IFD"), which is the same sense: P0 = take
             // the delay element. On that reading an IDDR with no IDELAYE2 wants the bit
-            // CLEAR, and the condition below has it backwards.
+            // CLEAR, and this branch's condition had it backwards.
+            //
+            // The write itself is NOT made here. HeroesLament fix/ilogic-iffdelmux
+            // writes IFFDELMUXE3.P0 in this same block on the opposite predicate
+            // (`if (delayed)`, ~90 lines above). The two patches merge cleanly and
+            // together emit the bit UNCONDITIONALLY -- twice for a delayed IDDR --
+            // which is the silent-wrongness this convoy exists to avoid. Unit 6.5
+            // kept the `delayed` predicate, on three grounds: it is the sense the
+            // ISERDESE2 path already used before either branch
+            // (write_bit("IFFDELMUXE3.P0", iobdelay == "IFD")); it is the sense the
+            // database paragraph above argues for; and this branch's own author
+            // wrote that his condition has it backwards, and titled the commit
+            // "without claiming a fix". The A/B/A silicon observation above stands
+            // as an observation -- it establishes that the bit does something on
+            // this path, not which state captures -- and the re-measurement it asks
+            // for is still owed.
             //
             // IFF.ZINV_OCLK is deliberately unwritten: adding it was tested on silicon
             // separately and changed nothing, bit-identical captures either way.
-            if (!boost::contains(drv->type.str(ctx), "IDELAYE2"))
-                write_bit("IFFDELMUXE3.P0");
             write_bit("ZINV_D", !bool_or_default(ci->params, ctx->id("IS_D_INVERTED"), false));
 
             // The IFF is physically a four-flop block shared with ISERDESE2, and the
