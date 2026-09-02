@@ -21,6 +21,35 @@
 #include "nextpnr.h"
 NEXTPNR_NAMESPACE_BEGIN
 
+// THE UNMATCHED-SELECTOR DIAGNOSTIC, AND WHY IT IS NOT BEHIND --verbose.
+//
+// 3da43687 made an XDC selector that matches nothing observable; 555d326c, three
+// days later, moved every one of those reports behind getCtx()->verbose because
+// an apio-style board XDC constrains every pin of the board while a design uses
+// a subset -- 47 lines for a blinky on a Basys3. That objection is about the
+// ITEMISATION and it is correct; itemisation is still verbose-only below. What
+// it took with it was the closing summary, and with it the last trace at default
+// verbosity that any constraint was dropped at all.
+//
+// Measured 2026-09-01 on this tree, counter25 netlist, xc7a100tcsg324:
+//
+//   correct XDC, default            0 diagnostic lines, 0 targets dropped
+//   correct XDC, --verbose          0 diagnostic lines
+//   arty.xdc (led[8..15], sw[0..3]  0 diagnostic lines, ONE line of output in
+//     absent from this netlist),      the whole run, rc 0 -- 20 constraints
+//     default                         dropped in silence
+//   the same, --verbose             21 lines
+//
+// The third row is the shape that left ball AA15 -- the blower-fan enable, which
+// every bitstream reaching a board drives at 100% -- unconstrained at toolchain
+// HEAD f27f241. Noise on a CORRECT file is zero, measured, so the summary costs
+// nothing on a flow whose XDCs are generated from the design's own port list.
+//
+// Passing --verbose in our invocations instead was the alternative, and it is
+// not available: on this tree --verbose ABORTS. Same design, same seed, one flag
+// apart, three runs each -- plain rc 0 with a 30,359-byte FASM, --verbose rc 134
+// (SIGABRT) at common/timing.cc:1164 `it != net->wires.end()` in the verbose
+// critical-path report, no FASM written.
 void Arch::parseXdc(std::istream &in)
 {
 
@@ -249,11 +278,23 @@ void Arch::parseXdc(std::istream &in)
                 continue;
             }
             std::vector<NetInfo *> dest = get_nets(arguments.at(cursor));
-            if (dest.empty())
+            if (dest.empty()) {
+                // Not folded into the summary below: a create_clock whose target
+                // is absent is the one case with no board-XDC defence. The
+                // constraint's entire content is its target, and the cost of
+                // dropping it is a timing report that PASSES at nextpnr's 12 MHz
+                // default. Under --xdc-strict it is fatal here rather than at
+                // the summary, so the message that stops the run is the one that
+                // names the line.
+                if (xdcStrict)
+                    log_error("create_clock: target %s matched nothing, so the %.3f ns constraint "
+                              "was NOT applied (on line %d) [--xdc-strict]\n",
+                              arguments.at(cursor).c_str(), period, lineno);
                 log_warning("create_clock: target %s matched nothing, so the %.3f ns constraint "
                             "was NOT applied (on line %d). The clock domain keeps the default "
                             "target and will be reported as meeting timing at that default.\n",
                             arguments.at(cursor).c_str(), period, lineno);
+            }
             for (auto n : dest) {
                 n->clkconstr = std::unique_ptr<ClockConstraint>(new ClockConstraint);
                 n->clkconstr->period = getDelayFromNS(period);
@@ -318,10 +359,19 @@ void Arch::parseXdc(std::istream &in)
     }
     if (!isempty(linebuf))
         log_error("unexpected end of XDC file\n");
-    if (missing_targets > 0 && getCtx()->verbose)
-        log_info("%d XDC constraint target(s) reference ports or nets that are not in this design and were "
-                 "ignored (a board-level XDC normally constrains more pins than a design uses)\n",
-                 missing_targets);
+    if (missing_targets > 0) {
+        if (xdcStrict)
+            log_error("%d XDC constraint target(s) reference ports or nets that are not in this design and were "
+                      "ignored [--xdc-strict]. Re-run with --verbose to itemise them.\n",
+                      missing_targets);
+        // One line, at default verbosity, as a Warning so it reaches the closing
+        // "N warnings" count. --verbose itemises, which is what 555d326c's
+        // reporter actually wanted quiet.
+        log_warning("%d XDC constraint target(s) reference ports or nets that are not in this design and were "
+                    "ignored (a board-level XDC normally constrains more pins than a design uses; re-run with "
+                    "--verbose to itemise them, or --xdc-strict to make this fatal)\n",
+                    missing_targets);
+    }
 }
 
 NEXTPNR_NAMESPACE_END

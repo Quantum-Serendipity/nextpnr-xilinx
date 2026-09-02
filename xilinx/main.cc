@@ -49,6 +49,8 @@ po::options_description UspCommandHandler::getArchOptions()
     po::options_description specific("Architecture specific options");
     specific.add_options()("chipdb", po::value<std::string>(), "name of chip database binary");
     specific.add_options()("xdc", po::value<std::vector<std::string>>(), "XDC-style constraints file");
+    specific.add_options()("xdc-strict",
+                           "treat an XDC selector that matches nothing as an error, not a warning");
     specific.add_options()("fasm", po::value<std::string>(), "fasm bitstream file to write");
     specific.add_options()("fixed-routes", po::value<std::string>(),
                            "frozen hard-macro routing to LOCK before routing (net + src->dst pips)");
@@ -106,6 +108,10 @@ void UspCommandHandler::setupArchContext(Context *ctx)
 
 void UspCommandHandler::customAfterLoad(Context *ctx)
 {
+    // Set before the first parseXdc and not in setupArchContext: this is a plain
+    // member, so there is no IdString to intern early, and reading it here keeps
+    // the flag next to the parse it governs.
+    ctx->xdcStrict = vm.count("xdc-strict") != 0;
     if (vm.count("xdc")) {
         std::vector<std::string> files = vm["xdc"].as<std::vector<std::string>>();
         for (const auto &filename : files) {

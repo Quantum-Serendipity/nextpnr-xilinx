@@ -972,6 +972,16 @@ struct Arch : BaseCtx
     bool rm_snapshot_taken = false;
     void snapshot_rm_cells();
 
+    // --xdc-strict: an XDC selector that matches nothing is a hard error rather
+    // than a warning. See the block above parseXdc() in xilinx/xdc.cc.
+    //
+    // A plain member and not ctx->settings[id("xdc-strict")], for two reasons.
+    // settings is serialised into the routed JSON, which the roundtrip and
+    // bitdiff comparisons read; and interning a new IdString shifts every
+    // subsequent index, which setupArchContext's own comment records as having
+    // moved the placement of 39 of 65 cells on counter25.
+    bool xdcStrict = false;
+
     // Set by Arch::pack(). The RM set is snapshotted at customAfterLoad, which
     // runs BEFORE the pack step, so any run that packs invalidates it: every
     // cell the packer creates carries a name the snapshot never saw, and
