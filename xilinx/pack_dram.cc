@@ -463,12 +463,40 @@ void XilinxPacker::pack_dram()
                         m256 ? 0 : (ctx->xc7 ? 2 : 6));
                 packed_cells.insert(ci->name);
             }
+        } else if (cs.memtype == ctx->id("RAM64X1S")) {
+            // Single 64x1 LUTRAM: one RAMD64E per cell, no mux tree.  This is
+            // the shape Yosys emits for every 64-deep single-port distributed
+            // RAM, and until now it fell through to the log_error below --
+            // the most common LUTRAM in the language was the one primitive
+            // this packer refused.  Ported from Himbaechel
+            // (himbaechel/uarch/xilinx/pack_dram.cc:307-326 @ de8cd978),
+            // rewritten against this tree's API and following the RAM64X1D
+            // path above for the disconnect-before-rebind order.
+            int z = (height - 1);
+            CellInfo *base = nullptr;
+            for (CellInfo *ci : group.second) {
+                if (z == (height - 1) || (z - 1) < 0) {
+                    z = (height - 1);
+                    base = nullptr;
+                }
+                NetInfo *o = get_net_or_empty(ci, ctx->id("O"));
+                NetInfo *di = get_net_or_empty(ci, ctx->id("D"));
+                disconnect_port(ctx, ci, ctx->id("O"));
+                std::vector<NetInfo *> address(cs.wa.begin(),
+                        cs.wa.begin() + std::min<size_t>(cs.wa.size(), 6));
+                CellInfo *ram = create_dram_lut(ci->name.str(ctx) + "/ADDR", base, cs, address, di, o, z);
+                if (ci->params.count(ctx->id("INIT")))
+                    ram->params[ctx->id("INIT")] = ci->params[ctx->id("INIT")];
+                if (base == nullptr)
+                    base = ram;
+                z--;
+                packed_cells.insert(ci->name);
+            }
         } else if (cs.memtype == ctx->id("RAMS32")
                 || cs.memtype == ctx->id("RAMD32")
                 || cs.memtype == ctx->id("RAMS64E")
                 || cs.memtype == ctx->id("RAMD64E")
-                || cs.memtype == ctx->id("RAM32X1S")
-                || cs.memtype == ctx->id("RAM64X1S")) {
+                || cs.memtype == ctx->id("RAM32X1S")) {
             log_error("Cannot pack unsupported primitive: %s\n", cs.memtype.c_str(ctx));
         }
     }
