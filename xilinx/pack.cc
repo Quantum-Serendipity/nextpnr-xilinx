@@ -1414,12 +1414,70 @@ void XilinxPacker::pack_inverters()
     }
 }
 
+// Out-of-context mode: delete the frontend's $nextpnr_{i,o,io}buf placeholders
+// instead of turning them into real IOBs, so a sub-module whose top-level port
+// count exceeds the device's physical pin count can still place and route.
+//
+// gatecat PR #99 also erased these cells from ctx->port_cells to stop the raw
+// pointers there dangling. THAT HALF IS NOT PORTED AND MUST NOT BE ADDED BACK
+// AS A SAFETY MEASURE: BaseCtx has no port_cells member on this tree (0 hits
+// tree-wide from `git grep port_cells`, against 90 files for `cells`), because
+// our nextpnr base predates the commit that introduced it. There is no dangling
+// pointer here to defend against; adding the block would not compile.
+static void remove_nextpnr_iobs(Context *ctx)
+{
+    log_info("Skipping IO buffer insertion (--no-iobs / --out-of-context)\n");
+    auto is_nextpnr_iob = [&](IdString type) {
+        return type == ctx->id("$nextpnr_ibuf") || type == ctx->id("$nextpnr_obuf") ||
+               type == ctx->id("$nextpnr_iobuf");
+    };
+    std::vector<IdString> to_remove;
+    // sorted() rather than a raw walk of ctx->cells: the removal order decides
+    // the order the nets are left driverless in, and ctx->cells is a hash map.
+    for (auto cell : sorted(ctx->cells)) {
+        CellInfo *ci = cell.second;
+        if (!is_nextpnr_iob(ci->type))
+            continue;
+        // PR #99 spells this ci->disconnectPort(p.first); on this tree
+        // disconnectPort is a BaseCtx method taking (cell-name, port)
+        // (common/nextpnr.h:832) and the per-cell form is the free function in
+        // design_utils.h:89. Same effect, different call.
+        std::vector<IdString> ports;
+        for (auto &p : ci->ports)
+            ports.push_back(p.first);
+        for (IdString p : ports)
+            disconnect_port(ctx, ci, p);
+        to_remove.push_back(ci->name);
+    }
+    for (auto &name : to_remove)
+        ctx->cells.erase(name);
+    log_info("    Removed %d IO buffer cells\n", int(to_remove.size()));
+}
+
 bool Arch::pack()
 {
     // Recorded, not inferred. ctx->attrs["step"] would be ambiguous here: a
     // round-tripped netlist carries step=pack from the run that produced it, so
     // reading it back cannot distinguish "packed earlier" from "packing now".
     packed_since_rm_snapshot = true;
+    // --no-iobs / --out-of-context, interned in UspCommandHandler::createContext.
+    //
+    // Reachability, stated because it is the finding this option was landed to
+    // produce and not a caveat: this whole branch is inside Arch::pack(), and
+    // common/command.cc:333 skips Arch::pack() under --no-pack. The DPR flow
+    // passes --no-pack unconditionally -- a round-tripped netlist carries
+    // post-pack cell types (SLICE_LUTX, SLICE_FFX), so it cannot be repacked --
+    // which makes --no-iobs a NO-OP on every partition-import run. It is
+    // reachable only on a fresh yosys netlist, i.e. an out-of-context RM
+    // compile, and check_partition_nets() (xilinx/arch.cc:987) log_errors on
+    // exactly that combination via packed_since_rm_snapshot above. See
+    // artifacts/docs/p7-u72-h204-ooc-pnr.md.
+    //
+    // Read off the plain member, never bool_or_default(settings, id(...)): the
+    // id() call would intern a new IdString here, after parse_json, and that
+    // moved two of one design's 35 placed cells with no flag passed. arch.h
+    // carries the measurement.
+    const bool disable_iobs = disableIobs;
     if (xc7) {
         XC7Packer packer;
         packer.ctx = getCtx();
@@ -1428,11 +1486,16 @@ bool Arch::pack()
         packer.propagate_clock_constraints();
         packer.pack_constants();
         packer.pack_inverters();
-        packer.pack_io();
+        if (!disable_iobs) {
+            packer.pack_io();
+        } else {
+            remove_nextpnr_iobs(getCtx());
+        }
         // packer.prepare_iologic();
         packer.prepare_clocking();
         packer.pack_constants();
-        packer.pack_iologic();
+        if (!disable_iobs)
+            packer.pack_iologic();
         packer.pack_idelayctrl();
         packer.pack_cfg();
         packer.pack_plls();
@@ -1463,11 +1526,16 @@ bool Arch::pack()
         packer.ctx = getCtx();
         packer.pack_constants();
         packer.pack_inverters();
-        packer.pack_io();
-        packer.prepare_iologic();
+        if (!disable_iobs) {
+            packer.pack_io();
+            packer.prepare_iologic();
+        } else {
+            remove_nextpnr_iobs(getCtx());
+        }
         packer.prepare_clocking();
         packer.pack_constants();
-        packer.pack_iologic();
+        if (!disable_iobs)
+            packer.pack_iologic();
         packer.pack_idelayctrl();
         packer.pack_clocking();
         // See the matching comment in the xc7 branch above: must run before

@@ -982,6 +982,20 @@ struct Arch : BaseCtx
     // moved the placement of 39 of 65 cells on counter25.
     bool xdcStrict = false;
 
+    // --no-iobs / --out-of-context: Arch::pack() deletes the frontend's
+    // $nextpnr_{i,o,io}buf placeholders instead of turning them into IOBs.
+    //
+    // A plain member for the SECOND of xdcStrict's two reasons, and it was
+    // measured on this patch rather than assumed. gatecat PR #99 spells this
+    // bool_or_default(settings, id("disable_iobs")) at the head of Arch::pack(),
+    // which interns a NEW IdString on every packing run -- after parse_json, so
+    // the shift is not uniform. Built both ways with identical cmake flags on
+    // one 35-cell design: the settings form moved $PACKER_GND_DRV
+    // NULL_X0Y181->NULL_X0Y175 and $PACKER_VCC_DRV LIOB33_X0Y195->NULL_X0Y208
+    // with no flag passed, against a control showing the two baseline binaries
+    // agreeing bel-for-bel. This form moves nothing.
+    bool disableIobs = false;
+
     // Set by Arch::pack(). The RM set is snapshotted at customAfterLoad, which
     // runs BEFORE the pack step, so any run that packs invalidates it: every
     // cell the packer creates carries a name the snapshot never saw, and

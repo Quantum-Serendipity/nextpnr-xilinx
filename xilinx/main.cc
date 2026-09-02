@@ -58,6 +58,10 @@ po::options_description UspCommandHandler::getArchOptions()
                            "after routing, dump fabric routing in --fixed-routes format");
     specific.add_options()("region-only",
                            "restrict --fasm and --write-fixed-routes output to the NEXTPNR_PARTITION_ROI rectangle");
+    specific.add_options()("no-iobs", "disable automatic IO buffer insertion (out-of-context mode)");
+    specific.add_options()("out-of-context",
+                           "alias for --no-iobs: skip IO buffer insertion and enable nextpnr's "
+                           "out-of-context timing analysis (arch.ooc)");
 
     return specific;
 }
@@ -88,7 +92,27 @@ std::unique_ptr<Context> UspCommandHandler::createContext(std::unordered_map<std
         log_error("chip database binary must be provided\n");
     }
     chipArgs.chipdb = vm["chipdb"].as<std::string>();
-    return std::unique_ptr<Context>(new Context(chipArgs));
+    auto ctx = std::unique_ptr<Context>(new Context(chipArgs));
+    // Skip IO buffer insertion so a sub-module whose top-level port count
+    // exceeds the device pin count can still place and route. A plain member,
+    // NOT ctx->settings[id("disable_iobs")] as gatecat PR #99 has it -- see the
+    // measurement recorded beside Arch::disableIobs in arch.h.
+    ctx->disableIobs = vm.count("no-iobs") > 0 || vm.count("out-of-context") > 0;
+    // arch.ooc has no such choice: common/timing.cc:259 reads it out of
+    // ctx->settings by name, so it must live there. Set CONDITIONALLY, which is
+    // what keeps an unflagged run's IdString sequence -- and therefore its
+    // placement -- exactly what it was before this option existed. On a flagged
+    // run the early intern is harmless: timing.cc would have interned the same
+    // string later anyway, and an out-of-context build has no prior placement to
+    // preserve.
+    //
+    // Without it, timing.cc never seeds top-level inputs as topological start
+    // points, so every combinational path sourced at an unbuffered input is
+    // dropped from the timing report -- an Fmax figure that silently ignores
+    // the paths out-of-context mode exists to measure.
+    if (ctx->disableIobs)
+        ctx->settings[ctx->id("arch.ooc")] = Property::State::S1;
+    return ctx;
 }
 
 // Deliberately here and NOT in customAfterLoad. setupArchContext runs before
