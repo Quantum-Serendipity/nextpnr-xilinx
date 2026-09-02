@@ -365,6 +365,32 @@ void XilinxPacker::pack_ffs()
     log_info("Packing flipflops..\n");
 
     std::unordered_map<IdString, XFormRule> ff_rules;
+
+    // IS_C_INVERTED is the UNISIM name of the clock-inversion parameter on
+    // FDRE/FDSE/FDCE/FDPE; IS_CLK_INVERTED is the name every reader in this
+    // tree uses (7 sites in fasm.cc, 7 in pack.cc). Before this xform,
+    // IS_C_INVERTED occurred exactly once in the whole tree -- constids.inc:520
+    // -- declared and never read, so a Vivado-imported netlist carrying
+    // IS_C_INVERTED(1) on a PLAIN FDRE had the parameter silently dropped and
+    // the flop emitted as posedge.
+    //
+    // Fixed here rather than at the seven fasm.cc read sites (which is where
+    // phases/06 Unit 6.4 scopes it, at Himbaechel's fasm.cc:794): param_xform
+    // is one place, it is the layer that already normalises UNISIM names, and
+    // it keeps this change out of xilinx/fasm.cc, which Unit 6.5 is rebasing.
+    //
+    // Yosys never emits IS_C_INVERTED -- it emits FDRE_1 for a negedge flop --
+    // so on every design this flow builds today the copy below finds nothing
+    // and is a no-op. It fires only on the imported-netlist case that is
+    // currently wrong.
+    //
+    // Order is deliberate: xform_cell() applies param_xform (pack.cc:101-105)
+    // BEFORE set_params (:110-111), so the FDxE_1 rules below still force
+    // IS_CLK_INVERTED=1 by cell type even if an imported FDRE_1 also carried
+    // IS_C_INVERTED(0).
+    for (const char *ff : {"FDCE", "FDPE", "FDRE", "FDSE"})
+        ff_rules[ctx->id(ff)].param_xform[ctx->id("IS_C_INVERTED")] = ctx->id("IS_CLK_INVERTED");
+
     ff_rules[ctx->id("FDCE")].new_type = id_SLICE_FFX;
     ff_rules[ctx->id("FDCE")].port_xform[ctx->id("C")] = ctx->xc7 ? id_CK : id_CLK;
     ff_rules[ctx->id("FDCE")].port_xform[ctx->id("CLR")] = id_SR;
