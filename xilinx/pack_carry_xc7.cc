@@ -1245,10 +1245,22 @@ void XC7Packer::relocate_carry_o_fabric()
         // created, and the MUXCY computes CO = S ? CIN : DI, so DI cannot
         // reach CO at all; the lane's O is disconnected too, its net having
         // moved to the other cell.  A DI that reads 1 is unobservable.
-        // Measured on conflict.v: the CARRY4 config FASM (PRECYINIT.*,
-        // CARRY4.xCY0) is identical with and without the tie, and the only
-        // features that disappear are the GFAN/BYP GND routes into
-        // AX/BX/CX/DX.
+        // Measured on conflict.v.  The CARRY4 CONFIGURATION FASM is identical
+        // with and without the tie: the PRECYINIT|CARRY4|CY0 subset is 6 lines
+        // either way and diffs empty.  That is the claim this argument needs,
+        // and it holds.
+        //
+        // The WHOLE FASM is not identical, and an earlier revision of this
+        // comment said it was.  Over all features: 385 without the tie against
+        // 369 with it, 32 disappearing and 16 appearing.  Only 16 of the 32 are
+        // the GFAN/BYP GND routes; the rest are 4 *LUT.INIT values, 4 CLBLL
+        // site IMUX pin selections and 8 INT routing pips.  The four INIT pairs
+        // have EQUAL POPCOUNT (32 ones each), which is LUT input permutation
+        // rather than a changed function -- the router had one fewer sink to
+        // place and picked different inputs.  Two nouns: what the safety
+        // argument needs is *the carry chain's configuration unchanged*; what
+        // the original sentence asserted was *no FASM feature changed at all*,
+        // which was measured over the GND-route features only.
         for (int b = i; b < 4; b++) {
             connect_port(ctx, vcc, c4, pname("S", b));
             PortRef pr{c4, pname("S", b)};
