@@ -1060,7 +1060,11 @@ void XC7Packer::relocate_carry_o_fabric()
     static const std::unordered_set<IdString> ff_types{
         ctx->id("FDRE"), ctx->id("FDSE"), ctx->id("FDCE"), ctx->id("FDPE"),
         ctx->id("FDRSE")};
-    int relocated = 0, split_carries = 0, skipped = 0;
+    int relocated = 0, split_carries = 0;
+    // Local addition on top of upstream c2c05095a's series: the DFX branch has
+    // to be countable.  A BEL-pinned chain is skipped, and "skipped" is the
+    // same observable as "the pass was removed" unless the skip is counted.
+    int chains_pinned = 0, cells_pinned = 0;
 
     // bit = GLOBAL bit index within the original 4-bit CARRY4.  Every cell
     // (original or split) keeps global port indices 0..3: the COUT->CIN
@@ -1322,8 +1326,10 @@ void XC7Packer::relocate_carry_o_fabric()
     }
 
     for (auto *root : roots) {
-        if (root->attrs.count(ctx->id("BEL")))
-            continue; // imported (Vivado-proven) placement: leave alone
+        if (root->attrs.count(ctx->id("BEL"))) {
+            ++chains_pinned; // imported (Vivado-proven) placement: leave alone
+            continue;
+        }
         // NOTE: roots deliberately keep constr_x/y UNCONSTR.  An earlier
         // revision pinned each root to a distinct row via
         // constr_y = -(chain_seq + chain_seq/25), but on a parentless cell
@@ -1341,8 +1347,10 @@ void XC7Packer::relocate_carry_o_fabric()
         while (!work.empty()) {
             auto [c4, off] = work.back();
             work.pop_back();
-            if (c4->attrs.count(ctx->id("BEL")))
+            if (c4->attrs.count(ctx->id("BEL"))) {
+                ++cells_pinned;
                 continue;
+            }
             for (int i = 3; i >= off; i--) {
                 if (!o_has_fabric(c4, i) || !co_has_fabric(c4, i))
                     continue;
@@ -1443,9 +1451,15 @@ void XC7Packer::relocate_carry_o_fabric()
         }
     }
 
-    if (relocated || split_carries || skipped)
-        log_info("   Carry-O relocation: %d sum(s) duplicated, %d CARRY4 split(s), %d bit(s) skipped (unrelocatable)\n",
-                 relocated, split_carries, skipped);
+    // Unconditional whenever the design has a CARRY4 chain at all.  Upstream
+    // emits this only when the pass acted, which makes "nothing needed
+    // relocating" and "the pass no longer runs" the same observation; a
+    // regression harness cannot tell them apart.  The chain total is the
+    // denominator the other three numbers are shares of.
+    if (!roots.empty())
+        log_info("   Carry-O relocation: %d sum(s) duplicated, %d CARRY4 split(s) over %d chain(s); "
+                 "%d BEL-pinned chain(s), %d BEL-pinned cell(s) left alone\n",
+                 relocated, split_carries, int(roots.size()), chains_pinned, cells_pinned);
 
     flush_cells();
     if (getenv("DBG_CARRYO")) {
