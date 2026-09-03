@@ -1224,6 +1224,27 @@ void XC7Packer::relocate_carry_o_fabric()
         // CO3; nb's empty tail 0..i-1 carries its CIN up to bit i.  Realise
         // each S=1 with a local 6LUT, just like pack_carries_atomic() does
         // for constant S inputs before relocation.
+        //
+        // DI is left UNCONNECTED on a pass-through lane, where upstream
+        // c2c05095a's series ties it to $PACKER_GND_NET.  Tying it adds a
+        // constant sink that routeVcc() often cannot bridge in an already
+        // dense slice, and this fork's routeVcc refuses to write undriven
+        // constant inputs rather than emitting them silently as upstream
+        // does.  That refusal is what failed UberDDR3 x8/x16 and the
+        // nexys_video demo -- 3, 6 and 6 unbridged sinks, every one of them a
+        // pass-through DI.
+        //
+        // This does NOT weaken the DI-delivery invariant above (an unrouted
+        // carry-DI bypass reads VCC, not 0, so omitting a GND DI silently
+        // delivers 1).  That invariant governs a lane whose S is a real
+        // signal.  Here S is hardwired to 1 through the feed-through LUT just
+        // created, and the MUXCY computes CO = S ? CIN : DI, so DI cannot
+        // reach CO at all; the lane's O is disconnected too, its net having
+        // moved to the other cell.  A DI that reads 1 is unobservable.
+        // Measured on conflict.v: the CARRY4 config FASM (PRECYINIT.*,
+        // CARRY4.xCY0) is identical with and without the tie, and the only
+        // features that disappear are the GFAN/BYP GND routes into
+        // AX/BX/CX/DX.
         for (int b = i; b < 4; b++) {
             connect_port(ctx, vcc, c4, pname("S", b));
             PortRef pr{c4, pname("S", b)};
@@ -1236,7 +1257,6 @@ void XC7Packer::relocate_carry_o_fabric()
             s_lut->constr_abs_z = true;
             s_lut->constr_z = (b << 4) | BEL_6LUT;
             new_cells.push_back(std::move(s_feed));
-            connect_port(ctx, gnd, c4, pname("DI", b));
         }
         for (int b = 0; b < i; b++) {
             connect_port(ctx, vcc, nb.get(), pname("S", b));
@@ -1250,7 +1270,6 @@ void XC7Packer::relocate_carry_o_fabric()
             s_lut->constr_abs_z = true;
             s_lut->constr_z = (b << 4) | BEL_6LUT;
             new_cells.push_back(std::move(s_feed));
-            connect_port(ctx, gnd, nb.get(), pname("DI", b));
         }
         // re-anchor the moved LUT/FF constraints onto the new CARRY4
         for (int b = i; b < 4; b++) {
