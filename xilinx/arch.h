@@ -928,6 +928,46 @@ struct Arch : BaseCtx
     mutable bool roi_loaded = false;
     void load_partition_roi() const;
 
+    // The ROI file's OPTIONAL "siblings" array: the other partitions on this
+    // device, which THIS RUN IS NOT BUILDING.  Empty unless the file names them,
+    // so a file carrying only "info" is the mechanism it was before this
+    // existed.
+    //
+    // They govern ROUTING ONLY.  Placement, RM steering, --region-only emission
+    // and invariant P stay the rectangle above's alone: this run's RM cells
+    // belong to it and to no other, and a sibling reserves no bel.
+    //
+    // WHY THEY HAVE TO EXIST.  In a chained replay each run frees one region and
+    // clamps that region's rectangle; every region an earlier run already
+    // contained is ordinary static logic to this one, so router2 rips it up
+    // under congestion and re-routes it with no rectangle at all.  Measured on
+    // the four-region static: RM-net pips outside their own rectangle went
+    // 0/133/155/123 after replay 0 to a fixed point of 1/4/11/0 after three full
+    // four-run passes -- iterating cannot close it, because every pass re-opens
+    // what the previous one contained.  A sibling rectangle re-clamps those nets
+    // to the rectangle they are already in.
+    struct RoiRect
+    {
+        int x0, y0, x1, y1;
+    };
+    mutable std::vector<RoiRect> roi_siblings;
+
+    // Rectangle 0 is the partition; 1..roi_siblings.size() are the siblings in
+    // file order.  One numbering shared by the clamp, the route gate and the
+    // census, so a rectangle index printed in a log names the same rectangle
+    // everywhere.
+    RoiRect roi_rect(int i) const
+    {
+        if (i == 0)
+            return RoiRect{roi_x0, roi_y0, roi_x1, roi_y1};
+        return roi_siblings.at(i - 1);
+    }
+    int roi_rect_count() const { return 1 + int(roi_siblings.size()); }
+    static bool rect_holds(const RoiRect &r, int x, int y)
+    {
+        return x >= r.x0 && x <= r.x1 && y >= r.y0 && y <= r.y1;
+    }
+
     // One veto counter per enforcement point, reported at the end of
     // Arch::place().  These exist because "0 RM cells outside the rectangle" is
     // a STATIC observation: it is equally true of a rectangle that refused a
@@ -1055,6 +1095,26 @@ struct Arch : BaseCtx
     // report success. check_partition_nets() NPNR_ASSERTs the agreement rather
     // than documenting it.
     std::unordered_set<IdString> partition_nets() const;
+
+    // The same question the router and the route gate ask, widened by the
+    // sibling rectangles: which rectangle confines this net's pips?  Maps a net
+    // name to a roi_rect() index; a net absent from the map is unconfined.
+    //
+    // Rectangle 0 is partition_nets() unchanged -- the nets P was asserted over.
+    // A sibling rectangle takes a net iff EVERY endpoint of that net is placed
+    // and inside it, which is the strongest claim placement alone can support.
+    // It is not a no-op: a net wholly inside a region can still DETOUR outside
+    // it under congestion, and forbidding that detour is the whole point.  What
+    // it does not do is constrain a net whose endpoints are not all in one
+    // region -- that net is asking to leave, and this says nothing about it.
+    // Const nets and listed exemptions are excluded by the same exact names
+    // partition_nets() uses.
+    //
+    // Deliberately NOT a name-prefix or instance-path test.  The rectangle a
+    // region's logic occupies is a placement fact this run can read; "which slot
+    // is this cell in" is a fact only the build script knows, and encoding it
+    // here would make containment depend on a naming convention.
+    std::unordered_map<IdString, int> partition_net_rects() const;
 
     // The DETECTIVE half of route containment. router2's clamp is PREVENTIVE
     // and covers exactly one of the ten paths in this tree that can bind a pip

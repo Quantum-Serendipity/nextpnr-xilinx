@@ -2862,13 +2862,21 @@ bool Arch::route()
             cfg.partition_y0 = roi_y0;
             cfg.partition_x1 = roi_x1;
             cfg.partition_y1 = roi_y1;
-            cfg.partition_nets = partition_nets();
+            for (const RoiRect &s : roi_siblings)
+                cfg.partition_siblings.push_back({s.x0, s.y0, s.x1, s.y1});
+            cfg.partition_nets = partition_net_rects();
+            int in_rect0 = 0;
+            for (const auto &pn : cfg.partition_nets)
+                if (pn.second == 0)
+                    in_rect0++;
             // Unconditional, pass or fail, for the same reason the net gate's
             // census is unconditional: a clamp that says nothing is
             // indistinguishable from a clamp that was never installed, and this
             // programme has shipped four silently-inert mechanisms already.
-            log_info("partition route clamp: %d net(s) confined to tiles (%d,%d)-(%d,%d)\n",
-                     int(cfg.partition_nets.size()), roi_x0, roi_y0, roi_x1, roi_y1);
+            // The count is rectangle 0's, not the map's size: with siblings the
+            // two differ, and this line names one rectangle.
+            log_info("partition route clamp: %d net(s) confined to tiles (%d,%d)-(%d,%d)\n", in_rect0, roi_x0, roi_y0,
+                     roi_x1, roi_y1);
             if (cfg.partition_nets.empty())
                 log_warning("partition route clamp: the rectangle is active but governs NO nets. Either the RM "
                             "cell set is empty or every RM net was exempted; the clamp will have no effect.\n");
@@ -3415,6 +3423,12 @@ struct RoiJsonScan
     // wholesale, so the producer may add fields inside without this parser
     // having to be taught them.
     std::set<std::string> skip_subtree;
+    // Legal containers whose value is an ARRAY OF OBJECTS. Every element is
+    // validated against the array's own entry in `containers`, and its keys are
+    // recorded under "<path>[i].<key>" so the duplicate test stays per element.
+    std::set<std::string> array_of_objects;
+    // Filled by walk_array: how many elements each such array had.
+    std::map<std::string, int> array_len;
     // Members of skip_subtree that are inert only while empty; see the
     // ignore-list in load_partition_roi for why each one is on this list.
     std::set<std::string> must_be_empty;
@@ -3495,12 +3509,51 @@ struct RoiJsonScan
             ++p;
     }
 
-    void walk_object(const std::string &path)
+    // An array of objects. Each element is validated against `legal_path` --
+    // every element of one array has the same legal key set -- while its values
+    // are recorded under "<legal_path>[i]", so two elements naming the same key
+    // are not a duplicate but one element naming it twice still is.
+    void walk_array(const std::string &legal_path)
+    {
+        ws();
+        if (p >= s.size() || s[p] != '[')
+            bad("\"" + legal_path + "\" is not a JSON array");
+        ++p;
+        ws();
+        int n = 0;
+        if (p < s.size() && s[p] == ']') {
+            ++p;
+            array_len[legal_path] = 0;
+            return;
+        }
+        for (;;) {
+            walk_object(legal_path, legal_path + "[" + std::to_string(n) + "]");
+            ++n;
+            ws();
+            if (p < s.size() && s[p] == ',') {
+                ++p;
+                continue;
+            }
+            if (p < s.size() && s[p] == ']') {
+                ++p;
+                break;
+            }
+            bad("expected ',' or ']' inside \"" + legal_path + "\"");
+        }
+        array_len[legal_path] = n;
+    }
+
+    void walk_object(const std::string &path) { walk_object(path, path); }
+
+    // legal_path selects the accepted key set; value_path prefixes the recorded
+    // key paths. They differ only inside an array element, where every element
+    // shares one key set but must keep its own values.
+    void walk_object(const std::string &legal_path, const std::string &value_path)
     {
         ws();
         if (p >= s.size() || s[p] != '{')
-            bad(path.empty() ? std::string("the top level is not a JSON object")
-                             : ("\"" + path + "\" is not a JSON object"));
+            bad(value_path.empty() ? std::string("the top level is not a JSON object")
+                                   : ("\"" + value_path + "\" is not a JSON object"));
         ++p;
         ws();
         if (p < s.size() && s[p] == '}') {
@@ -3510,10 +3563,11 @@ struct RoiJsonScan
         for (;;) {
             ws();
             if (p >= s.size() || s[p] != '"')
-                bad(path.empty() ? std::string("expected a key at the top level")
-                                 : ("expected a key inside \"" + path + "\""));
+                bad(value_path.empty() ? std::string("expected a key at the top level")
+                                       : ("expected a key inside \"" + value_path + "\""));
             std::string key = str_lit();
-            std::string full = path.empty() ? key : path + "." + key;
+            std::string full = value_path.empty() ? key : value_path + "." + key;
+            std::string legal_full = legal_path.empty() ? key : legal_path + "." + key;
             ws();
             if (p >= s.size() || s[p] != ':')
                 bad("key \"" + full + "\" has no value");
@@ -3523,7 +3577,7 @@ struct RoiJsonScan
             // The refusal. Naming both the offending key and the container it
             // was found in, because "regions" at the root and "regions" inside
             // "info" are different mistakes.
-            const std::set<std::string> &legal = containers[path];
+            const std::set<std::string> &legal = containers[legal_path];
             if (!legal.count(key)) {
                 std::string allowed;
                 for (const std::string &k : legal)
@@ -3532,7 +3586,8 @@ struct RoiJsonScan
                           "Refusing rather than ignoring it: a key nextpnr does not read cannot influence placement, "
                           "so accepting it would silently build a rectangle that is not the one the file describes. "
                           "Legal %s: %s\n",
-                          fn, full.c_str(), path.empty() ? "top-level keys" : ("keys inside \"" + path + "\"").c_str(),
+                          fn, full.c_str(),
+                          legal_path.empty() ? "top-level keys" : ("keys inside \"" + legal_path + "\"").c_str(),
                           allowed.c_str());
             }
 
@@ -3545,9 +3600,9 @@ struct RoiJsonScan
                           "ambiguous\n",
                           fn, full.c_str());
 
-            if (skip_subtree.count(full)) {
+            if (skip_subtree.count(legal_full)) {
                 skip_value();
-                if (must_be_empty.count(full)) {
+                if (must_be_empty.count(legal_full)) {
                     // Inert only while empty -- verified on the raw bytes, so
                     // "[]", "[ ]" and "[\n]" pass and anything with content,
                     // or any non-array value, does not.
@@ -3562,8 +3617,10 @@ struct RoiJsonScan
                                   fn, full.c_str());
                     }
                 }
-            } else if (containers.count(full)) {
-                walk_object(full);
+            } else if (array_of_objects.count(legal_full)) {
+                walk_array(legal_full);
+            } else if (containers.count(legal_full)) {
+                walk_object(legal_full, full);
             } else {
                 skip_value();
             }
@@ -3648,33 +3705,90 @@ void Arch::load_partition_roi() const
     scan.must_be_empty.insert("ports");
     scan.must_be_empty.insert("required_features");
 
+    // `siblings` -- the OPTIONAL array of other partitions on this device, each
+    // element carrying exactly the four keys `info` does. Derived from the same
+    // `consumed` table so the two rectangle schemas cannot drift: a key added
+    // above becomes legal in both places in one edit.
+    //
+    // This is NOT `regions`. A `regions` array is still refused, and must stay
+    // refused: work/quad-static writes one, lock-identity.py hashes it, and the
+    // whole point of that file is that handing it to nextpnr is impossible to do
+    // by accident. `siblings` says something `regions` does not -- WHICH
+    // rectangle this run is building -- and that asymmetry is real: rectangle 0
+    // confines placement, the RM steering region and --region-only emission, and
+    // a sibling confines none of them.
+    scan.containers[""].insert("siblings");
+    scan.array_of_objects.insert("siblings");
+    for (const auto &c : consumed) {
+        std::string path(c.first);
+        scan.containers["siblings"].insert(path.substr(path.rfind('.') + 1));
+    }
+
     scan.walk_object("");
     scan.ws();
     if (scan.p != all.size())
         log_error("NEXTPNR_PARTITION_ROI: '%s' has trailing content after the ROI object (at byte %d)\n", f,
                   int(scan.p));
 
-    for (const auto &c : consumed) {
-        auto it = scan.value_at.find(c.first);
-        if (it == scan.value_at.end())
-            log_error("NEXTPNR_PARTITION_ROI: '%s' has no \"%s\" key\n", f, c.first);
-        // The value must actually be an integer. strtol answers 0 for a string
-        // or a null, which is a legal grid coordinate, so an unchecked read
-        // turns a typo into a rectangle in the corner of the device.
-        const char *v = all.c_str() + it->second;
-        if (!(isdigit((unsigned char)*v) || (*v == '-' && isdigit((unsigned char)v[1]))))
-            log_error("NEXTPNR_PARTITION_ROI: '%s' key \"%s\" is not an integer\n", f, c.first);
-        *c.second = int(strtol(v, nullptr, 10));
-    }
+    // One reader for both schemas: `info.KEY` and `siblings[i].KEY` differ only
+    // in their path prefix, so a key that is mandatory, integral and range-
+    // checked for the partition is all three for a sibling too.
+    auto read_rect = [&](const std::string &prefix, int &x0, int &y0, int &x1, int &y1) {
+        for (const auto &c : consumed) {
+            // Which of the four corners this key is, taken from `consumed`'s own
+            // target rather than from its position in the table: a reordered
+            // table must not silently transpose a rectangle.
+            NPNR_ASSERT(c.second == &roi_x0 || c.second == &roi_x1 || c.second == &roi_y0 || c.second == &roi_y1);
+            int *dst = c.second == &roi_x0 ? &x0
+                       : c.second == &roi_x1 ? &x1
+                       : c.second == &roi_y0 ? &y0
+                                             : &y1;
+            std::string key = prefix + std::string(c.first).substr(std::string(c.first).find('.'));
+            auto it = scan.value_at.find(key);
+            if (it == scan.value_at.end())
+                log_error("NEXTPNR_PARTITION_ROI: '%s' has no \"%s\" key\n", f, key.c_str());
+            // The value must actually be an integer. strtol answers 0 for a
+            // string or a null, which is a legal grid coordinate, so an
+            // unchecked read turns a typo into a rectangle in the corner of the
+            // device.
+            const char *v = all.c_str() + it->second;
+            if (!(isdigit((unsigned char)*v) || (*v == '-' && isdigit((unsigned char)v[1]))))
+                log_error("NEXTPNR_PARTITION_ROI: '%s' key \"%s\" is not an integer\n", f, key.c_str());
+            *dst = int(strtol(v, nullptr, 10));
+        }
+        if (x0 < 0 || y0 < 0 || x1 < x0 || y1 < y0)
+            log_error("NEXTPNR_PARTITION_ROI: '%s' gives an empty or inverted rectangle "
+                      "grid (%d,%d)-(%d,%d)\n",
+                      f, x0, y0, x1, y1);
+        if (x1 >= chip_info->width || y1 >= chip_info->height)
+            log_error("NEXTPNR_PARTITION_ROI: '%s' rectangle grid (%d,%d)-(%d,%d) does not fit the "
+                      "device grid %dx%d\n",
+                      f, x0, y0, x1, y1, int(chip_info->width), int(chip_info->height));
+    };
+    read_rect("info", roi_x0, roi_y0, roi_x1, roi_y1);
 
-    if (roi_x0 < 0 || roi_y0 < 0 || roi_x1 < roi_x0 || roi_y1 < roi_y0)
-        log_error("NEXTPNR_PARTITION_ROI: '%s' gives an empty or inverted rectangle "
-                  "grid (%d,%d)-(%d,%d)\n",
-                  f, roi_x0, roi_y0, roi_x1, roi_y1);
-    if (roi_x1 >= chip_info->width || roi_y1 >= chip_info->height)
-        log_error("NEXTPNR_PARTITION_ROI: '%s' rectangle grid (%d,%d)-(%d,%d) does not fit the "
-                  "device grid %dx%d\n",
-                  f, roi_x0, roi_y0, roi_x1, roi_y1, int(chip_info->width), int(chip_info->height));
+    roi_siblings.clear();
+    for (int i = 0; i < scan.array_len["siblings"]; i++) {
+        RoiRect r{};
+        read_rect("siblings[" + std::to_string(i) + "]", r.x0, r.y0, r.x1, r.y1);
+        roi_siblings.push_back(r);
+    }
+    // OVERLAP IS FATAL, because partition_net_rects() assigns a net to a
+    // rectangle by asking which one holds all its endpoints. Two rectangles
+    // sharing a tile make that question have two answers, the assignment
+    // becomes a function of iteration order, and a net would be confined to
+    // whichever rectangle happened to be tested first -- silently, at rc 0.
+    // The four-region static's own frame-set disjointness check would also be
+    // false for such a pair, so this refuses a floorplan that could not be
+    // partially reconfigured anyway.
+    for (int a = 0; a < roi_rect_count(); a++)
+        for (int b = a + 1; b < roi_rect_count(); b++) {
+            const RoiRect ra = roi_rect(a), rb = roi_rect(b);
+            if (ra.x0 <= rb.x1 && rb.x0 <= ra.x1 && ra.y0 <= rb.y1 && rb.y0 <= ra.y1)
+                log_error("NEXTPNR_PARTITION_ROI: '%s' rectangles %d (%d,%d)-(%d,%d) and %d (%d,%d)-(%d,%d) "
+                          "overlap; a net inside both has no unambiguous rectangle to be confined to\n",
+                          f, a, ra.x0, ra.y0, ra.x1, ra.y1, b, rb.x0, rb.y0, rb.x1, rb.y1);
+        }
 
     // Report the reservation count the way load_bel_blacklist does. A silent
     // containment mechanism is the failure mode this programme keeps hitting --
@@ -3696,6 +3810,15 @@ void Arch::load_partition_roi() const
                   f, roi_x0, roi_y0, roi_x1, roi_y1);
     log_info("partition ROI: grid (%d,%d)-(%d,%d) from %s; %d bel(s) reserved outside, %d inside\n", roi_x0, roi_y0,
              roi_x1, roi_y1, f, outside, inside);
+    // Logged only when the file names siblings, matching the ROI's own
+    // convention: an unset NEXTPNR_PARTITION_ROI prints nothing either, and the
+    // acceptance scripts assert the ABSENCE of these lines on their control
+    // arms. A file with no "siblings" key has not configured this mechanism, so
+    // there is nothing whose firing could be mistaken for its absence.
+    for (size_t i = 0; i < roi_siblings.size(); i++)
+        log_info("partition ROI sibling %d: grid (%d,%d)-(%d,%d) -- routing only; reserves no bel and steers no "
+                 "cell\n",
+                 int(i + 1), roi_siblings[i].x0, roi_siblings[i].y0, roi_siblings[i].x1, roi_siblings[i].y1);
 }
 
 void Arch::snapshot_rm_cells()
@@ -3802,41 +3925,116 @@ std::unordered_set<IdString> Arch::partition_nets() const
     return out;
 }
 
+std::unordered_map<IdString, int> Arch::partition_net_rects() const
+{
+    std::unordered_map<IdString, int> out;
+    if (!roi_active())
+        return out;
+    // partition_nets() loads the exemption list, so exempt_nets is populated
+    // before the sibling loop reads it.
+    for (IdString n : partition_nets())
+        out.emplace(n, 0);
+    if (roi_siblings.empty())
+        return out;
+
+    const IdString gnd_net = id("$PACKER_GND_NET"), vcc_net = id("$PACKER_VCC_NET");
+    for (auto np : sorted(nets)) {
+        NetInfo *net = np.second;
+        // Rectangle 0 wins. The rectangles are asserted disjoint at load, so an
+        // RM net cannot also be wholly inside a sibling -- but if it somehow
+        // were, the rectangle that confined its PLACEMENT is the one whose
+        // frames its bitstream will be cut from.
+        if (out.count(net->name))
+            continue;
+        // Excluded by the same exact names partition_nets() uses, for the same
+        // reason: a catch-all predicate is how an exemption becomes a hole.
+        if (net->name == gnd_net || net->name == vcc_net || exempt_nets.count(net->name))
+            continue;
+
+        std::vector<const PortRef *> eps;
+        if (net->driver.cell != nullptr)
+            eps.push_back(&net->driver);
+        for (auto &u : net->users)
+            eps.push_back(&u);
+        if (eps.empty())
+            continue;
+
+        // The rectangle every endpoint is inside, if there is one. An UNPLACED
+        // endpoint disqualifies the net: bel_outside_roi() answers false for
+        // BelId(), so an unplaced cell would otherwise read as "inside" and a
+        // net could be confined on the strength of an endpoint that is nowhere.
+        int rect = -1;
+        for (const PortRef *pr : eps) {
+            if (pr->cell == nullptr || pr->cell->bel == BelId()) {
+                rect = -1;
+                break;
+            }
+            Loc l = getBelLocation(pr->cell->bel);
+            int here = -1;
+            for (size_t i = 0; i < roi_siblings.size(); i++)
+                if (rect_holds(roi_siblings[i], l.x, l.y)) {
+                    here = int(i) + 1;
+                    break;
+                }
+            if (here < 0 || (rect >= 0 && here != rect)) {
+                rect = -1;
+                break;
+            }
+            rect = here;
+        }
+        if (rect > 0)
+            out.emplace(net->name, rect);
+    }
+    return out;
+}
+
 void Arch::check_partition_routing() const
 {
     if (!roi_active())
         return;
 
-    // The SAME set the clamp governs, from the same call. Never a re-derived
+    // The SAME map the clamp governs, from the same call. Never a re-derived
     // predicate: a backstop that disagreed with the thing it is backstopping
-    // would be checking a different design.
-    const std::unordered_set<IdString> governed = partition_nets();
+    // would be checking a different design -- and with N rectangles it could
+    // agree about WHICH nets and still disagree about which rectangle each one
+    // is confined to, which is the same hole one level down.
+    const std::unordered_map<IdString, int> governed = partition_net_rects();
 
     int nets_checked = 0, bad_nets = 0;
     int64_t pips_checked = 0, pips_outside = 0;
+    std::vector<int> rect_nets(roi_rect_count(), 0);
+    std::vector<int64_t> rect_pips(roi_rect_count(), 0), rect_outside(roi_rect_count(), 0);
     std::vector<std::pair<std::string, std::string>> offenders;
 
     for (auto np : sorted(nets)) {
         NetInfo *net = np.second;
-        if (!governed.count(net->name))
+        auto git = governed.find(net->name);
+        if (git == governed.end())
             continue;
+        const int ri = git->second;
+        const RoiRect r = roi_rect(ri);
         nets_checked++;
+        rect_nets.at(ri)++;
         int bad_here = 0;
         for (auto &w : net->wires) {
             if (w.second.pip == PipId())
                 continue;
             pips_checked++;
+            rect_pips.at(ri)++;
             Loc l = getPipLocation(w.second.pip);
-            if (l.x >= roi_x0 && l.x <= roi_x1 && l.y >= roi_y0 && l.y <= roi_y1)
+            if (rect_holds(r, l.x, l.y))
                 continue;
             pips_outside++;
+            rect_outside.at(ri)++;
             bad_here++;
             // Collected and sorted rather than logged in place: net->wires is a
             // hash map, so iteration order is not stable and an unsorted report
             // would differ run to run on the same design.
             offenders.emplace_back(std::string(net->name.c_str(this)),
                                    std::string(nameOfPip(w.second.pip)) + " at tile (" + std::to_string(l.x) + "," +
-                                           std::to_string(l.y) + ")");
+                                           std::to_string(l.y) + "), rectangle " + std::to_string(ri) + " (" +
+                                           std::to_string(r.x0) + "," + std::to_string(r.y0) + ")-(" +
+                                           std::to_string(r.x1) + "," + std::to_string(r.y1) + ")");
         }
         if (bad_here > 0)
             bad_nets++;
@@ -3857,6 +4055,16 @@ void Arch::check_partition_routing() const
     log_info("partition route gate: %d net(s) examined, %lld pip(s) bound, %lld outside the rectangle in %d net(s), "
              "rectangle (%d,%d)-(%d,%d)\n",
              nets_checked, (long long)pips_checked, (long long)pips_outside, bad_nets, roi_x0, roi_y0, roi_x1, roi_y1);
+    // With siblings the aggregate above sums over rectangles, so its counts and
+    // its rectangle are about different populations. The per-rectangle rows are
+    // the four numbers a chained replay is actually judged on.
+    if (!roi_siblings.empty())
+        for (int i = 0; i < roi_rect_count(); i++) {
+            const RoiRect r = roi_rect(i);
+            log_info("partition route gate: rectangle %d (%d,%d)-(%d,%d) %s: %d net(s), %lld pip(s), %lld outside\n", i,
+                     r.x0, r.y0, r.x1, r.y1, i == 0 ? "[this run's partition]" : "[sibling]", rect_nets.at(i),
+                     (long long)rect_pips.at(i), (long long)rect_outside.at(i));
+        }
 
     // No downgrade knob, deliberately. The two existing ones (PARTITION_NETS,
     // PARTITION_CLAMP) are already BANNED escape hatches; a third would be the

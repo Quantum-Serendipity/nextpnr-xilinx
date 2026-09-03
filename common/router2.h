@@ -58,14 +58,35 @@ struct Router2Cfg
     // compiling. When partition_active is false this costs one predictable
     // branch per net, taken once in setup_nets().
     //
-    // The net SET is passed in rather than derived here on purpose: the same
-    // set is validated by the invariant-P gate before placement finishes, so
+    // The net MAP is passed in rather than derived here on purpose: the same
+    // nets are validated by the invariant-P gate before placement finishes, so
     // the clamp governs exactly the nets the gate proved are containable. A
     // router-side re-derivation could disagree with the gate, and a net the
     // gate blessed but the clamp missed is a silent hole.
+    //
+    // N RECTANGLES, NOT ONE, and the map says which net goes in which. Rectangle
+    // 0 is the partition this run is building -- the one that also confined
+    // placement. partition_siblings are the OTHER regions on the device, already
+    // placed and routed by an earlier run of a chained replay; without them the
+    // router treats an earlier region's nets as ordinary static logic and
+    // re-routes them out of their own frames the moment they contend for a wire.
     bool partition_active = false;
     int partition_x0 = 0, partition_y0 = 0, partition_x1 = 0, partition_y1 = 0;
-    std::unordered_set<IdString> partition_nets;
+    struct PartitionRect
+    {
+        int x0 = 0, y0 = 0, x1 = 0, y1 = 0;
+    };
+    std::vector<PartitionRect> partition_siblings;
+    // net name -> rectangle index: 0 is the rectangle above, i >= 1 is
+    // partition_siblings[i - 1].
+    std::unordered_map<IdString, int> partition_nets;
+
+    PartitionRect partition_rect(int i) const
+    {
+        if (i == 0)
+            return PartitionRect{partition_x0, partition_y0, partition_x1, partition_y1};
+        return partition_siblings.at(i - 1);
+    }
 };
 
 void router2(Context *ctx, const Router2Cfg &cfg);

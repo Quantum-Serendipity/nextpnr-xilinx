@@ -67,11 +67,14 @@ struct Router2
         int total_route_us = 0;
         float max_crit = 0;
         int fail_count = 0;
-        // Unit 7.4: this net has an endpoint in the reconfigurable module, so
-        // every pip it binds must lie inside the partition rectangle. Resolved
-        // once in setup_nets() from cfg.partition_nets; a per-pip name lookup
-        // would be on the hottest path in the router.
-        bool partition = false;
+        // Unit 7.4: this net is confined to one of the partition rectangles, so
+        // every pip it binds must lie inside px0..py1. -1 means unconfined.
+        // Resolved once in setup_nets() from cfg.partition_nets, and the
+        // rectangle is COPIED here rather than indexed per pip: the test below
+        // is on the hottest path in the router, and neither a name lookup nor a
+        // vector index belongs there.
+        int partition_rect = -1;
+        int px0 = 0, py0 = 0, px1 = 0, py1 = 0;
     };
 
     struct WireScore
@@ -231,12 +234,20 @@ struct Router2
             // apply it unconditionally. A clamp placed before them would be
             // widened straight back out by 4 tiles on every side, which on
             // 7-series is a whole CLB column plus its INT.
-            if (cfg.partition_active && cfg.partition_nets.count(ni->name)) {
-                nets.at(i).partition = true;
-                nets.at(i).bb.x0 = std::max(nets.at(i).bb.x0, cfg.partition_x0);
-                nets.at(i).bb.y0 = std::max(nets.at(i).bb.y0, cfg.partition_y0);
-                nets.at(i).bb.x1 = std::min(nets.at(i).bb.x1, cfg.partition_x1);
-                nets.at(i).bb.y1 = std::min(nets.at(i).bb.y1, cfg.partition_y1);
+            if (cfg.partition_active) {
+                auto pit = cfg.partition_nets.find(ni->name);
+                if (pit != cfg.partition_nets.end()) {
+                    const auto r = cfg.partition_rect(pit->second);
+                    nets.at(i).partition_rect = pit->second;
+                    nets.at(i).px0 = r.x0;
+                    nets.at(i).py0 = r.y0;
+                    nets.at(i).px1 = r.x1;
+                    nets.at(i).py1 = r.y1;
+                    nets.at(i).bb.x0 = std::max(nets.at(i).bb.x0, r.x0);
+                    nets.at(i).bb.y0 = std::max(nets.at(i).bb.y0, r.y0);
+                    nets.at(i).bb.x1 = std::min(nets.at(i).bb.x1, r.x1);
+                    nets.at(i).bb.y1 = std::min(nets.at(i).bb.y1, r.y1);
+                }
             }
             i++;
         }
@@ -327,11 +338,14 @@ struct Router2
     //
     // Pip locations and the rectangle are the same coordinate space: both are
     // tile (grid_x, grid_y), getPipLocation() being tile % width / tile / width.
-    bool pip_in_partition(PipId pip) const
+    //
+    // The rectangle is the NET'S OWN, not a global one: with a chained replay
+    // the run confines its own region and every sibling region at once, and a
+    // single rectangle could only ever hold one of them.
+    bool pip_in_partition(const PerNetData &nd, PipId pip) const
     {
         Loc l = ctx->getPipLocation(pip);
-        return l.x >= cfg.partition_x0 && l.x <= cfg.partition_x1 && l.y >= cfg.partition_y0 &&
-               l.y <= cfg.partition_y1;
+        return l.x >= nd.px0 && l.x <= nd.px1 && l.y >= nd.py0 && l.y <= nd.py1;
     }
 
     double curr_cong_weight, hist_cong_weight, estimate_weight;
@@ -874,7 +888,7 @@ struct Router2
                 // below binds every pip on the path it found. That made it the
                 // widest of the four ways an RM net could leave its rectangle,
                 // and the only one the unit's original scoping did not name.
-                if (nd.partition && !pip_in_partition(uh)) {
+                if (nd.partition_rect >= 0 && !pip_in_partition(nd, uh)) {
                     partition_veto_bwd.fetch_add(1, std::memory_order_relaxed);
                     continue;
                 }
@@ -984,7 +998,7 @@ struct Router2
                 // Unit 7.4, forward A*. Note this is NOT guarded by is_bb: the
                 // no-bb retry sets is_bb=false and would otherwise lift the
                 // containment along with the box.
-                if (nd.partition && !pip_in_partition(dh)) {
+                if (nd.partition_rect >= 0 && !pip_in_partition(nd, dh)) {
                     partition_veto_fwd.fetch_add(1, std::memory_order_relaxed);
                     continue;
                 }
@@ -1226,13 +1240,13 @@ struct Router2
                 // letting the box grow past the rectangle would send the A*
                 // exploring tiles it can never legally use, which is pure
                 // wasted routing effort and a misleading debug picture.
-                if (net_data.partition) {
+                if (net_data.partition_rect >= 0) {
                     const int bx0 = net_data.bb.x0, by0 = net_data.bb.y0;
                     const int bx1 = net_data.bb.x1, by1 = net_data.bb.y1;
-                    net_data.bb.x0 = std::max(net_data.bb.x0, cfg.partition_x0);
-                    net_data.bb.y0 = std::max(net_data.bb.y0, cfg.partition_y0);
-                    net_data.bb.x1 = std::min(net_data.bb.x1, cfg.partition_x1);
-                    net_data.bb.y1 = std::min(net_data.bb.y1, cfg.partition_y1);
+                    net_data.bb.x0 = std::max(net_data.bb.x0, net_data.px0);
+                    net_data.bb.y0 = std::max(net_data.bb.y0, net_data.py0);
+                    net_data.bb.x1 = std::min(net_data.bb.x1, net_data.px1);
+                    net_data.bb.y1 = std::min(net_data.bb.y1, net_data.py1);
                     // Counted, so the census can say the re-clamp ACTUALLY BIT
                     // rather than merely that it was compiled in. Without this
                     // the only evidence would be indirect -- "the forward veto
@@ -1714,13 +1728,28 @@ struct Router2
         // from "nothing tried to leave". Non-zero counts here are the evidence
         // that the clamp is load-bearing; the acceptance script asserts on them,
         // not merely on the absence of an out-of-region pip.
-        if (cfg.partition_active)
+        if (cfg.partition_active) {
             log_info("partition route clamp: %d net(s) governed, %lld pip(s) vetoed (%lld forward A*, %lld backwards "
                      "BFS), %lld box growth(s) of which %lld re-clamped, rectangle (%d,%d)-(%d,%d)\n",
                      int(cfg.partition_nets.size()), (long long)(partition_veto_fwd + partition_veto_bwd),
                      (long long)partition_veto_fwd, (long long)partition_veto_bwd, (long long)partition_bb_growths,
                      (long long)partition_bb_reclamps, cfg.partition_x0, cfg.partition_y0, cfg.partition_x1,
                      cfg.partition_y1);
+            // The line above aggregates over every rectangle, so with siblings
+            // present its net count and its rectangle are about different
+            // things. Break it down rather than let a reader pair them.
+            if (!cfg.partition_siblings.empty()) {
+                std::vector<int> per_rect(cfg.partition_siblings.size() + 1, 0);
+                for (const auto &pn : cfg.partition_nets)
+                    per_rect.at(pn.second)++;
+                for (size_t r = 0; r < per_rect.size(); r++) {
+                    const auto rect = cfg.partition_rect(int(r));
+                    log_info("partition route clamp: rectangle %d (%d,%d)-(%d,%d) %s: %d net(s)\n", int(r), rect.x0,
+                             rect.y0, rect.x1, rect.y1, r == 0 ? "[this run's partition]" : "[sibling]",
+                             per_rect.at(r));
+                }
+            }
+        }
         if (cfg.perf_profile) {
             std::vector<std::pair<int, IdString>> nets_by_runtime;
             for (auto &n : nets_by_udata) {
