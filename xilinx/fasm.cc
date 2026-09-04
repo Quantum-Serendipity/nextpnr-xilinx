@@ -2236,21 +2236,49 @@ struct FasmBackend
         }
     }
 
-    void write_bram_width(CellInfo *ci, const std::string &name, bool is_36, bool is_y1)
+    // The width one port's WIDTH parameter encodes to in a single RAMB18 half.
+    // A RAMB36E1 splits its width across the two halves, so 72 lands here as 36.
+    // 36 means SDP and nothing else: TDP tops out at 36 on a RAMB36E1 and 18 on
+    // a RAMB18E1, so no TDP port reaches 36 in half terms.  This is the same
+    // test XC7Packer::pack_bram uses to select sdp_bram_rules (pack.cc:1198).
+    int bram_half_width(CellInfo *ci, const std::string &name, bool is_36)
     {
         int width = int_or_default(ci->params, ctx->id(name), 0);
         if (width == 0)
             width = 1; // golden encodes unused ports as width 1
-        int actual_width = width;
-        if (is_36) {
-            if (width == 1)
-                actual_width = 1;
-            else
-                actual_width = width / 2;
-        }
-        if (((is_36 && width == 72) || (is_y1 && actual_width == 36)) && name == "READ_WIDTH_A") {
+        if (is_36 && width != 1)
+            width /= 2;
+        return width;
+    }
+
+    void write_bram_width(CellInfo *ci, const std::string &name, bool is_36, bool is_y1)
+    {
+        // SDP drives ONE port per direction and leaves the other implicit:
+        // reads are port A, writes are port B, and the implicit port's WIDTH
+        // parameter is 0 (a nonzero one is a Vivado DRC error, so there is no
+        // width here to lose).  The wide port's call below emits the implicit
+        // port's *_18 feature itself, so this call must emit nothing.  Taking
+        // the width-0 -> width-1 default instead put READ_WIDTH_B_1
+        // (!27_43 !27_44 !27_45) beside READ_WIDTH_B_18 (!27_43 !27_44 27_45)
+        // for one cell, and fasm2frames refused the whole file with
+        // FasmInconsistentBits -- no bitstream at all for any SDP BRAM, either
+        // primitive, both halves.
+        if (name == "READ_WIDTH_B" && bram_half_width(ci, "READ_WIDTH_A", is_36) == 36)
+            return;
+        if (name == "WRITE_WIDTH_A" && bram_half_width(ci, "WRITE_WIDTH_B", is_36) == 36)
+            return;
+        int actual_width = bram_half_width(ci, name, is_36);
+        // THE READ DIRECTION IS NOT SYMMETRIC WITH THE WRITE DIRECTION AND
+        // GOLDEN SAYS SO.  Measured on Vivado 2025.2 bitstreams for
+        // xc7a100tfgg484-2 read back with prjxray bit2fasm: an SDP RAMB36E1
+        // sets READ_WIDTH_A_18 in BOTH halves, but an SDP RAMB18E1 in the LOWER
+        // half leaves the A read field at its all-zero width-1 encoding and
+        // carries the read width in B alone.  The write direction sets both
+        // A_18 and B_18 in every case.  Written as actual_width rather than
+        // `width == 72` so the one condition is spelled once; the two agree
+        // because for is_36 a half width of 36 can only come from 72.
+        if (name == "READ_WIDTH_A" && actual_width == 36 && (is_36 || is_y1))
             write_bit(name + "_18");
-        }
         if (actual_width == 36) {
             write_bit("SDP_" + name.substr(0, name.length() - 2) + "_36");
             if (name.find("WRITE") == 0) {
