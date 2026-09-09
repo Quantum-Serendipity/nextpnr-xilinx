@@ -2856,15 +2856,56 @@ bool Arch::route()
                         "unclamped control arm for the acceptance evidence. It must never be set for a build whose "
                         "bitstream will be loaded.\n");
         }
-        if (roi_active() && !clamp_off) {
-            cfg.partition_active = true;
+        // The keepout is the clamp's complement, so it gets its own switch and
+        // its own default rather than riding on the clamp's. ON whenever a
+        // rectangle is active, because a rectangle that static routing crosses
+        // is a rectangle no partial bitstream can be relocated into, and that
+        // is true of every build with an ROI whether or not it has an RM.
+        //
+        // Independent in both directions, deliberately. NEXTPNR_PARTITION_CLAMP
+        // =off is the clamp's discrimination arm and it must stay a clean one:
+        // a run with the clamp off and the keepout on is a different experiment
+        // from either, and neither flag may quietly imply the other. The
+        // consequence is that an existing clamp control arm now also carries
+        // the keepout unless it sets this too, which is the honest reading --
+        // the two mechanisms were never the same claim.
+        const char *keepout_mode = getenv("NEXTPNR_PARTITION_KEEPOUT");
+        const bool keepout_off = keepout_mode != nullptr && std::string(keepout_mode) == "off";
+        if (roi_active() && keepout_off) {
+            log_warning("partition static keepout: DISABLED by NEXTPNR_PARTITION_KEEPOUT=off. Nets belonging to no "
+                        "rectangle may route straight through every rectangle, so the per-region static content "
+                        "will differ between regions and a partial bitstream cut for one of them cannot be "
+                        "relocated to another by rewriting its FAR word. This setting exists to produce the "
+                        "un-kept-out control arm for the acceptance evidence.\n");
+        }
+        const char *narrow_mode = getenv("NEXTPNR_PARTITION_KEEPOUT_NARROW");
+        const bool narrow_off = narrow_mode != nullptr && std::string(narrow_mode) == "off";
+        if (roi_active() && !keepout_off && narrow_off) {
+            log_warning("partition static keepout: the narrow licence is DISABLED by "
+                        "NEXTPNR_PARTITION_KEEPOUT_NARROW=off. A net with a cell inside a rectangle may bind any "
+                        "pip in that whole rectangle even where its own locked routing already says which pips it "
+                        "uses, so two rectangles holding the same cell will be reached differently and their "
+                        "static content will differ. This setting exists to produce the wide-licence control arm.\n");
+        }
+        if (roi_active() && (!clamp_off || !keepout_off)) {
+            cfg.partition_active = !clamp_off;
+            cfg.keepout_active = !keepout_off;
+            cfg.keepout_narrow = !keepout_off && !narrow_off;
             cfg.partition_x0 = roi_x0;
             cfg.partition_y0 = roi_y0;
             cfg.partition_x1 = roi_x1;
             cfg.partition_y1 = roi_y1;
             for (const RoiRect &s : roi_siblings)
                 cfg.partition_siblings.push_back({s.x0, s.y0, s.x1, s.y1});
+            // Read even when the clamp is off, because the keepout needs it:
+            // rule 1 of its licence is "this net is governed by rectangle k",
+            // and a governed net must keep the right to route in its own
+            // rectangle no matter which mechanism is switched on.
             cfg.partition_nets = partition_net_rects();
+            if (cfg.keepout_active)
+                cfg.keepout_exempt_nets = load_keepout_exempt_nets();
+            if (cfg.keepout_narrow)
+                cfg.keepout_licence_pips = load_keepout_licence_pips();
             int in_rect0 = 0;
             for (const auto &pn : cfg.partition_nets)
                 if (pn.second == 0)
@@ -2875,11 +2916,27 @@ bool Arch::route()
             // programme has shipped four silently-inert mechanisms already.
             // The count is rectangle 0's, not the map's size: with siblings the
             // two differ, and this line names one rectangle.
-            log_info("partition route clamp: %d net(s) confined to tiles (%d,%d)-(%d,%d)\n", in_rect0, roi_x0, roi_y0,
-                     roi_x1, roi_y1);
-            if (cfg.partition_nets.empty())
-                log_warning("partition route clamp: the rectangle is active but governs NO nets. Either the RM "
-                            "cell set is empty or every RM net was exempted; the clamp will have no effect.\n");
+            if (cfg.partition_active) {
+                log_info("partition route clamp: %d net(s) confined to tiles (%d,%d)-(%d,%d)\n", in_rect0, roi_x0,
+                         roi_y0, roi_x1, roi_y1);
+                // An empty governed set stopped meaning what this warning says
+                // the moment the keepout existed. On a STATIC build the regions
+                // hold no RM logic by construction, so the set is empty and
+                // correct, and the rectangle is doing its work through the
+                // keepout instead -- warning there would be crying wolf on the
+                // flow's main path. With the keepout off the original reading
+                // stands: a rectangle was asked for, nothing is confined,
+                // nothing will happen.
+                if (cfg.partition_nets.empty()) {
+                    if (cfg.keepout_active)
+                        log_info("partition route clamp: the rectangle governs no nets, so the clamp has nothing to "
+                                 "confine; the static keepout is this run's containment mechanism\n");
+                    else
+                        log_warning("partition route clamp: the rectangle is active but governs NO nets. Either the "
+                                    "RM cell set is empty or every RM net was exempted; the clamp will have no "
+                                    "effect.\n");
+                }
+            }
         }
         router2(getCtx(), cfg);
         result = true;
@@ -3890,6 +3947,128 @@ void Arch::load_exempt_nets() const
         n++;
     }
     log_info("partition net exemptions: %d net(s) exempt from invariant P, from %s (%d unresolved)\n", n, f, miss);
+}
+
+std::unordered_set<IdString> Arch::load_keepout_exempt_nets() const
+{
+    std::unordered_set<IdString> out;
+    if (!roi_active())
+        return out;
+    // The P exemptions come along. A net the operator has already declared out
+    // of the rectangle's scope for placement cannot then be forbidden to route
+    // past it -- that would leave the clock spine holding a P exemption it
+    // cannot use. Counted apart from the derived rule in router2's census, so
+    // the two are still distinguishable in a log.
+    if (!exempt_nets_loaded)
+        load_exempt_nets();
+    for (IdString n : exempt_nets)
+        out.insert(n);
+    const int from_p = int(out.size());
+
+    const char *f = getenv("NEXTPNR_PARTITION_KEEPOUT_EXEMPT");
+    int n = 0, miss = 0;
+    if (f != nullptr) {
+        std::ifstream in(f);
+        if (!in)
+            log_error("NEXTPNR_PARTITION_KEEPOUT_EXEMPT: cannot open '%s'\n", f);
+        std::string ln;
+        while (std::getline(in, ln)) {
+            while (!ln.empty() && (ln.back() == '\r' || ln.back() == ' ' || ln.back() == '\t'))
+                ln.pop_back();
+            if (ln.empty() || ln[0] == '#')
+                continue;
+            IdString nn = id(ln);
+            if (!nets.count(nn)) {
+                log_warning("NEXTPNR_PARTITION_KEEPOUT_EXEMPT: '%s' names net '%s', which does not exist in this "
+                            "design\n",
+                            f, ln.c_str());
+                miss++;
+                continue;
+            }
+            out.insert(nn);
+            n++;
+        }
+    }
+    log_info("partition keepout exemptions: %d net(s) named (%d inherited from the invariant P exemptions, %d from "
+             "%s, %d unresolved)\n",
+             int(out.size()), from_p, n, f == nullptr ? "<unset>" : f, miss);
+    return out;
+}
+
+std::unordered_map<IdString, std::vector<PipId>> Arch::load_keepout_licence_pips() const
+{
+    std::unordered_map<IdString, std::vector<PipId>> out;
+    const char *f = getenv("NEXTPNR_PARTITION_KEEPOUT_LICENCE");
+    if (f == nullptr || !roi_active())
+        return out;
+    std::ifstream in(f);
+    if (!in)
+        log_error("NEXTPNR_PARTITION_KEEPOUT_LICENCE: cannot open '%s'\n", f);
+    int npip = 0, miss_net = 0, miss_tile = 0, miss_pip = 0, malformed = 0;
+    std::string ln;
+    while (std::getline(in, ln)) {
+        while (!ln.empty() && (ln.back() == '\r' || ln.back() == ' ' || ln.back() == '\t'))
+            ln.pop_back();
+        if (ln.empty() || ln[0] == '#')
+            continue;
+        size_t sp = ln.rfind(' ');
+        if (sp == std::string::npos) {
+            malformed++;
+            continue;
+        }
+        std::string netname = ln.substr(0, sp), pipspec = ln.substr(sp + 1);
+        auto nit = nets.find(id(netname));
+        if (nit == nets.end()) {
+            if (miss_net++ < 20)
+                log_warning("keepout licence: net not found: '%s'\n", netname.c_str());
+            continue;
+        }
+        size_t slash = pipspec.rfind('/'), dot = pipspec.rfind('.');
+        if (slash == std::string::npos || dot == std::string::npos || dot < slash) {
+            malformed++;
+            continue;
+        }
+        std::string tilename = pipspec.substr(0, slash);
+        int src_idx, dst_idx;
+        try {
+            src_idx = std::stoi(pipspec.substr(slash + 1, dot - slash - 1));
+            dst_idx = std::stoi(pipspec.substr(dot + 1));
+        } catch (...) {
+            malformed++;
+            continue;
+        }
+        auto tbn = tile_by_name.find(tilename);
+        if (tbn == tile_by_name.end()) {
+            if (miss_tile++ < 20)
+                log_warning("keepout licence: tile not found: '%s'\n", tilename.c_str());
+            continue;
+        }
+        int tile = tbn->second;
+        auto &td = chip_info->tile_types[chip_info->tile_insts[tile].type];
+        PipId pip;
+        for (int i = 0; i < td.num_pips; i++) {
+            if (td.pip_data[i].src_index == src_idx && td.pip_data[i].dst_index == dst_idx) {
+                pip.tile = tile;
+                pip.index = i;
+                break;
+            }
+        }
+        if (pip == PipId()) {
+            if (miss_pip++ < 20)
+                log_warning("keepout licence: no pip %s/%d.%d\n", tilename.c_str(), src_idx, dst_idx);
+            continue;
+        }
+        out[nit->first].push_back(pip);
+        npip++;
+    }
+    log_info("partition keepout licence: %d pip(s) over %d net(s) from %s (net-miss %d, tile-miss %d, pip-miss %d, "
+             "malformed %d)\n",
+             npip, int(out.size()), f, miss_net, miss_tile, miss_pip, malformed);
+    if (miss_net || miss_tile || miss_pip || malformed)
+        log_error("keepout licence: %d line(s) did not resolve (net-miss %d, tile-miss %d, pip-miss %d, malformed "
+                  "%d); the narrow licence is not the one the file asks for\n",
+                  miss_net + miss_tile + miss_pip + malformed, miss_net, miss_tile, miss_pip, malformed);
+    return out;
 }
 
 std::unordered_set<IdString> Arch::partition_nets() const

@@ -17,6 +17,7 @@
  *
  */
 
+#include <unordered_set>
 #include "nextpnr.h"
 
 NEXTPNR_NAMESPACE_BEGIN
@@ -80,6 +81,29 @@ struct Router2Cfg
     // net name -> rectangle index: 0 is the rectangle above, i >= 1 is
     // partition_siblings[i - 1].
     std::unordered_map<IdString, int> partition_nets;
+
+    // ---- static keepout, the clamp's complement ----------------------------
+    // The clamp answers "may this net LEAVE its rectangle". It says nothing
+    // about a net that belongs to no rectangle passing THROUGH one, and a
+    // rectangle crossed by static routing cannot be byte-identical to a
+    // rectangle crossed differently -- which is what relocating one partial
+    // bitstream to several slots by rewriting its FAR word requires.
+    //
+    // Same rectangles, same census discipline, its own switch: a run with the
+    // clamp off is still a legitimate keepout run and the reverse holds too, so
+    // neither flag implies the other.
+    //
+    // The exempt set is supplied rather than derived here for the reason the
+    // net map above is: the arch already owns "which nets are none of the
+    // rectangle's business", and a second answer to that question in router2
+    // could disagree with the first. The DERIVED half of the exemption -- a net
+    // whose driver sits on a global clock buffer -- is the one thing router2
+    // can ask the arch directly through getBelGlobalBuf(), and it is asked
+    // per net in setup_nets() rather than pre-computed into this set.
+    bool keepout_active = false;
+    std::unordered_set<IdString> keepout_exempt_nets;
+    bool keepout_narrow = false;
+    std::unordered_map<IdString, std::vector<PipId>> keepout_licence_pips;
 
     PartitionRect partition_rect(int i) const
     {

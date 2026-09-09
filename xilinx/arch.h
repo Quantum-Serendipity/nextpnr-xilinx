@@ -1053,6 +1053,23 @@ struct Arch : BaseCtx
     mutable bool exempt_nets_loaded = false;
     void load_exempt_nets() const;
 
+    // The keepout's escape list, and the reason it is a SECOND file rather than
+    // a second use of the one above.  Both sets end up unioned into the set
+    // router2 gets, so this changes nothing a run can observe -- what it
+    // changes is what a reader can conclude.  The file above says "this net is
+    // none of invariant P's business"; this one says "this net may cross a
+    // rectangle it does not belong to".  A design can need the second without
+    // the first, and folding them would make a keepout escape indistinguishable
+    // from a P escape in every log and every audit.
+    //
+    // It is the LAST resort, not the first: the keepout's own exemption is
+    // derived in router2 from getBelGlobalBuf(), so the clock spine needs no
+    // entry here.  An entry that names no net is warned about for the same
+    // reason load_exempt_nets warns.
+    std::unordered_set<IdString> load_keepout_exempt_nets() const;
+
+    std::unordered_map<IdString, std::vector<PipId>> load_keepout_licence_pips() const;
+
     // Invariant P, asserted at the end of Arch::place().
     //
     //   Every signal net with at least one endpoint on an RM cell has ALL of

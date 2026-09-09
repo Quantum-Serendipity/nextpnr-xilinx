@@ -28,6 +28,7 @@
 
 #include "router2.h"
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <deque>
@@ -75,6 +76,16 @@ struct Router2
         // vector index belongs there.
         int partition_rect = -1;
         int px0 = 0, py0 = 0, px1 = 0, py1 = 0;
+        // Static keepout, resolved once in setup_nets(). Bit k of keepout_allow
+        // is this net's licence to bind a pip inside rectangle k; keepout_check
+        // false takes the net off the predicate entirely, which is the case for
+        // an exempt net and for one already licensed everywhere. A mask rather
+        // than a rectangle index because a net may legitimately reach into more
+        // than one region -- an anchor net feeding two slots is not a defect.
+        uint64_t keepout_allow = 0;
+        bool keepout_check = false;
+        uint64_t keepout_narrow = 0;
+        std::unordered_set<PipId> keepout_locked;
     };
 
     struct WireScore
@@ -143,7 +154,54 @@ struct Router2
     int64_t partition_bb_growths = 0;
     int64_t partition_bb_reclamps = 0;
 
-    Router2(Context *ctx, const Router2Cfg &cfg) : ctx(ctx), cfg(cfg) {}
+    // Static keepout. Per rectangle, and atomic for the same reason the two
+    // above are. keepout_admit counts the pips a net WAS allowed to bind inside
+    // a rectangle, which is what makes a zero veto count readable: with admits
+    // and vetoes both zero the predicate was never consulted, and a census that
+    // cannot tell those apart is the failure this file already has three
+    // comments about.
+    static constexpr int max_keepout_rects = 64;
+    std::vector<Router2Cfg::PartitionRect> keepout_rects;
+    std::array<std::atomic<int64_t>, max_keepout_rects> keepout_veto_fwd;
+    std::array<std::atomic<int64_t>, max_keepout_rects> keepout_veto_bwd;
+    std::array<std::atomic<int64_t>, max_keepout_rects> keepout_admit;
+    std::array<std::atomic<int64_t>, max_keepout_rects> keepout_veto_narrow;
+    std::atomic<int64_t> keepout_arcs{0};
+    std::atomic<int64_t> keepout_bb_retries{0};
+    // setup_nets() is single-threaded, so these need no synchronisation.
+    int64_t keepout_nets_scope = 0;
+    int64_t keepout_nets_exempt_buf = 0, keepout_nets_exempt_named = 0, keepout_nets_exempt_both = 0;
+    std::vector<int> keepout_nets_governed, keepout_nets_anchored;
+    int64_t keepout_nets_narrowed = 0, keepout_narrow_pips = 0, keepout_narrow_pips_unbound = 0;
+    std::vector<int> keepout_nets_narrowed_rect, keepout_locked_pips_rect;
+    // The derived exemption is the half nobody wrote down, so it is named in
+    // the log rather than only counted. Bounded by construction -- a device has
+    // a fixed, small number of global buffers -- and capped anyway.
+    static constexpr size_t keepout_exempt_buf_report_cap = 16;
+    std::vector<IdString> keepout_exempt_buf_names;
+
+    Router2(Context *ctx, const Router2Cfg &cfg) : ctx(ctx), cfg(cfg)
+    {
+        for (int k = 0; k < max_keepout_rects; k++) {
+            keepout_veto_fwd[k].store(0, std::memory_order_relaxed);
+            keepout_veto_bwd[k].store(0, std::memory_order_relaxed);
+            keepout_admit[k].store(0, std::memory_order_relaxed);
+            keepout_veto_narrow[k].store(0, std::memory_order_relaxed);
+        }
+        if (cfg.keepout_active) {
+            const int n = 1 + int(cfg.partition_siblings.size());
+            if (n > max_keepout_rects)
+                log_error("router2: the static keepout carries one licence bit per rectangle and supports at most "
+                          "%d, but %d were given\n",
+                          max_keepout_rects, n);
+            for (int k = 0; k < n; k++)
+                keepout_rects.push_back(cfg.partition_rect(k));
+        }
+        keepout_nets_governed.assign(keepout_rects.size(), 0);
+        keepout_nets_anchored.assign(keepout_rects.size(), 0);
+        keepout_nets_narrowed_rect.assign(keepout_rects.size(), 0);
+        keepout_locked_pips_rect.assign(keepout_rects.size(), 0);
+    }
 
     // Use 'udata' for fast net lookups and indexing
     std::vector<NetInfo *> nets_by_udata;
@@ -249,6 +307,72 @@ struct Router2
                     nets.at(i).bb.y1 = std::min(nets.at(i).bb.y1, r.y1);
                 }
             }
+            // The keepout's three-way licence, resolved once here and never
+            // re-derived on the routing path. Deliberately NOT folded into the
+            // bounding box either, and for a stronger reason than the clamp's:
+            // a transiting static net's box legitimately spans the rectangle,
+            // because its own endpoints are on both sides of it. There is no
+            // box that expresses "anywhere but here".
+            if (cfg.keepout_active) {
+                const bool named = cfg.keepout_exempt_nets.count(ni->name) > 0;
+                // Asked of the arch rather than of a name list, because a list
+                // exempts what someone remembered to write down. On a design
+                // whose clock reaches the fabric through a global buffer this
+                // is the property that actually distinguishes the spine, and it
+                // widens by itself when a design adds a second buffer.
+                const bool global_buf = ni->driver.cell != nullptr && ni->driver.cell->bel != BelId() &&
+                                        ctx->getBelGlobalBuf(ni->driver.cell->bel);
+                if (named)
+                    keepout_nets_exempt_named++;
+                if (global_buf) {
+                    keepout_nets_exempt_buf++;
+                    if (keepout_exempt_buf_names.size() < keepout_exempt_buf_report_cap)
+                        keepout_exempt_buf_names.push_back(ni->name);
+                }
+                if (named && global_buf)
+                    keepout_nets_exempt_both++;
+                if (!named && !global_buf) {
+                    uint64_t allow = 0, anchored = 0;
+                    auto pit = cfg.partition_nets.find(ni->name);
+                    if (pit != cfg.partition_nets.end()) {
+                        allow |= uint64_t(1) << pit->second;
+                        keepout_nets_governed.at(pit->second)++;
+                    }
+                    // An endpoint placed inside a rectangle is the interface: a
+                    // net that terminates on a cell in there has to be able to
+                    // arrive, and refusing it would refuse the anchor LUTs the
+                    // whole partition-pin scheme is built on.
+                    auto note_cell = [&](const CellInfo *c) {
+                        if (c == nullptr || c->bel == BelId())
+                            return;
+                        Loc l = ctx->getBelLocation(c->bel);
+                        for (size_t k = 0; k < keepout_rects.size(); k++) {
+                            const auto &kr = keepout_rects[k];
+                            if (l.x < kr.x0 || l.x > kr.x1 || l.y < kr.y0 || l.y > kr.y1)
+                                continue;
+                            if (!(anchored & (uint64_t(1) << k))) {
+                                anchored |= uint64_t(1) << k;
+                                keepout_nets_anchored.at(k)++;
+                            }
+                            allow |= uint64_t(1) << k;
+                            break;
+                        }
+                    };
+                    note_cell(ni->driver.cell);
+                    for (auto &u : ni->users)
+                        note_cell(u.cell);
+                    const uint64_t every = keepout_rects.size() >= 64
+                                                   ? ~uint64_t(0)
+                                                   : ((uint64_t(1) << keepout_rects.size()) - 1);
+                    nets.at(i).keepout_allow = allow;
+                    if ((allow & every) != every) {
+                        nets.at(i).keepout_check = true;
+                        keepout_nets_scope++;
+                    }
+                    if (cfg.keepout_narrow && anchored != 0)
+                        resolve_keepout_narrow(ni, nets.at(i), anchored);
+                }
+            }
             i++;
         }
     }
@@ -346,6 +470,224 @@ struct Router2
     {
         Loc l = ctx->getPipLocation(pip);
         return l.x >= nd.px0 && l.x <= nd.px1 && l.y >= nd.py0 && l.y <= nd.py1;
+    }
+
+    // The keepout's census, unconditional whenever it is active, and it carries
+    // the ADMIT count for a reason the clamp's does not have to. The clamp's
+    // population is the governed nets, which a build either has or does not;
+    // the keepout's is everything else, so "0 vetoed" is the expected reading
+    // of a healthy static and the only thing separating it from a predicate
+    // that never ran is the arc and admit counts beside it.
+    //
+    // Also emitted from the unroutable-arc path, and that is the case it exists
+    // for: a design the keepout has made unroutable fails with a message naming
+    // one arc, which says nothing about which rectangle refused what. The
+    // numbers a reader needs to decide between "this rectangle is too wide" and
+    // "this net needed an exemption" are these.
+    void log_keepout_census()
+    {
+        if (!cfg.keepout_active)
+            return;
+        int64_t vf = 0, vb = 0, ad = 0;
+        for (size_t k = 0; k < keepout_rects.size(); k++) {
+            vf += keepout_veto_fwd[k].load(std::memory_order_relaxed);
+            vb += keepout_veto_bwd[k].load(std::memory_order_relaxed);
+            ad += keepout_admit[k].load(std::memory_order_relaxed);
+        }
+        log_info("partition static keepout: %lld net(s) in scope of %d, %lld arc(s) searched under the keepout, "
+                 "%lld pip(s) vetoed (%lld forward A*, %lld backwards BFS), %lld pip(s) admitted inside a "
+                 "rectangle, %d rectangle(s)\n",
+                 (long long)keepout_nets_scope, int(nets.size()),
+                 (long long)keepout_arcs.load(std::memory_order_relaxed), (long long)(vf + vb), (long long)vf,
+                 (long long)vb, (long long)ad, int(keepout_rects.size()));
+        log_info("partition static keepout: %lld arc(s) fell back to the no-bounding-box retry\n",
+                 (long long)keepout_bb_retries.load(std::memory_order_relaxed));
+        if (!cfg.keepout_narrow) {
+            log_info("partition static keepout: narrow licence DISABLED, so an anchored net may bind any pip in a "
+                     "rectangle it is licensed for\n");
+        } else {
+            int64_t vn = 0;
+            for (size_t k = 0; k < keepout_rects.size(); k++)
+                vn += keepout_veto_narrow[k].load(std::memory_order_relaxed);
+            log_info("partition static keepout: narrow licence over %lld net(s), %lld pip(s) inside a rectangle "
+                     "(%lld bound at STRENGTH_LOCKED, %lld from the licence file, unbound), %lld of the vetoes "
+                     "above were narrow (a licensed rectangle, an unlicensed pip)\n",
+                     (long long)keepout_nets_narrowed, (long long)keepout_narrow_pips,
+                     (long long)(keepout_narrow_pips - keepout_narrow_pips_unbound),
+                     (long long)keepout_narrow_pips_unbound, (long long)vn);
+            if (keepout_nets_narrowed == 0)
+                log_warning("partition static keepout: the narrow licence is ON and narrows NOTHING -- no net with a "
+                            "cell inside a rectangle owns a STRENGTH_LOCKED pip or a licence-file pip there. The "
+                            "wide licence is what ran, and this arm is the keepout arm under another name.\n");
+        }
+        // Both exemption rules on one line, with their overlap, so the
+        // arithmetic closes without the reader having to assume the two
+        // populations are disjoint. They are not: a named clock net is usually
+        // global-buffer-driven as well.
+        log_info("partition static keepout: %lld net(s) exempt (%lld by global clock buffer driver, %lld by name "
+                 "list, %lld by both)\n",
+                 (long long)(keepout_nets_exempt_buf + keepout_nets_exempt_named - keepout_nets_exempt_both),
+                 (long long)keepout_nets_exempt_buf, (long long)keepout_nets_exempt_named,
+                 (long long)keepout_nets_exempt_both);
+        for (IdString n : keepout_exempt_buf_names)
+            log_info("partition static keepout: exempt by global clock buffer driver: %s\n", n.c_str(ctx));
+        if (keepout_nets_exempt_buf > int64_t(keepout_exempt_buf_names.size()))
+            log_info("partition static keepout: %lld further global-buffer-driven net(s) not listed\n",
+                     (long long)(keepout_nets_exempt_buf - int64_t(keepout_exempt_buf_names.size())));
+        for (size_t k = 0; k < keepout_rects.size(); k++) {
+            const auto &r = keepout_rects[k];
+            log_info("partition static keepout: rectangle %d (%d,%d)-(%d,%d) %s: %d net(s) governed, %d net(s) "
+                     "anchored by a placed cell, %lld pip(s) vetoed (%lld fwd, %lld bwd), %lld admitted\n",
+                     int(k), r.x0, r.y0, r.x1, r.y1, k == 0 ? "[this run's partition]" : "[sibling]",
+                     keepout_nets_governed.at(k), keepout_nets_anchored.at(k),
+                     (long long)(keepout_veto_fwd[k].load(std::memory_order_relaxed) +
+                                 keepout_veto_bwd[k].load(std::memory_order_relaxed)),
+                     (long long)keepout_veto_fwd[k].load(std::memory_order_relaxed),
+                     (long long)keepout_veto_bwd[k].load(std::memory_order_relaxed),
+                     (long long)keepout_admit[k].load(std::memory_order_relaxed));
+            if (cfg.keepout_narrow)
+                log_info("partition static keepout: rectangle %d narrow licence: %d net(s), %d locked pip(s), %lld "
+                         "narrow veto(es)\n",
+                         int(k), keepout_nets_narrowed_rect.at(k), keepout_locked_pips_rect.at(k),
+                         (long long)keepout_veto_narrow[k].load(std::memory_order_relaxed));
+        }
+    }
+
+    // What the operator needs when the keepout has made an arc unroutable, and
+    // it is DATA rather than advice. The three causes look identical from the
+    // arc-failure message alone and the repairs point in opposite directions:
+    // a rectangle edge that separates a cell from the interconnect tile that
+    // serves it, a net that genuinely has no corridor, and a net that ought to
+    // have been exempt. Only the first is unconditional -- a cell reaches the
+    // general interconnect through its own tile's switchbox and through nothing
+    // else, so a rectangle taking that switchbox while leaving the cell outside
+    // makes the sink unreachable at any bounding box and any congestion. It is
+    // also the one a reader can settle instantly from the coordinates below, so
+    // they are printed first and the advice is left for afterwards.
+    void report_keepout_blocked_net(NetInfo *net)
+    {
+        if (!cfg.keepout_active)
+            return;
+        const auto &nd = nets.at(net->udata);
+        if (!nd.keepout_check && !nd.keepout_narrow)
+            return;
+        log_warning("partition static keepout: net '%s' is in scope, so it may bind pips only inside a rectangle it "
+                    "is licensed for.\n",
+                    ctx->nameOf(net));
+        for (size_t k = 0; k < keepout_rects.size(); k++) {
+            const uint64_t bit = uint64_t(1) << k;
+            const auto &r = keepout_rects[k];
+            if (nd.keepout_narrow & bit) {
+                int n = 0;
+                for (PipId p : nd.keepout_locked)
+                    if (pip_keepout_rect(p) == int(k))
+                        n++;
+                log_warning("partition static keepout:   rectangle %d (%d,%d)-(%d,%d) narrowed to its %d locked "
+                            "pip(s)\n",
+                            int(k), r.x0, r.y0, r.x1, r.y1, n);
+                for (PipId p : nd.keepout_locked)
+                    if (pip_keepout_rect(p) == int(k))
+                        log_warning("partition static keepout:     locked %s\n", ctx->nameOfPip(p));
+                continue;
+            }
+            if (nd.keepout_allow & bit)
+                continue;
+            log_warning("partition static keepout:   no licence for rectangle %d (%d,%d)-(%d,%d)\n", int(k), r.x0,
+                        r.y0, r.x1, r.y1);
+        }
+        auto report_cell = [&](const char *role, const CellInfo *c) {
+            if (c == nullptr || c->bel == BelId())
+                return;
+            Loc l = ctx->getBelLocation(c->bel);
+            log_warning("partition static keepout:   %s cell '%s' at tile (%d,%d)\n", role, ctx->nameOf(c), l.x, l.y);
+        };
+        report_cell("driver", net->driver.cell);
+        size_t shown = 0;
+        for (auto &u : net->users) {
+            if (shown++ >= 8)
+                break;
+            report_cell("sink", u.cell);
+        }
+        if (net->users.size() > shown)
+            log_warning("partition static keepout:   %d further sink(s) not listed\n", int(net->users.size() - shown));
+        log_warning("partition static keepout: check FIRST whether a rectangle edge above sits one tile from an "
+                    "endpoint tile listed above. A rectangle must take a cell and the switchbox that serves it "
+                    "together or neither; taking only the switchbox isolates the cell and no router setting can "
+                    "recover it. The census line above reports how many arcs fell back to the no-bounding-box "
+                    "retry: if that is 0 the search was never box-limited, so widening the box is not the repair. "
+                    "If the rectangles are whole, the remaining repairs are a corridor between them or an entry in "
+                    "NEXTPNR_PARTITION_KEEPOUT_EXEMPT. If a rectangle above is narrowed, the locked pips listed "
+                    "beside it are the only ones this net may bind there; NEXTPNR_PARTITION_KEEPOUT_NARROW=off "
+                    "restores the whole-rectangle licence and separates a narrow refusal from a keepout one.\n");
+    }
+
+    // Which rectangle holds this pip, or -1 for none. First match wins, which
+    // is exact rather than approximate: the rectangles are asserted pairwise
+    // disjoint when the ROI file is loaded, so no pip is in two of them.
+    int pip_keepout_rect(PipId pip) const
+    {
+        Loc l = ctx->getPipLocation(pip);
+        for (size_t k = 0; k < keepout_rects.size(); k++) {
+            const auto &r = keepout_rects[k];
+            if (l.x >= r.x0 && l.x <= r.x1 && l.y >= r.y0 && l.y <= r.y1)
+                return int(k);
+        }
+        return -1;
+    }
+
+    void resolve_keepout_narrow(NetInfo *ni, PerNetData &nd, uint64_t anchored)
+    {
+        uint64_t narrow = 0;
+        auto take = [&](PipId p, bool bound) {
+            const int kr = pip_keepout_rect(p);
+            if (kr < 0 || !(anchored & (uint64_t(1) << kr)))
+                return;
+            if (nd.keepout_locked.insert(p).second) {
+                keepout_narrow_pips++;
+                keepout_locked_pips_rect.at(kr)++;
+                if (!bound)
+                    keepout_narrow_pips_unbound++;
+            }
+            narrow |= uint64_t(1) << kr;
+        };
+        for (auto &nw : ni->wires) {
+            if (nw.second.strength < STRENGTH_LOCKED)
+                continue;
+            if (nw.second.pip != PipId())
+                take(nw.second.pip, true);
+        }
+        auto lit = cfg.keepout_licence_pips.find(ni->name);
+        if (lit != cfg.keepout_licence_pips.end())
+            for (PipId p : lit->second)
+                take(p, false);
+        if (narrow == 0)
+            return;
+        nd.keepout_narrow = narrow;
+        keepout_nets_narrowed++;
+        for (size_t k = 0; k < keepout_rects.size(); k++)
+            if (narrow & (uint64_t(1) << k))
+                keepout_nets_narrowed_rect.at(k)++;
+    }
+
+    enum KeepoutVerdict
+    {
+        KEEPOUT_OUTSIDE,
+        KEEPOUT_ADMIT,
+        KEEPOUT_VETO_RECT,
+        KEEPOUT_VETO_NARROW,
+    };
+
+    KeepoutVerdict keepout_verdict(const PerNetData &nd, PipId pip, int &kr) const
+    {
+        kr = pip_keepout_rect(pip);
+        if (kr < 0)
+            return KEEPOUT_OUTSIDE;
+        const uint64_t bit = uint64_t(1) << kr;
+        if (nd.keepout_narrow & bit)
+            return nd.keepout_locked.count(pip) ? KEEPOUT_ADMIT : KEEPOUT_VETO_NARROW;
+        if (!nd.keepout_check)
+            return KEEPOUT_ADMIT;
+        return (nd.keepout_allow & bit) ? KEEPOUT_ADMIT : KEEPOUT_VETO_RECT;
     }
 
     double curr_cong_weight, hist_cong_weight, estimate_weight;
@@ -837,6 +1179,13 @@ struct Router2
             std::queue<int> new_queue;
             t.backwards_queue.swap(new_queue);
         }
+        // Counted once per arc rather than once per pip: with a single
+        // rectangle every in-scope net has an empty licence, so admits are
+        // structurally zero and admits-plus-vetoes cannot separate "refused
+        // nothing" from "never ran". This can, and it costs one atomic per arc
+        // instead of one per pip explored.
+        if (nd.keepout_check || nd.keepout_narrow)
+            keepout_arcs.fetch_add(1, std::memory_order_relaxed);
         // First try strongly iteration-limited routing backwards BFS
         // this will deal with certain nets faster than forward A*
         // and comes at a minimal performance cost for the others
@@ -891,6 +1240,18 @@ struct Router2
                 if (nd.partition_rect >= 0 && !pip_in_partition(nd, uh)) {
                     partition_veto_bwd.fetch_add(1, std::memory_order_relaxed);
                     continue;
+                }
+                if (nd.keepout_check || nd.keepout_narrow) {
+                    int kr = -1;
+                    const KeepoutVerdict v = keepout_verdict(nd, uh, kr);
+                    if (v == KEEPOUT_ADMIT) {
+                        keepout_admit[kr].fetch_add(1, std::memory_order_relaxed);
+                    } else if (v != KEEPOUT_OUTSIDE) {
+                        keepout_veto_bwd[kr].fetch_add(1, std::memory_order_relaxed);
+                        if (v == KEEPOUT_VETO_NARROW)
+                            keepout_veto_narrow[kr].fetch_add(1, std::memory_order_relaxed);
+                        continue;
+                    }
                 }
                 if (cpip != PipId() && cpip != uh)
                     continue; // don't allow multiple pips driving a wire with a net
@@ -1001,6 +1362,20 @@ struct Router2
                 if (nd.partition_rect >= 0 && !pip_in_partition(nd, dh)) {
                     partition_veto_fwd.fetch_add(1, std::memory_order_relaxed);
                     continue;
+                }
+                // Not guarded by is_bb either, and here the box could not have
+                // done the job in the first place.
+                if (nd.keepout_check || nd.keepout_narrow) {
+                    int kr = -1;
+                    const KeepoutVerdict v = keepout_verdict(nd, dh, kr);
+                    if (v == KEEPOUT_ADMIT) {
+                        keepout_admit[kr].fetch_add(1, std::memory_order_relaxed);
+                    } else if (v != KEEPOUT_OUTSIDE) {
+                        keepout_veto_fwd[kr].fetch_add(1, std::memory_order_relaxed);
+                        if (v == KEEPOUT_VETO_NARROW)
+                            keepout_veto_narrow[kr].fetch_add(1, std::memory_order_relaxed);
+                        continue;
+                    }
                 }
                 if (!ctx->checkPipAvail(dh) && ctx->getBoundPipNet(dh) != net)
                     continue;
@@ -1163,6 +1538,9 @@ struct Router2
             if (res1 == ARC_FATAL)
                 return false; // Arc failed irrecoverably
             else if (res1 == ARC_RETRY_WITHOUT_BB) {
+                if (cfg.keepout_active &&
+                    (nets.at(net->udata).keepout_check || nets.at(net->udata).keepout_narrow))
+                    keepout_bb_retries.fetch_add(1, std::memory_order_relaxed);
                 if (is_mt) {
                     // Can't break out of bounding box in multi-threaded mode, so mark this arc as a failure
                     have_failures = true;
@@ -1183,10 +1561,13 @@ struct Router2
                                         int(i), ctx->nameOf(net), ctx->nameOfWire(ctx->getNetinfoSourceWire(net)),
                                         ctx->nameOfWire(ctx->getNetinfoSinkWire(net, net->users.at(i))));
                             have_failures = true;
-                        } else
+                        } else {
+                            log_keepout_census();
+                            report_keepout_blocked_net(net);
                             log_error("Failed to route arc %d of net '%s', from %s to %s.\n", int(i),
                                       ctx->nameOf(net), ctx->nameOfWire(ctx->getNetinfoSourceWire(net)),
                                       ctx->nameOfWire(ctx->getNetinfoSinkWire(net, net->users.at(i))));
+                        }
                     }
                 }
             }
@@ -1750,6 +2131,7 @@ struct Router2
                 }
             }
         }
+        log_keepout_census();
         if (cfg.perf_profile) {
             std::vector<std::pair<int, IdString>> nets_by_runtime;
             for (auto &n : nets_by_udata) {
