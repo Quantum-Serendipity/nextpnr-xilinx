@@ -455,12 +455,46 @@ void XilinxPacker::pack_dram()
                         m256 ? 4 : (ctx->xc7 ? 2 : 6));
                 packed_cells.insert(ci->name);
             }
+        } else if (cs.memtype == ctx->id("RAM64X1S")) {
+            // Single-port RAM 64 x 1.  One RAMD64E per instance and nothing
+            // else: the read address IS the write address, so a cell's own
+            // A1-A6 already carry the slice write address and no separate
+            // address-buffer LUT is needed -- which is what the SPO fold in
+            // the RAM64X1D path above buys in the one case where it applies,
+            // generalised to every cell here.  All `height` LUTs of the
+            // SLICEM therefore carry data; the group is walked in slices of
+            // that many, each starting a fresh absolutely-placed root.
+            //
+            // INIT is copied verbatim.  The RADR<i> -> A<i+1> xform in
+            // dram_rules makes LUT truth-table index equal read address, so
+            // the UNISIM's "INIT[a] is the content of address a" and the
+            // LUT's "INIT[j] is the output for A = j" are the same ordering.
+            // This is the same identity RAM64X1D relies on when it copies
+            // INIT into its SP and DP cells.
+            int z = height - 1;
+            CellInfo *base = nullptr;
+            for (CellInfo *ci : group.second) {
+                if (z < 0) {
+                    z = height - 1;
+                    base = nullptr;
+                }
+                NetInfo *o = get_net_or_empty(ci, ctx->id("O"));
+                disconnect_port(ctx, ci, ctx->id("O"));
+                std::vector<NetInfo *> address(cs.wa.begin(), cs.wa.begin() + std::min<size_t>(cs.wa.size(), 6));
+                CellInfo *spr = create_dram_lut(ci->name.str(ctx) + "/SP", base, cs, address,
+                                                get_net_or_empty(ci, ctx->id("D")), o, z);
+                if (base == nullptr)
+                    base = spr;
+                if (ci->params.count(ctx->id("INIT")))
+                    spr->params[ctx->id("INIT")] = ci->params[ctx->id("INIT")];
+                z--;
+                packed_cells.insert(ci->name);
+            }
         } else if (cs.memtype == ctx->id("RAMS32")
                 || cs.memtype == ctx->id("RAMD32")
                 || cs.memtype == ctx->id("RAMS64E")
                 || cs.memtype == ctx->id("RAMD64E")
-                || cs.memtype == ctx->id("RAM32X1S")
-                || cs.memtype == ctx->id("RAM64X1S")) {
+                || cs.memtype == ctx->id("RAM32X1S")) {
             log_error("Cannot pack unsupported primitive: %s\n", cs.memtype.c_str(ctx));
         }
     }
