@@ -2956,15 +2956,46 @@ bool Arch::route()
     // so a violation aborts BEFORE the offending routing is stamped back into
     // the ROUTING attribute and becomes re-importable.
     check_partition_routing();
-    // POST-ROUTE timing.  Only router1 runs timing_analysis after routing, so
-    // with router2 the ONLY "Max frequency" lines in the log come from
-    // placer1's post-placement call -- an estimate built from
-    // estimateDelay(), before a single wire is chosen.  Every Fmax quoted for
-    // a router2 build is therefore a placement estimate, not routed timing,
-    // which is a poor objective to optimise against.
-    //   NEXTPNR_POST_ROUTE_TIMING=1  re-run the analysis on the real routing
+    // POST-ROUTE timing, ON BY DEFAULT UNDER router2.
+    //
+    // router1 calls timing_analysis itself once routing is done, so a router1
+    // log has always carried a routed grading.  router2 does not, so without
+    // this the ONLY "Max frequency" lines in a router2 log come from placer1's
+    // post-placement call -- an estimate built from predictDelay(), a
+    // fixed-slope Manhattan function of two bels' tile coordinates, evaluated
+    // before a single wire is chosen.  It has no pip, wire, fanout or
+    // congestion term in it, and it is NOT the weaker of two models for want of
+    // data: the chipdb already carries a characterised max delay and a
+    // resistance on every interconnect pip and an SDF cell arc table per tile
+    // type, and getPipDelay()/getCellDelay() already consume them.  Opt-in,
+    // that database was reachable and unreached, and every Fmax this fork
+    // printed on a router2 build was a guess at what the router would do rather
+    // than a reading of what it did.
+    //
+    // The default is router2's alone BECAUSE router1 already analyses: making
+    // it unconditional would put a THIRD "Max frequency" block in every router1
+    // log, and callers in the openXC7 flow census those lines.
+    //
+    // A router2 log now carries two blocks, the routed one last and headed
+    // "Post-route timing analysis:".  A reader taking the last "Max frequency"
+    // line per clock name gets the routed figure; one counting lines sees two
+    // per graded clock, which is what a router1 log has always looked like.
+    //
+    // warn_on_failure stays false deliberately.  True would make a missed
+    // constraint an ERROR line, and log adjudication downstream of this fork
+    // treats an ERROR line in a nextpnr log as a failed stage -- so switching
+    // the default on would have turned every design that misses its period from
+    // a build with a bad number into a build that failed.
+    //
+    //   NEXTPNR_POST_ROUTE_TIMING=0  skip it; the analysis is not free
+    //   NEXTPNR_POST_ROUTE_TIMING=1  ask for it under router1 as well
     //   NEXTPNR_CRIT_PATH_REPORT=1   also dump the critical path stage by stage
-    if (getenv("NEXTPNR_POST_ROUTE_TIMING") != nullptr) {
+    const char *post_route_timing = getenv("NEXTPNR_POST_ROUTE_TIMING");
+    bool do_post_route_timing = (router == "router2");
+    if (post_route_timing != nullptr)
+        do_post_route_timing =
+                (std::string(post_route_timing) != "0" && std::string(post_route_timing) != "off");
+    if (do_post_route_timing) {
         log_info("Post-route timing analysis:\n");
         timing_analysis(getCtx(), false /* slack_histogram */, true /* print_fmax */,
                         getenv("NEXTPNR_CRIT_PATH_REPORT") != nullptr /* print_path */,
