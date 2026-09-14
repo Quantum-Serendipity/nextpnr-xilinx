@@ -2458,12 +2458,29 @@ struct FasmBackend
             return prop.as_int64();
     }
 
+    void check_divider_grid(CellInfo *ci, const std::string &prim, const std::string &attr, bool eighths)
+    {
+        if (!ci->params.count(ctx->id(attr)))
+            return;
+        double want = float_or_default(ci, attr, 0);
+        double emitted = eighths ? (std::floor(want * 8.0) / 8.0) : std::floor(want);
+        if (emitted == want)
+            return;
+        log_error("OFF_GRID_DIVIDER: %s '%s' at %s requests %s=%.6g, which this device cannot express. The "
+                  "bitstream would be programmed %s=%.6g instead, at rc 0 and with no other warning. %s accepts "
+                  "%s; choose a value on that grid.\n",
+                  prim.c_str(), ci->name.c_str(ctx), get_tile_name(ci->bel.tile).c_str(), attr.c_str(), want,
+                  attr.c_str(), emitted, attr.c_str(),
+                  eighths ? "integers and multiples of 0.125" : "integers only");
+    }
+
     void write_pll_clkout(const std::string &name, CellInfo *ci)
     {
         // FIXME: variable duty cycle
         int high = 1, low = 1, phasemux = 0, delaytime = 0, frac = 0;
         bool no_count = false, edge = false;
-        double divide = float_or_default(ci, name + ((name == "CLKFBOUT") ? "_MULT" : "_DIVIDE"), 1);
+        std::string divide_attr = name + ((name == "CLKFBOUT") ? "_MULT" : "_DIVIDE");
+        double divide = float_or_default(ci, divide_attr, 1);
         double phase = float_or_default(ci, name + "_PHASE", 1);
         if (divide <= 1) {
             no_count = true;
@@ -2484,6 +2501,8 @@ struct FasmBackend
         } else {
             used = get_net_or_empty(ci, ctx->id(name)) != nullptr;
         }
+        if (used)
+            check_divider_grid(ci, "PLLE2_ADV", divide_attr, false);
         if (name == "DIVCLK") {
             write_int_vector("DIVCLK_DIVCLK_HIGH_TIME[5:0]", high, 6);
             write_int_vector("DIVCLK_DIVCLK_LOW_TIME[5:0]", low, 6);
@@ -2569,8 +2588,10 @@ struct FasmBackend
         // FIXME: variable duty cycle
         int high = 1, low = 1, phasemux = 0, delaytime = 0, frac = 0;
         bool no_count = false, edge = false;
-        double divide = float_or_default(ci, name + ((name == "CLKFBOUT") ? "_MULT_F" :
-                                                     (name == "CLKOUT0" ? "_DIVIDE_F" : "_DIVIDE")), 1);
+        bool fractional_counter = (name == "CLKFBOUT" || name == "CLKOUT0");
+        std::string divide_attr = name + ((name == "CLKFBOUT") ? "_MULT_F" :
+                                          (name == "CLKOUT0" ? "_DIVIDE_F" : "_DIVIDE"));
+        double divide = float_or_default(ci, divide_attr, 1);
         double phase = float_or_default(ci, name + "_PHASE", 1);
         if (divide <= 1) {
             no_count = true;
@@ -2591,6 +2612,8 @@ struct FasmBackend
         } else {
             used = get_net_or_empty(ci, ctx->id(name)) != nullptr;
         }
+        if (used)
+            check_divider_grid(ci, "MMCME2_ADV", divide_attr, fractional_counter);
         if (name == "DIVCLK") {
             write_int_vector("DIVCLK_DIVCLK_HIGH_TIME[5:0]", high, 6);
             write_int_vector("DIVCLK_DIVCLK_LOW_TIME[5:0]", low, 6);
