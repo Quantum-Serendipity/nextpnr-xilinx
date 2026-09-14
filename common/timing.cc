@@ -1140,10 +1140,46 @@ void timing_analysis(Context *ctx, bool print_histogram, bool print_fmax, bool p
                 log_nonfatal_error("Max frequency for clock %*s'%s': %.02f MHz (%s at %.02f MHz)\n", width, "",
                                    clock_name.c_str(), clock_fmax[clock.first], passed ? "PASS" : "FAIL", target);
         }
-        for (auto &eclock : empty_clocks) {
+        // A domain is graded only if some path both launches and captures in it,
+        // and Arch::getPortTimingClass returns a register class for SLICE_FFX and
+        // nothing else -- so a clock whose sinks are all hard-block clock pins
+        // (OSERDESE2, ISERDESE2, RAMB*, IDELAYCTRL, ...) yields no ClockPair and
+        // used to leave the report silent.  An absent line is indistinguishable
+        // from a domain that passed, so every constrained clock is accounted for
+        // here under its own token.
+        std::set<IdString> ungraded;
+        for (auto &eclock : empty_clocks)
             if (eclock != ctx->id("$async$"))
-                log_info("Clock '%s' has no interior paths\n", eclock.c_str(ctx));
+                ungraded.insert(eclock);
+        for (auto &net : ctx->nets)
+            if (net.second->clkconstr && !clock_reports.count(net.first))
+                ungraded.insert(net.first);
+        for (auto &uclock : ungraded) {
+            auto fnd = ctx->nets.find(uclock);
+            const ClockConstraint *cc =
+                    (fnd == ctx->nets.end()) ? nullptr : fnd->second->clkconstr.get();
+            const char *why = empty_clocks.count(uclock)
+                                      ? "reached only by paths from another domain, none interior"
+                                      : "no path launches and captures in this domain";
+            if (cc != nullptr)
+                log_info("Ungraded clock '%s': constrained at %.02f MHz, %s\n", uclock.c_str(ctx),
+                         1000 / ctx->getDelayNS(cc->period.minDelay()), why);
+            else
+                log_info("Ungraded clock '%s': unconstrained, %s\n", uclock.c_str(ctx), why);
         }
+        unsigned n_constr = 0, n_constr_graded = 0;
+        for (auto &net : ctx->nets) {
+            if (!net.second->clkconstr)
+                continue;
+            ++n_constr;
+            if (clock_reports.count(net.first))
+                ++n_constr_graded;
+        }
+        log_info("Clock domain grading: %u constrained, %u of them graded, %u ungraded; %u graded and %u "
+                 "ungraded with no create_clock\n",
+                 n_constr, n_constr_graded, n_constr - n_constr_graded,
+                 unsigned(clock_reports.size()) - n_constr_graded,
+                 unsigned(ungraded.size()) - (n_constr - n_constr_graded));
         log_break();
 
         int start_field_width = 0, end_field_width = 0;

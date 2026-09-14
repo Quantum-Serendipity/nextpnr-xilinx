@@ -210,6 +210,9 @@ void Arch::parseXdc(std::istream &in)
                 continue;
             }
             std::vector<NetInfo *> dest = get_nets(arguments.at(cursor));
+            if (dest.empty())
+                log_warning("create_clock target '%s' matched no net, constraint dropped (on line %d)\n",
+                            arguments.at(cursor).c_str(), lineno);
             for (auto n : dest) {
                 n->clkconstr = std::unique_ptr<ClockConstraint>(new ClockConstraint);
                 n->clkconstr->period = getDelayFromNS(period);
