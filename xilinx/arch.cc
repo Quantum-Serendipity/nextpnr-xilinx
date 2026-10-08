@@ -966,6 +966,25 @@ bool Arch::place()
         log_error("US+ architecture does not support placer '%s'\n", placer.c_str());
     }
     fixupPlacement();
+    {
+        int lut_sites = 0, lut_sites_used = 0;
+        for (BelId bel : getBels()) {
+            if (getBelType(bel) != id_SLICE_LUTX || getBelHidden(bel))
+                continue;
+            Loc l = getBelLocation(bel);
+            if ((l.z & 0xF) != BEL_6LUT)
+                continue;
+            ++lut_sites;
+            BelId lut5 = getBelByLocation(Loc(l.x, l.y, (l.z & ~0xF) | BEL_5LUT));
+            const bool used = getBoundBelCell(bel) != nullptr || (lut5 != BelId() && getBoundBelCell(lut5) != nullptr);
+            if (used)
+                ++lut_sites_used;
+        }
+        if (lut_sites > 0)
+            log_info("LUT site utilisation: %d/%d %d%% (one site is a 6LUT/5LUT pair; the SLICE_LUTX row above "
+                     "counts both bels)\n",
+                     lut_sites_used, lut_sites, 100 * lut_sites_used / lut_sites);
+    }
     // Emitted after fixupPlacement so the post-place repair's own candidate
     // rejections are included.  Unconditional when the rectangle is active,
     // even at zero, so the acceptance gate can grep for it and tell "held" from
