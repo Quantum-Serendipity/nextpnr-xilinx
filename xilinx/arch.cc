@@ -3210,8 +3210,6 @@ bool Arch::dsp48e1IsTimedOutput(IdString base) const
 
 Arch::BramPinTiming Arch::bramPinTiming(const CellInfo *cell, IdString port) const
 {
-    // Values in ns are the slow-corner maxima of prjxray-db artix7
-    // timings/BRAM_L.sdf, which match the DS181 Table 30 -1 column.
     BramPinTiming t;
     bool is36 = cell->type == id_RAMB36E1_RAMB36E1;
     if (!is36 && cell->type != id_RAMB18E1_RAMB18E1)
@@ -3240,7 +3238,7 @@ Arch::BramPinTiming Arch::bramPinTiming(const CellInfo *cell, IdString port) con
         bool reg = int_or_default(cell->params, a ? id_DOA_REG : id("DOB_REG"), 0) != 0;
         t.kind = BRAM_PIN_OUTPUT;
         t.clock = clock_of((a || sdp) ? 'A' : 'B');
-        t.clk_to_q_max = reg ? 0.882 : 2.454;
+        t.clk_to_q_max = reg ? 0.74 : 2.13;
         t.clk_to_q_min = reg ? 0.204 : 0.585;
         return t;
     }
@@ -3252,23 +3250,31 @@ Arch::BramPinTiming Arch::bramPinTiming(const CellInfo *cell, IdString port) con
         double setup, hold;
     };
     static const InputPin inputs[] = {
-            {"ADDRARDADDR", 'A', 0.566, 0.360},   {"ADDRBWRADDR", 'B', 0.566, 0.360},
-            {"WEA", 'A', 0.532, 0.197},           {"WEBWE", 'B', 0.532, 0.197},
-            {"ENARDEN", 'A', 0.443, 0.227},       {"ENBWREN", 'B', 0.443, 0.227},
-            {"RSTRAMARSTRAM", 'A', 0.359, 0.453}, {"RSTRAMB", 'B', 0.359, 0.453},
-            {"RSTREGARSTREG", 'A', 0.342, 0.067}, {"RSTREGB", 'B', 0.342, 0.067},
-            {"REGCEAREGCE", 'A', 0.360, 0.155},   {"REGCEB", 'B', 0.360, 0.155},
-            {"DIADI", 'A', 0.737, 0.667},         {"DIPADIP", 'A', 0.737, 0.667},
-            {"DIBDI", 'B', 0.737, 0.667},         {"DIPBDIP", 'B', 0.737, 0.667},
+            {"ADDRARDADDR", 'A', 0.49, 0.33},   {"ADDRBWRADDR", 'B', 0.49, 0.33},
+            {"WEA", 'A', 0.48, 0.19},           {"WEBWE", 'B', 0.48, 0.19},
+            {"ENARDEN", 'A', 0.39, 0.21},       {"ENBWREN", 'B', 0.39, 0.21},
+            {"RSTRAMARSTRAM", 'A', 0.34, 0.43}, {"RSTRAMB", 'B', 0.34, 0.43},
+            {"RSTREGARSTREG", 'A', 0.32, 0.07}, {"RSTREGB", 'B', 0.32, 0.07},
+            {"REGCEAREGCE", 'A', 0.29, 0.15},   {"REGCEB", 'B', 0.29, 0.15},
+            {"DIADI", 'A', 0.65, 0.63},         {"DIPADIP", 'A', 0.65, 0.63},
+            {"DIBDI", 'B', 0.65, 0.63},         {"DIPBDIP", 'B', 0.65, 0.63},
     };
     for (const auto &in : inputs) {
         if (s != in.root)
             continue;
+        bool is_di = (s == "DIADI" || s == "DIPADIP" || s == "DIBDI" || s == "DIPBDIP");
         bool sdp_write_data = sdp && (s == "DIADI" || s == "DIPADIP");
         t.kind = BRAM_PIN_INPUT;
         t.clock = clock_of(sdp_write_data ? 'B' : in.side);
         t.setup = in.setup;
         t.hold = in.hold;
+        if (is_di) {
+            IdString mode_param = id((sdp || in.side == 'A') ? "WRITE_MODE_A" : "WRITE_MODE_B");
+            if (str_or_default(cell->params, mode_param, "WRITE_FIRST") == "READ_FIRST") {
+                t.setup = 0.22;
+                t.hold = 0.34;
+            }
+        }
         return t;
     }
     return t;

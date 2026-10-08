@@ -1866,7 +1866,6 @@ struct Arch : BaseCtx
     bool dsp48e1IsCombinational(const CellInfo *cell) const;
     double dsp48e1CombInputDelayNS(IdString base) const;
     bool dsp48e1IsTimedOutput(IdString base) const;
-    // RAMB18E1/RAMB36E1 synchronous pin timing (see arch.cc).
     enum BramPinKind
     {
         BRAM_PIN_NONE,
