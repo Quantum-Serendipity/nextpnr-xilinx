@@ -79,6 +79,52 @@ void XC7Packer::decompose_iob(CellInfo *xil_iob, bool is_hr, const std::string &
         NPNR_ASSERT_FALSE(("can't find PAD for net " + n->name.str(ctx)).c_str());
     };
 
+    // Name a pad the way the user wrote it, so a placement complaint can be traced
+    // back to a line of XDC rather than to a site number.
+    auto pad_desc = [&](NetInfo *n, const std::string &site) {
+        std::string d;
+        for (auto user : n->users) {
+            if (user.cell->type != ctx->id("PAD"))
+                continue;
+            d = "'" + user.cell->name.str(ctx) + "'";
+            for (auto attr : {ctx->id("LOC"), ctx->id("PACKAGE_PIN")})
+                if (user.cell->attrs.count(attr)) {
+                    d += " (package pin " + user.cell->attrs.at(attr).as_string() + ")";
+                    break;
+                }
+            break;
+        }
+        if (d.empty())
+            d = "<unknown pad>";
+        return d + " at site " + site;
+    };
+
+    // A differential pair is the master (P) and slave (N) site of ONE IOB tile, and only
+    // the master site carries the M bels.  Constraining P to an N pin, or splitting the
+    // pair across two tiles, therefore fails later as a BEL lookup -- "No Bel named
+    // 'IOB_X1Y147/IOB33M/OUTBUF' located for this chip" -- which says nothing about the
+    // pins the user actually wrote.  Check it up front and say what is wrong. (fixes #9)
+    auto check_diff_pair = [&](NetInfo *p_net, NetInfo *n_net, const std::string &site_p,
+                               const std::string &site_n, bool is18, const char *m_bel, const char *s_bel) {
+        auto has_bel = [&](const std::string &name) { return ctx->getBelByName(ctx->id(name)) != BelId(); };
+        bool p_is_master = has_bel(site_p + m_bel);
+        bool n_is_slave = has_bel(site_n + s_bel);
+        bool same_tile = get_tilename_by_sitename(ctx, site_p) == get_tilename_by_sitename(ctx, site_n);
+        if (p_is_master && n_is_slave && same_tile)
+            return;
+        const char *why = !p_is_master ? "its P side is constrained to the N (slave) pin of a pair"
+                          : !n_is_slave ? "its N side is constrained to a P (master) pin"
+                                        : "the two pins are not the two halves of one differential pair";
+        log_error("%s '%s' cannot be placed: %s.\n"
+                  "       P side: %s\n"
+                  "       N side: %s\n"
+                  "       Constrain the P port to an IO_L<n>P_... pin and the N port to the matching\n"
+                  "       IO_L<n>N_... pin of the same pair (see package_pins.csv for the part).\n",
+                  xil_iob->type.c_str(ctx), xil_iob->name.c_str(ctx), why,
+                  pad_desc(p_net, site_p).c_str(), pad_desc(n_net, site_n).c_str());
+        (void)is18;
+    };
+
     /*
      * IO primitives in Xilinx are complex "macros" that usually expand to more than one BEL
      * To avoid various nasty bugs (such as auto-transformation by Vivado of dedicated INV primitives to LUT1s), we
@@ -139,7 +185,8 @@ void XC7Packer::decompose_iob(CellInfo *xil_iob, bool is_hr, const std::string &
             subcells.push_back(obuf);
     }
 
-    bool is_diff_ibuf = xil_iob->type == ctx->id("IBUFDS") || xil_iob->type == ctx->id("IBUFDS_INTERMDISABLE");
+    bool is_diff_ibuf = xil_iob->type == ctx->id("IBUFDS") || xil_iob->type == ctx->id("IBUFGDS") ||
+                        xil_iob->type == ctx->id("IBUFDS_INTERMDISABLE");
     bool is_diff_iobuf = xil_iob->type == ctx->id("IOBUFDS") || xil_iob->type == ctx->id("IOBUFDS_DCIEN");
     bool is_diff_out_iobuf = xil_iob->type == ctx->id("IOBUFDS_DIFF_OUT") ||
                              xil_iob->type == ctx->id("IOBUFDS_DIFF_OUT_DCIEN") ||
@@ -207,6 +254,10 @@ void XC7Packer::decompose_iob(CellInfo *xil_iob, bool is_hr, const std::string &
             inv->attrs[ctx->id("BEL")] = site_n + "/IOB33S/O_ININV";
             inv->attrs[ctx->id("X_IOB_SITE_TYPE")] = std::string("IOB33S");
         }
+
+        check_diff_pair(pad_p_net, pad_n_net, site_p, site_n, is_riob18,
+                        is_riob18 ? "/IOB18M/OUTBUF_DCIEN" : "/IOB33M/OUTBUF",
+                        is_riob18 ? "/IOB18S/OUTBUF_DCIEN" : "/IOB33S/OUTBUF");
 
         bool has_dci = xil_iob->type == ctx->id("IOBUFDS_DCIEN") || xil_iob->type == ctx->id("IOBUFDSE3");
 
@@ -293,6 +344,7 @@ void XC7Packer::pack_io()
     }
     flush_cells();
     std::unordered_set<BelId> used_io_bels;
+    std::unordered_map<std::string, std::string> io_bel_owner; // bel name -> IO cell name
     int unconstr_io_count = 0;
     for (auto &iob : pad_and_buf) {
         CellInfo *pad = iob.first;
@@ -322,8 +374,30 @@ void XC7Packer::pack_io()
             if (boost::starts_with(tile, "MONITOR_"))
                 log_error("Cannot place regular IO on monitor/XADC site\n");
         }
-        if (pad->attrs.count(ctx->id("BEL"))) {
-            used_io_bels.insert(ctx->getBelByName(ctx->id(pad->attrs.at(ctx->id("BEL")).as_string())));
+        // A pad whose site is already fixed (by LOC/PACKAGE_PIN, or by a
+        // previous pass) is the only kind that can collide with another pad:
+        // an unconstrained one is handed a free bel further down, from the set
+        // that excludes everything claimed here.
+        const bool pad_site_fixed = pad->attrs.count(ctx->id("BEL")) != 0;
+        if (pad_site_fixed) {
+            const std::string bel_name = pad->attrs.at(ctx->id("BEL")).as_string();
+            auto owner = io_bel_owner.find(bel_name);
+            if (owner != io_bel_owner.end()) {
+                // Two IOs on one site -- i.e. two ports (or one port twice)
+                // constrained to the same package pin.  Only one of them can
+                // actually reach the pad, and which one is not the user's to
+                // choose, so say so here, in the names the user wrote, before
+                // the placer reports it as a bel collision between
+                // $iopadmap$... cells.
+                const std::string loc =
+                        pad->attrs.count(ctx->id("LOC")) ? pad->attrs.at(ctx->id("LOC")).as_string() : std::string("?");
+                log_warning("Conflicting outputs: IO '%s' and IO '%s' are both constrained to package pin '%s' "
+                            "(site '%s'); only one of them can drive the pad\n",
+                            pad->name.c_str(ctx), owner->second.c_str(), loc.c_str(), bel_name.c_str());
+            } else {
+                io_bel_owner.emplace(bel_name, pad->name.str(ctx));
+            }
+            used_io_bels.insert(ctx->getBelByName(ctx->id(bel_name)));
         } else {
             ++unconstr_io_count;
         }
@@ -450,6 +524,8 @@ void XC7Packer::pack_io()
     hriobuf_rules[ctx->id("IBUFDS_INTERMDISABLE_INT")].port_xform[ctx->id("IB")] = ctx->id("DIFFI_IN");
     hriobuf_rules[ctx->id("IBUFDS")] = hriobuf_rules[ctx->id("IBUF")];
     hriobuf_rules[ctx->id("IBUFDS")].port_xform[ctx->id("IB")] = ctx->id("DIFFI_IN");
+    // IBUFGDS: legacy clock-capable spelling of IBUFDS, same primitive on 7-series (#74)
+    hriobuf_rules[ctx->id("IBUFGDS")] = hriobuf_rules[ctx->id("IBUFDS")];
 
     hpiobuf_rules[ctx->id("OBUF")].new_type = ctx->id("IOB18_OUTBUF_DCIEN");
     hpiobuf_rules[ctx->id("OBUF")].port_xform[ctx->id("I")] = ctx->id("IN");
@@ -466,6 +542,7 @@ void XC7Packer::pack_io()
     hpiobuf_rules[ctx->id("IBUFDS_INTERMDISABLE_INT")].port_xform[ctx->id("IB")] = ctx->id("DIFFI_IN");
     hpiobuf_rules[ctx->id("IBUFDS")] = hpiobuf_rules[ctx->id("IBUF")];
     hpiobuf_rules[ctx->id("IBUFDS")].port_xform[ctx->id("IB")] = ctx->id("DIFFI_IN");
+    hpiobuf_rules[ctx->id("IBUFGDS")] = hpiobuf_rules[ctx->id("IBUFDS")];
 
     // Special xform for OBUFx and IBUFx.
     std::unordered_map<IdString, XFormRule> rules;
@@ -1113,8 +1190,18 @@ void XC7Packer::pack_idelayctrl()
                 ioctrl_sites.insert(get_ioctrl_site(ci->attrs.at(ctx->id("X_IO_BEL")).as_string()));
             }
         }
-        if (ioctrl_sites.empty())
-            log_error("Found IDELAYCTRL but no I/ODELAYs in group %s\n", group_name.c_str());
+        if (ioctrl_sites.empty()) {
+            // An IDELAYCTRL whose group contains no I/ODELAYs is useless but legal --
+            // Vivado places it and drives RDY rather than rejecting the design, and a
+            // design can legitimately arrive here after optimisation removed the last
+            // delay element. Warn instead of failing the build. (fixes #60)
+            //
+            // The continue is load-bearing, not tidiness: falling through leaves
+            // dup_rdys empty and the RDY-AND tree below calls dup_rdys.front() on it.
+            log_warning("Found IDELAYCTRL '%s' but no I/ODELAYs in group %s; leaving it unreplicated\n",
+                        ctx->nameOf(idelayctrl), group_name.empty() ? "default" : group_name.c_str());
+            continue;
+        }
         NetInfo *rdy = get_net_or_empty(idelayctrl, ctx->id("RDY"));
         disconnect_port(ctx, idelayctrl, ctx->id("RDY"));
         std::vector<NetInfo *> dup_rdys;
@@ -1189,6 +1276,17 @@ void XC7Packer::pack_cfg()
             auto bel = "BSCAN_X0Y" + std::to_string(chain - 1) + "/BSCAN";
             ci->attrs[id_BEL] = bel;
             log_info("    Constraining '%s' to site '%s'\n", ci->name.c_str(ctx), bel.c_str());
+        } else if (ci->type == id_STARTUP_STARTUP || ci->type == id_DCIRESET_DCIRESET ||
+                   ci->type == id_DNA_PORT_DNA_PORT || ci->type == id_EFUSE_USR_EFUSE_USR ||
+                   ci->type == id_ICAP_ICAP || ci->type == id_FRAME_ECC_FRAME_ECC ||
+                   ci->type == id_USR_ACCESS_USR_ACCESS) {
+            // These configuration primitives live in a single dedicated site each. The
+            // placer has no way to discover that site on its own, so without an explicit
+            // preplacement it aborts with "Unable to find legal placement for cell". BSCAN
+            // above is the exception only because JTAG_CHAIN already names its site.
+            // Affects any design that instantiates e.g. STARTUPE2 to source a clock from
+            // CFGMCLK, or ICAPE2 / DNA_PORT for configuration access.
+            preplace_unique(ci);
         }
     }
 }

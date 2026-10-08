@@ -243,9 +243,17 @@ void XilinxPacker::pack_dram()
             continue;
         auto &dt = dt_iter->second;
         DRAMControlSet dcs;
-        for (int i = 0; i < dt.abits; i++)
-            dcs.wa.push_back(get_net_or_empty(
-                    ci, ctx->id(dt.abits <= 6 ? ("A" + std::to_string(i)) : ("A[" + std::to_string(i) + "]"))));
+        for (int i = 0; i < dt.abits; i++) {
+            // Address pin style is per-primitive, not per-width: RAM128X1S has
+            // 7 abits but SCALAR pins A0..A6 (unlike RAM128X1D/RAM256X1S,
+            // which use an A[] bus), so the width-based guess left every
+            // address (and with it WADR/WA7USED) unconnected. Try the scalar
+            // name first and fall back to the bus form.
+            NetInfo *an = get_net_or_empty(ci, ctx->id("A" + std::to_string(i)));
+            if (an == nullptr)
+                an = get_net_or_empty(ci, ctx->id("A[" + std::to_string(i) + "]"));
+            dcs.wa.push_back(an);
+        }
         dcs.wclk = get_net_or_empty(ci, ctx->id("WCLK"));
         dcs.we = get_net_or_empty(ci, ctx->id("WE"));
         dcs.wclk_inv = bool_or_default(ci->params, ctx->id("IS_WCLK_INVERTED"));
@@ -452,7 +460,48 @@ void XilinxPacker::pack_dram()
                     z--;
                 }
                 create_muxf_tree(base, "O", o_pre, addressw_high, o,
-                        m256 ? 4 : (ctx->xc7 ? 2 : 6));
+                        m256 ? 0 : (ctx->xc7 ? 2 : 6));
+                packed_cells.insert(ci->name);
+            }
+        } else if (cs.memtype == ctx->id("RAM64X1S")) {
+            // Single-port 64 x 1.  This is the RAM128X1S path with the high
+            // address bit absent, and with it the MUXF7 decode tree and the
+            // second RAM cell: exactly one SLICEM LUT in 64x1 RAM mode per
+            // cell.  memory_libmap emits this macro for *any* 64-deep
+            // memory (one cell per data bit) -- it is not a rare shape:
+            //
+            //   reg [7:0] mem [0:63];        // 8 x RAM64X1S
+            //
+            // Left in the unsupported list below it was a hard pack error,
+            // i.e. a legal design that synthesises fine but cannot be
+            // placed at all.  Write address == read address (single port),
+            // which is what create_dram_lut() already does: it connects
+            // RADR from `address` and WADR from the group control set.
+            // RAM64X1S has 6 address bits, so the slice's WA7/WA8
+            // (lutInfo.address_msb) stay unconnected and no write-address
+            // mux is programmed -- the same as the folded SPO cell of the
+            // RAM64X1D path, which also sits in the top LUT of the slice.
+            int z = height - 1;
+            CellInfo *base = nullptr;
+            for (CellInfo *ci : group.second) {
+                NPNR_ASSERT(ci->type == ctx->id("RAM64X1S")); // FIXME
+                // A full site means the next cell starts a fresh one, which the
+                // placer places anywhere (as the RAM64X1D path does).
+                const bool site_is_full = (z < 0);
+                if (site_is_full) {
+                    z = height - 1;
+                    base = nullptr;
+                }
+                auto init = get_or_default(ci->params, ctx->id("INIT"), Property(0, 64));
+                NetInfo *o = get_net_or_empty(ci, ctx->id("O"));
+                disconnect_port(ctx, ci, ctx->id("O"));
+                CellInfo *spr = create_dram_lut(ci->name.str(ctx) + "/SP", base, cs, cs.wa,
+                                                get_net_or_empty(ci, ctx->id("D")), o, z);
+                const bool is_first_cell_in_site = (base == nullptr);
+                if (is_first_cell_in_site)
+                    base = spr;
+                spr->params[ctx->id("INIT")] = init;
+                z--;
                 packed_cells.insert(ci->name);
             }
         } else if (cs.memtype == ctx->id("RAM64X1S")) {

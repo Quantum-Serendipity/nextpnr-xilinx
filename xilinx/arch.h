@@ -26,6 +26,7 @@
 #include <unordered_set>
 #include <boost/iostreams/device/mapped_file.hpp>
 
+#include <functional>
 #include <iostream>
 
 NEXTPNR_NAMESPACE_BEGIN
@@ -673,6 +674,33 @@ struct ArchArgs
 {
     std::string chipdb;
 };
+
+// Single source of truth for the CLK_HROW BUFHCE pass-through pip's wire
+// naming, shared by Arch::routeBufhcePassthroughCE() (arch.cc, which needs to
+// recognise the pip on a real placed/routed net) and FasmBackend's pp_config
+// table registration (fasm.cc, which needs to build the same wire names to
+// register the feature strings) -- so the two cannot independently drift.
+inline void bufhcePassthroughWireNames(const std::string &hck, std::string &dst_wire, std::string &src_wire)
+{
+    dst_wire = "CLK_HROW_CK_HCLK_OUT_" + hck;
+    src_wire = "CLK_HROW_CK_MUX_OUT_" + hck;
+}
+
+inline bool matchBufhcePassthroughPip(const std::string &dst_wire, const std::string &src_wire, std::string &hck)
+{
+    static const std::string dst_pfx = "CLK_HROW_CK_HCLK_OUT_";
+    static const std::string src_pfx = "CLK_HROW_CK_MUX_OUT_";
+    bool dst_matches = (dst_wire.compare(0, dst_pfx.size(), dst_pfx) == 0);
+    bool src_matches = (src_wire.compare(0, src_pfx.size(), src_pfx) == 0);
+    if (!dst_matches || !src_matches)
+        return false;
+    std::string dst_hck = dst_wire.substr(dst_pfx.size());
+    std::string src_hck = src_wire.substr(src_pfx.size());
+    if (dst_hck != src_hck)
+        return false;
+    hck = dst_hck;
+    return true;
+}
 
 struct Arch : BaseCtx
 {
@@ -1984,8 +2012,28 @@ struct Arch : BaseCtx
     void fixupPlacement();
     void fixupRouting();
 
-    void routeVcc();
+    // Find the bel the chipdb wires a RAMB36E1 cascade output pin to.
+    BelId cascadePartnerBel(BelId drv, IdString out_pin, IdString in_pin) const;
+    // Relocate RAMB36E1 data-cascade sinks that the placer left off the one bel
+    // the chipdb can reach from their driver (openXC7/nextpnr-xilinx#39).
+    void fixupBramCascades();
+
+    // A constant-net sink the backbone fill pass (routeVcc) could not reach.
+    struct ConstHoldout
+    {
+        NetInfo *net; // $PACKER_GND_NET or $PACKER_VCC_NET
+        CellInfo *cell;
+        IdString port;
+        bool value; // constant the pin requires
+    };
+    std::vector<ConstHoldout> routeVcc();
+    bool allow_const_holdouts = false;
+    void routeConstants(std::function<void()> reroute);
+    int insertConstDrivers(const std::vector<ConstHoldout> &holdouts, std::vector<ConstHoldout> &unplaced);
+    void ripupConstNets();
     void routeClock();
+    void routeBufhcePassthroughCE();
+    bool bridgeConstToWire(NetInfo *net, int pseudo_intent, WireId sink, int iter_max, int *iters_out = nullptr);
     void applyFixedRoutes(const std::string &filename);
     // region_only restricts the dump to the NEXTPNR_PARTITION_ROI rectangle.
     void writeFixedRoutes(const std::string &filename, bool region_only = false) const;

@@ -150,7 +150,14 @@ BelId Arch::getBelByName(IdString name) const
                 break;
             }
         }
-    } else {
+    } else if (tile_by_name.count(split.first)) {
+        // Guarded to match the site_by_name branch above. An unrecognised name --
+        // a typo in a BEL attribute, most often -- used to reach .at() and throw
+        // an uncaught std::out_of_range, aborting with a libc++ message and no
+        // hint as to which cell was at fault. Returning an empty BelId instead
+        // lets the caller's own diagnostic run: placer_heap.cc:386 already says
+        // "No Bel named '<name>' located for this chip (processing BEL attribute
+        // on '<cell>')", which is the message the user needs.
         int tile = tile_by_name.at(split.first);
         auto &tile_info = chip_info->tile_types[chip_info->tile_insts[tile].type];
         IdString belname = id(split.second);
@@ -1009,17 +1016,80 @@ static bool const_sink_is_config_delivered(const PortRef &usr)
     return usr.port == id_CIN || usr.port == id_CYINIT;
 }
 
-void Arch::routeVcc()
+// Per-sink uphill BFS to the const backbone, BOUNDED and terminating at ANY
+// PSEUDO_VCC/GND-intent wire (the tile's local row/global pseudo wire, a few
+// hops above VCC_WIRE/GND_WIRE) instead of traversing the whole pseudo
+// network to the single bound source -- no O(device) stall.  On success,
+// binds the real sink-side bridge pips (so fasm.cc emits them) and returns
+// true.  Shared by routeVcc() (per-net-user sinks) and
+// routeBufhcePassthroughCE() (a synthetic sink with no netlist user at all).
+// iters_out, if given, receives the number of BFS iterations actually used
+// (success or failure) so callers can track a "worst case" figure.
+bool Arch::bridgeConstToWire(NetInfo *net, int pseudo_intent, WireId sink, int iter_max, int *iters_out)
 {
+    std::queue<WireId> visit;
+    std::unordered_map<WireId, PipId> backtrace;
+    WireId dest = WireId();
+    visit.push(sink);
+    int iter = 0;
+    while (!visit.empty() && iter < iter_max) {
+        ++iter;
+        WireId curr = visit.front();
+        visit.pop();
+        bool curr_is_dest = (getBoundWireNet(curr) == net) || (wireIntent(curr) == pseudo_intent);
+        if (curr_is_dest) {
+            dest = curr;
+            break;
+        }
+        // Don't route the const net THROUGH a wire owned by a signal net
+        // (e.g. the frozen macro's locked routing) -- the old code only
+        // vetted src wires, so a signal-owned dst wire slipped into the
+        // path and tripped bindWire's wire-ownership assert.
+        bool curr_owned_by_other_net = (getBoundWireNet(curr) != nullptr);
+        if (curr_owned_by_other_net)
+            continue;
+        for (auto uh : getPipsUphill(curr)) {
+            if (!checkPipAvail(uh))
+                continue;
+            WireId s = getPipSrcWire(uh);
+            bool src_already_visited = (backtrace.count(s) != 0);
+            if (src_already_visited)
+                continue;
+            bool src_unusable = !checkWireAvail(s) && (getBoundWireNet(s) != net);
+            if (src_unusable)
+                continue;
+            backtrace[s] = uh;
+            visit.push(s);
+        }
+    }
+    if (iters_out != nullptr)
+        *iters_out = iter;
+    bool no_path_found = (dest == WireId());
+    if (no_path_found)
+        return false;
+    bool backtrace_has_more_hops = (backtrace.count(dest) != 0);
+    while (backtrace_has_more_hops) {
+        auto uh = backtrace[dest];
+        dest = getPipDstWire(uh);
+        bool dest_wire_unbound = (getBoundWireNet(dest) == nullptr);
+        if (dest_wire_unbound)
+            bindWire(dest, net, STRENGTH_STRONG);
+        bool pip_unbound = (getBoundPipNet(uh) == nullptr);
+        if (pip_unbound)
+            bindPip(uh, net, STRENGTH_STRONG);
+        backtrace_has_more_hops = (backtrace.count(dest) != 0);
+    }
+    return true;
+}
+
+std::vector<Arch::ConstHoldout> Arch::routeVcc()
+{
+    std::vector<ConstHoldout> holdouts;
     // Route BOTH constant pseudo-nets (Vcc and Gnd) through their real bridge
     // pips before the main router, so fasm.cc emits the const distribution and
     // silicon actually gets the constants.  (Originally Vcc-only + router1-only;
     // Gnd was left to defaults, which floated address-path const-0 inputs high
-    // -> corrupt PC = 0x..fff0.)  Per-sink uphill BFS to the const backbone,
-    // BOUNDED and terminating at ANY PSEUDO_VCC/GND-intent wire (the tile's
-    // local row/global pseudo wire, a few hops above VCC_WIRE/GND_WIRE) instead
-    // of traversing the whole pseudo network to the single bound source -> no
-    // O(device) stall.  Real sink-side bridge pips get bound + emitted to FASM.
+    // -> corrupt PC = 0x..fff0.)  See bridgeConstToWire() for the per-sink BFS.
     const int iter_max = 50000;
     // A holdout is USUALLY NOT TERMINAL, and this is the whole reason the retry
     // below exists.  The BFS terminates on `getBoundWireNet(curr) == net`, i.e.
@@ -1064,13 +1134,11 @@ void Arch::routeVcc()
         { id("$PACKER_VCC_NET"), ID_PSEUDO_VCC },
         { id("$PACKER_GND_NET"), ID_PSEUDO_GND },
     };
-    // Record GND sinks the backbone fill can't reach, so a second pass can drive
-    // them from a local LUT1(INIT=0) instead (see pack_carry_xc7.cc).  One line
-    // per holdout: "<cell> <port>" (e.g. "mem_addr_reg_13__i_2 DI0").
+    // Unreached sinks are returned to the caller; NEXTPNR_GND_HOLDOUT_FILE also
+    // dumps the GND ones as "<cell> <port>" lines.
     std::ofstream holdout_out;
     if (const char *hf = getenv("NEXTPNR_GND_HOLDOUT_FILE"))
         holdout_out.open(hf);
-    int total_unrouted = 0;
     for (auto &cn : cnets) {
         if (!nets.count(cn.first))
             continue;
@@ -1092,74 +1160,28 @@ void Arch::routeVcc()
             failed.clear();
             for (size_t ui : pending) {
                 auto &usr = net->users.at(ui);
-                std::queue<WireId> visit;
-                std::unordered_map<WireId, PipId> backtrace;
-                WireId dest = WireId();
                 WireId sink = getCtx()->getNetinfoSinkWire(net, usr);
                 if (sink == WireId())
                     log_error("Pin '%s' of bel '%s' has no associated wire\n", usr.port.c_str(this),
                               nameOfBel(usr.cell->bel));
-                visit.push(sink);
-                int iter = 0;
                 const int budget = (passes == 1) ? iter_max : iter_max_retry;
-                while (!visit.empty() && iter < budget) {
-                    ++iter;
-                    WireId curr = visit.front();
-                    visit.pop();
-                    if (getBoundWireNet(curr) == net || wireIntent(curr) == pseudo_intent) {
-                        dest = curr;
-                        break;
-                    }
-                    // Don't route the const net THROUGH a wire owned by a signal net
-                    // (e.g. the frozen macro's locked routing) -- the old code only
-                    // vetted src wires, so a signal-owned dst wire slipped into the
-                    // path and tripped bindWire's wire-ownership assert.
-                    if (getBoundWireNet(curr) != nullptr)
-                        continue;
-                    for (auto uh : getPipsUphill(curr)) {
-                        if (!checkPipAvail(uh))
-                            continue;
-                        WireId s = getPipSrcWire(uh);
-                        if (backtrace.count(s))
-                            continue;
-                        if (!checkWireAvail(s) && getBoundWireNet(s) != net)
-                            continue;
-                        backtrace[s] = uh;
-                        visit.push(s);
-                    }
-                }
+                int iter = 0;
+                bool bridged = bridgeConstToWire(net, pseudo_intent, sink, budget, &iter);
                 if (iter > max_iter_seen)
                     max_iter_seen = iter;
-                if (dest == WireId()) {
+                if (!bridged) {
                     failed.push_back(ui);
-                    // Always logged, never behind a knob.  It also says WHICH of
-                    // the two failure modes happened, because they need
-                    // different fixes: "exhausted" means every wire reachable
-                    // from the sink through free/own resources was looked at and
-                    // none of them was a constant source, so a bigger budget is
-                    // useless; "hit its cap" means the search was cut off and
-                    // the answer may simply have been further away.
                     log_info("    %s: pass %d left %s.%s (bel %s) unbridged -- BFS %s after %d of %d wires\n",
                              cn.first.c_str(this), passes, usr.cell->name.c_str(this), usr.port.c_str(this),
                              nameOfBel(usr.cell->bel),
-                             visit.empty() ? "exhausted the reachable free-wire graph" : "hit its iteration cap",
+                             iter < budget ? "exhausted the reachable free-wire graph" : "hit its iteration cap",
                              iter, budget);
-                    continue;
-                }
-                while (backtrace.count(dest)) {
-                    auto uh = backtrace[dest];
-                    dest = getPipDstWire(uh);
-                    if (getBoundWireNet(dest) == nullptr)
-                        bindWire(dest, net, STRENGTH_STRONG);
-                    if (getBoundPipNet(uh) == nullptr)
-                        bindPip(uh, net, STRENGTH_STRONG);
                 }
             }
             if (failed.empty())
                 break;
             // No progress: this pass bound nothing, so the next one would search
-            // an identical graph and fail identically.  Terminates the loop in
-            // at most |failures| passes even without the cap below.
+            // an identical graph and fail identically.
             if (failed.size() == pending.size())
                 break;
             if (passes >= max_fill_passes)
@@ -1169,30 +1191,17 @@ void Arch::routeVcc()
         int unrouted = int(failed.size()), config_delivered = 0;
         for (size_t ui : failed) {
             auto &usr = net->users.at(ui);
-            if (const_sink_is_config_delivered(usr))
+            if (const_sink_is_config_delivered(usr)) {
                 ++config_delivered;
-        }
-        total_unrouted += unrouted - config_delivered;
-        // A CONSTANT SINK THAT WAS NEVER BRIDGED IS A CORRECTNESS DEFECT, NOT A
-        // STATISTIC.  This used to be a bare counter plus an opt-in log line, so
-        // a build could ship an undriven const input, exit 0 and write a
-        // complete-looking FASM.  For a LUT input the damage is masked by
-        // accident -- fixupRouting() erases the pin's X_ORIG_PORT because it has
-        // no bound permutation pip, and get_lut_init() then emits a function
-        // independent of that pin, which is right for GND and WRONG for VCC --
-        // and for a non-LUT sink (FF CE/SR, CARRY4 DI, BRAM/DSP/IOB) nothing
-        // masks it at all.  Name every one of them, then refuse to continue.
-        for (size_t ui : failed) {
-            auto &usr = net->users.at(ui);
-            if (const_sink_is_config_delivered(usr))
                 log_warning("%s: sink %s.%s (bel %s) not bridged, but its value is delivered by a "
                             "configuration bit (PRECYINIT.C0/.C1), so this is not a defect\n",
                             cn.first.c_str(this), usr.cell->name.c_str(this), usr.port.c_str(this),
                             nameOfBel(usr.cell->bel));
-            else
+            } else {
                 log_warning("%s: no reachable constant source for sink %s.%s (bel %s)\n", cn.first.c_str(this),
                             usr.cell->name.c_str(this), usr.port.c_str(this), nameOfBel(usr.cell->bel));
-            // GND holdouts only: a local LUT1(INIT=0) can replace these.
+                holdouts.push_back(ConstHoldout{net, usr.cell, usr.port, pseudo_intent == ID_PSEUDO_VCC});
+            }
             if (holdout_out.is_open() && cn.second == ID_PSEUDO_GND)
                 holdout_out << usr.cell->name.c_str(this) << " " << usr.port.c_str(this) << "\n";
         }
@@ -1201,10 +1210,95 @@ void Arch::routeVcc()
                  cn.first.c_str(this), int(net->users.size()) - unrouted, int(net->users.size()), unrouted,
                  config_delivered, passes, max_iter_seen);
     }
-    if (total_unrouted > 0)
-        log_error("routeVcc: %d constant sink(s) could not be bridged and are not delivered by a configuration "
-                  "bit (listed above). The design would be written out with undriven constant inputs.\n",
-                  total_unrouted);
+    return holdouts;
+}
+
+// A BUFHCE used as a pure route-thru pass-through (fasm.cc's CLK_HROW pp_config
+// table, no cell ever placed on the site) has its CE pin left completely
+// unrouted -- no bits get set anywhere on its path at all.  That is NOT the
+// same as floating on real silicon, though: every INT tile's IMUX inputs
+// (artix7 and spartan7 alike) are documented as defaulting to VCC_WIRE
+// (ppips_int_r.db: "INT_R.IMUX0.VCC_WIRE default"), and the two hops from
+// there into CLK_HROW_BUFHCE_CE_<hck> are unconditional ("always") pips with
+// no bits of their own -- so with nothing configured, this CE pin already
+// reads as a hard 1.  That is exactly what all five Vivado golden references
+// for this resource show for a pass-through with CE tied off (nextpnr-xilinx
+// #177): IN_USE and ZINV_CE (uninverted) set, and zero interconnect bits
+// spent getting there.
+//
+// So the fix here is not "route a constant that was floating" -- it's
+// "stop relying on an implicit default and make the same VCC tie explicit",
+// exactly like a packed BUFHCE_BUFHCE cell gets via pack_clocking_xc7.cc's
+// tie_port(ci, "CE", true, true).  Bridging to the VCC pseudo-net (not GND)
+// keeps the resulting configuration identical to what was already being
+// emitted -- since VCC_WIRE is the database default, every pip this bridge
+// binds is itself bitless, so the bitstream does not move (measured
+// byte-identical, 1-tap and 10-tap designs, both against nextpnr's own
+// pre-existing output and against Vivado's references).  This also fixes a
+// real safety gap: if the bridge ever fails to reach the constant network,
+// the buffer now defaults to the same disabled-only-if-floating state it
+// always had, rather than (as an earlier GND-tie revision of this fix did)
+// silently landing on a disabled buffer with just a console warning.
+//
+// Find every used instance of this pass-through pip after the main router
+// (and fixupRouting()) has committed to it, and bridge $PACKER_VCC_NET to its
+// CE pin, using the same bridge BFS as routeVcc().  The pip-recognition logic
+// (matchBufhcePassthroughPip(), arch.h) is shared with fasm.cc's pp_config
+// table registration for this same pip, so the two cannot drift apart.
+void Arch::routeBufhcePassthroughCE()
+{
+    if (!nets.count(id("$PACKER_VCC_NET")))
+        return;
+    NetInfo *vcc = nets.at(id("$PACKER_VCC_NET")).get();
+    int tied = 0, already_driven = 0, missed = 0;
+    for (auto &ni : nets) {
+        NetInfo *net = ni.second.get();
+        for (auto &w : net->wires) {
+            PipId pip = w.second.pip;
+            bool pip_is_unbound = (pip == PipId());
+            if (pip_is_unbound)
+                continue;
+            auto &pd = locInfo(pip).pip_data[pip.index];
+            bool is_ordinary_routing_pip = (pd.flags == PIP_TILE_ROUTING);
+            if (!is_ordinary_routing_pip)
+                continue;
+            IdString src = IdString(locInfo(pip).wire_data[pd.src_index].name);
+            IdString dst = IdString(locInfo(pip).wire_data[pd.dst_index].name);
+            std::string hck;
+            bool is_bufhce_passthrough = matchBufhcePassthroughPip(dst.str(this), src.str(this), hck);
+            if (!is_bufhce_passthrough)
+                continue;
+            std::string tile_name = chip_info->tile_insts[pip.tile].name.get();
+            std::string ce_wire_name = tile_name + "/CLK_HROW_BUFHCE_CE_" + hck;
+            WireId ce_wire = getWireByName(id(ce_wire_name));
+            bool ce_wire_found = (ce_wire != WireId());
+            if (!ce_wire_found) {
+                log_warning("    BUFHCE pass-through at %s: no CE wire '%s' found, CE left unrouted\n",
+                            tile_name.c_str(), ce_wire_name.c_str());
+                ++missed;
+                continue;
+            }
+            bool ce_wire_already_driven = (getBoundWireNet(ce_wire) != nullptr);
+            if (ce_wire_already_driven) {
+                // Already driven (e.g. a packed BUFHCE_BUFHCE on an adjacent
+                // lane at this same tile already tied it) -- nothing to do,
+                // and nothing this pass itself tied, so don't count it as such.
+                ++already_driven;
+                continue;
+            }
+            bool bridged = bridgeConstToWire(vcc, ID_PSEUDO_VCC, ce_wire, 50000);
+            if (bridged) {
+                ++tied;
+            } else {
+                log_warning("    BUFHCE pass-through at %s: could not bridge VCC to CE ('%s')\n",
+                            tile_name.c_str(), ce_wire_name.c_str());
+                ++missed;
+            }
+        }
+    }
+    if (tied > 0 || already_driven > 0 || missed > 0)
+        log_info("    BUFHCE pass-through CE: %d tied to VCC, %d already driven, %d could not be reached\n", tied,
+                  already_driven, missed);
 }
 
 // BODGE: template a GT-clock -> BUFG route from the known-good Vivado path.
@@ -2799,7 +2893,11 @@ bool Arch::route()
     // FASM is complete.
     if (getenv("NEXTPNR_ROUTE_FIXED_ONLY") != nullptr) {
         findSourceSinkLocations();
-        routeVcc();
+        std::vector<ConstHoldout> holdouts = routeVcc();
+        if (!holdouts.empty())
+            log_error("routeVcc: %d constant sink(s) could not be bridged and are not delivered by a configuration "
+                      "bit (listed above). The design would be written out with undriven constant inputs.\n",
+                      int(holdouts.size()));
         fixupRouting();
         // This path never runs router2, so the clamp does not exist here at
         // all -- every pip came from the imported ROUTING attribute or
@@ -2826,131 +2924,138 @@ bool Arch::route()
     }
     findSourceSinkLocations();
 
-    bool result;
-    if (router == "router1") {
-        result = router1(getCtx(), Router1Cfg(getCtx()));
-    } else if (router == "router2") {
-        auto cfg = Router2Cfg(getCtx());
-        cfg.bb_margin_x = 4;
-        cfg.bb_margin_y = 4;
-        cfg.backwards_max_iter = 200;
-        cfg.perf_profile = true;
-        // Unit 7.4: confine the reconfigurable module's routing to the same
-        // rectangle that confined its placement. One rectangle, both phases --
-        // a routing clamp on a different rectangle than the placer used would
-        // be a guarantee about the wrong region.
-        // NEXTPNR_PARTITION_CLAMP=off is the DISCRIMINATION ARM, not a workaround.
-        // A clamp that has only ever been observed to pass is untested: the
-        // acceptance evidence needs a run where the same design, same placement
-        // and same rectangle routes WITHOUT the clamp, so that "0 pips outside
-        // the rectangle" can be shown to be caused by the clamp rather than by
-        // the router never having wanted to leave. It is logged as an error-level
-        // warning and named in assert-no-escape-hatches.sh so it cannot survive
-        // into a real DPR build unnoticed.
-        const char *clamp_mode = getenv("NEXTPNR_PARTITION_CLAMP");
-        const bool clamp_off = clamp_mode != nullptr && std::string(clamp_mode) == "off";
-        if (roi_active() && clamp_off) {
-            log_warning("partition route clamp: DISABLED by NEXTPNR_PARTITION_CLAMP=off. The rectangle governs "
-                        "placement but NOT routing; RM nets may bind pips anywhere on the die and the resulting "
-                        "partial bitstream may write frames outside the region. This setting exists to produce the "
-                        "unclamped control arm for the acceptance evidence. It must never be set for a build whose "
-                        "bitstream will be loaded.\n");
-        }
-        // The keepout is the clamp's complement, so it gets its own switch and
-        // its own default rather than riding on the clamp's. ON whenever a
-        // rectangle is active, because a rectangle that static routing crosses
-        // is a rectangle no partial bitstream can be relocated into, and that
-        // is true of every build with an ROI whether or not it has an RM.
-        //
-        // Independent in both directions, deliberately. NEXTPNR_PARTITION_CLAMP
-        // =off is the clamp's discrimination arm and it must stay a clean one:
-        // a run with the clamp off and the keepout on is a different experiment
-        // from either, and neither flag may quietly imply the other. The
-        // consequence is that an existing clamp control arm now also carries
-        // the keepout unless it sets this too, which is the honest reading --
-        // the two mechanisms were never the same claim.
-        const char *keepout_mode = getenv("NEXTPNR_PARTITION_KEEPOUT");
-        const bool keepout_off = keepout_mode != nullptr && std::string(keepout_mode) == "off";
-        if (roi_active() && keepout_off) {
-            log_warning("partition static keepout: DISABLED by NEXTPNR_PARTITION_KEEPOUT=off. Nets belonging to no "
-                        "rectangle may route straight through every rectangle, so the per-region static content "
-                        "will differ between regions and a partial bitstream cut for one of them cannot be "
-                        "relocated to another by rewriting its FAR word. This setting exists to produce the "
-                        "un-kept-out control arm for the acceptance evidence.\n");
-        }
-        const char *narrow_mode = getenv("NEXTPNR_PARTITION_KEEPOUT_NARROW");
-        const bool narrow_off = narrow_mode != nullptr && std::string(narrow_mode) == "off";
-        if (roi_active() && !keepout_off && narrow_off) {
-            log_warning("partition static keepout: the narrow licence is DISABLED by "
-                        "NEXTPNR_PARTITION_KEEPOUT_NARROW=off. A net with a cell inside a rectangle may bind any "
-                        "pip in that whole rectangle even where its own locked routing already says which pips it "
-                        "uses, so two rectangles holding the same cell will be reached differently and their "
-                        "static content will differ. This setting exists to produce the wide-licence control arm.\n");
-        }
-        if (roi_active() && (!clamp_off || !keepout_off)) {
-            cfg.partition_active = !clamp_off;
-            cfg.keepout_active = !keepout_off;
-            cfg.keepout_narrow = !keepout_off && !narrow_off;
-            cfg.partition_x0 = roi_x0;
-            cfg.partition_y0 = roi_y0;
-            cfg.partition_x1 = roi_x1;
-            cfg.partition_y1 = roi_y1;
-            for (const RoiRect &s : roi_siblings)
-                cfg.partition_siblings.push_back({s.x0, s.y0, s.x1, s.y1});
-            // Read even when the clamp is off, because the keepout needs it:
-            // rule 1 of its licence is "this net is governed by rectangle k",
-            // and a governed net must keep the right to route in its own
-            // rectangle no matter which mechanism is switched on.
-            cfg.partition_nets = partition_net_rects();
-            if (cfg.keepout_active)
-                cfg.keepout_exempt_nets = load_keepout_exempt_nets();
-            if (cfg.keepout_narrow)
-                cfg.keepout_licence_pips = load_keepout_licence_pips();
-            int in_rect0 = 0;
-            for (const auto &pn : cfg.partition_nets)
-                if (pn.second == 0)
-                    in_rect0++;
-            // Unconditional, pass or fail, for the same reason the net gate's
-            // census is unconditional: a clamp that says nothing is
-            // indistinguishable from a clamp that was never installed, and this
-            // programme has shipped four silently-inert mechanisms already.
-            // The count is rectangle 0's, not the map's size: with siblings the
-            // two differ, and this line names one rectangle.
-            if (cfg.partition_active) {
-                log_info("partition route clamp: %d net(s) confined to tiles (%d,%d)-(%d,%d)\n", in_rect0, roi_x0,
-                         roi_y0, roi_x1, roi_y1);
-                // An empty governed set stopped meaning what this warning says
-                // the moment the keepout existed. On a STATIC build the regions
-                // hold no RM logic by construction, so the set is empty and
-                // correct, and the rectangle is doing its work through the
-                // keepout instead -- warning there would be crying wolf on the
-                // flow's main path. With the keepout off the original reading
-                // stands: a rectangle was asked for, nothing is confined,
-                // nothing will happen.
-                if (cfg.partition_nets.empty()) {
-                    if (cfg.keepout_active)
-                        log_info("partition route clamp: the rectangle governs no nets, so the clamp has nothing to "
-                                 "confine; the static keepout is this run's containment mechanism\n");
-                    else
-                        log_warning("partition route clamp: the rectangle is active but governs NO nets. Either the "
-                                    "RM cell set is empty or every RM net was exempted; the clamp will have no "
-                                    "effect.\n");
+    bool result = true;
+    auto run_router = [&]() {
+        if (router == "router1") {
+            result = router1(getCtx(), Router1Cfg(getCtx()));
+        } else if (router == "router2") {
+            auto cfg = Router2Cfg(getCtx());
+            cfg.bb_margin_x = 4;
+            cfg.bb_margin_y = 4;
+            cfg.backwards_max_iter = 200;
+            cfg.perf_profile = true;
+            // Unit 7.4: confine the reconfigurable module's routing to the same
+            // rectangle that confined its placement. One rectangle, both phases --
+            // a routing clamp on a different rectangle than the placer used would
+            // be a guarantee about the wrong region.
+            // NEXTPNR_PARTITION_CLAMP=off is the DISCRIMINATION ARM, not a workaround.
+            // A clamp that has only ever been observed to pass is untested: the
+            // acceptance evidence needs a run where the same design, same placement
+            // and same rectangle routes WITHOUT the clamp, so that "0 pips outside
+            // the rectangle" can be shown to be caused by the clamp rather than by
+            // the router never having wanted to leave. It is logged as an error-level
+            // warning and named in assert-no-escape-hatches.sh so it cannot survive
+            // into a real DPR build unnoticed.
+            const char *clamp_mode = getenv("NEXTPNR_PARTITION_CLAMP");
+            const bool clamp_off = clamp_mode != nullptr && std::string(clamp_mode) == "off";
+            if (roi_active() && clamp_off) {
+                log_warning("partition route clamp: DISABLED by NEXTPNR_PARTITION_CLAMP=off. The rectangle governs "
+                            "placement but NOT routing; RM nets may bind pips anywhere on the die and the resulting "
+                            "partial bitstream may write frames outside the region. This setting exists to produce the "
+                            "unclamped control arm for the acceptance evidence. It must never be set for a build whose "
+                            "bitstream will be loaded.\n");
+            }
+            // The keepout is the clamp's complement, so it gets its own switch and
+            // its own default rather than riding on the clamp's. ON whenever a
+            // rectangle is active, because a rectangle that static routing crosses
+            // is a rectangle no partial bitstream can be relocated into, and that
+            // is true of every build with an ROI whether or not it has an RM.
+            //
+            // Independent in both directions, deliberately. NEXTPNR_PARTITION_CLAMP
+            // =off is the clamp's discrimination arm and it must stay a clean one:
+            // a run with the clamp off and the keepout on is a different experiment
+            // from either, and neither flag may quietly imply the other. The
+            // consequence is that an existing clamp control arm now also carries
+            // the keepout unless it sets this too, which is the honest reading --
+            // the two mechanisms were never the same claim.
+            const char *keepout_mode = getenv("NEXTPNR_PARTITION_KEEPOUT");
+            const bool keepout_off = keepout_mode != nullptr && std::string(keepout_mode) == "off";
+            if (roi_active() && keepout_off) {
+                log_warning("partition static keepout: DISABLED by NEXTPNR_PARTITION_KEEPOUT=off. Nets belonging to no "
+                            "rectangle may route straight through every rectangle, so the per-region static content "
+                            "will differ between regions and a partial bitstream cut for one of them cannot be "
+                            "relocated to another by rewriting its FAR word. This setting exists to produce the "
+                            "un-kept-out control arm for the acceptance evidence.\n");
+            }
+            const char *narrow_mode = getenv("NEXTPNR_PARTITION_KEEPOUT_NARROW");
+            const bool narrow_off = narrow_mode != nullptr && std::string(narrow_mode) == "off";
+            if (roi_active() && !keepout_off && narrow_off) {
+                log_warning("partition static keepout: the narrow licence is DISABLED by "
+                            "NEXTPNR_PARTITION_KEEPOUT_NARROW=off. A net with a cell inside a rectangle may bind any "
+                            "pip in that whole rectangle even where its own locked routing already says which pips it "
+                            "uses, so two rectangles holding the same cell will be reached differently and their "
+                            "static content will differ. This setting exists to produce the wide-licence control arm.\n");
+            }
+            if (roi_active() && (!clamp_off || !keepout_off)) {
+                cfg.partition_active = !clamp_off;
+                cfg.keepout_active = !keepout_off;
+                cfg.keepout_narrow = !keepout_off && !narrow_off;
+                cfg.partition_x0 = roi_x0;
+                cfg.partition_y0 = roi_y0;
+                cfg.partition_x1 = roi_x1;
+                cfg.partition_y1 = roi_y1;
+                for (const RoiRect &s : roi_siblings)
+                    cfg.partition_siblings.push_back({s.x0, s.y0, s.x1, s.y1});
+                // Read even when the clamp is off, because the keepout needs it:
+                // rule 1 of its licence is "this net is governed by rectangle k",
+                // and a governed net must keep the right to route in its own
+                // rectangle no matter which mechanism is switched on.
+                cfg.partition_nets = partition_net_rects();
+                if (cfg.keepout_active)
+                    cfg.keepout_exempt_nets = load_keepout_exempt_nets();
+                if (cfg.keepout_narrow)
+                    cfg.keepout_licence_pips = load_keepout_licence_pips();
+                int in_rect0 = 0;
+                for (const auto &pn : cfg.partition_nets)
+                    if (pn.second == 0)
+                        in_rect0++;
+                // Unconditional, pass or fail, for the same reason the net gate's
+                // census is unconditional: a clamp that says nothing is
+                // indistinguishable from a clamp that was never installed, and this
+                // programme has shipped four silently-inert mechanisms already.
+                // The count is rectangle 0's, not the map's size: with siblings the
+                // two differ, and this line names one rectangle.
+                if (cfg.partition_active) {
+                    log_info("partition route clamp: %d net(s) confined to tiles (%d,%d)-(%d,%d)\n", in_rect0, roi_x0,
+                             roi_y0, roi_x1, roi_y1);
+                    // An empty governed set stopped meaning what this warning says
+                    // the moment the keepout existed. On a STATIC build the regions
+                    // hold no RM logic by construction, so the set is empty and
+                    // correct, and the rectangle is doing its work through the
+                    // keepout instead -- warning there would be crying wolf on the
+                    // flow's main path. With the keepout off the original reading
+                    // stands: a rectangle was asked for, nothing is confined,
+                    // nothing will happen.
+                    if (cfg.partition_nets.empty()) {
+                        if (cfg.keepout_active)
+                            log_info("partition route clamp: the rectangle governs no nets, so the clamp has nothing to "
+                                     "confine; the static keepout is this run's containment mechanism\n");
+                        else
+                            log_warning("partition route clamp: the rectangle is active but governs NO nets. Either the "
+                                        "RM cell set is empty or every RM net was exempted; the clamp will have no "
+                                        "effect.\n");
+                    }
                 }
             }
+            router2(getCtx(), cfg);
+            result = true;
+        } else {
+            log_error("Xilinx architecture does not support router '%s'\n", router.c_str());
         }
-        router2(getCtx(), cfg);
-        result = true;
-    } else {
-        log_error("Xilinx architecture does not support router '%s'\n", router.c_str());
-    }
+    };
+    run_router();
     // routeVcc as a FILL pass: run AFTER the main router so signal nets claim
     // their wires first, then bridge the constant (pwr/gnd) nets through whatever
     // real pips remain free (the BFS already gates on checkWireAvail/checkPipAvail).
     // Pre-router binding over-constrained routing and made router2 fail to route
     // address-path FF arcs (e.g. mem_addr O5->AFFMUX), so const-routed builds
     // exited 255; as a post-router fill it only consumes leftover resources.
-    routeVcc();
+    // routeConstants() drives what the fill misses from local LUTs and re-routes.
+    routeConstants(run_router);
     fixupRouting();
+    // Runs after fixupRouting() so a pass-through pip fixupRouting() decides to
+    // un-pip doesn't get its CE needlessly tied to VCC on an unused BUFHCE.
+    routeBufhcePassthroughCE();
     // LAST point at which anything can bind a pip, and the first at which
     // nothing further will. Deliberately before archInfoToAttributes() below,
     // so a violation aborts BEFORE the offending routing is stamped back into

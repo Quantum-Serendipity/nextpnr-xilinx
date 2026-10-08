@@ -1000,6 +1000,39 @@ bool Arch::xc7_logic_tile_valid(IdString tileType, LogicTileStatus &lts) const
                     }
                 }
             }
+            // The WEMUX driving the SRL/DRAM WE pin is shared across the
+            // bottom half of a SLICEM, so all memory/SRL cells in that
+            // half-tile must agree on the WE net.  Without this check, two
+            // SRLs/DRAMs from independent write-enable domains can both be
+            // placed into the same SLICEM half and then fail routing on
+            // SITEWIRE/SLICE_*/WEMUX_OUT (ported from gatecat/nextpnr-xilinx#98).
+            if (i == 0) {
+                NetInfo *we = nullptr;
+                for (int z = 4 * i; z < 4 * (i + 1); z++) {
+                    for (int k = 0; k < 2; k++) {
+                        CellInfo *lut = lts.cells[z << 4 | (BEL_6LUT + k)];
+                        bool lut_is_absent = lut == nullptr;
+                        if (lut_is_absent)
+                            continue;
+                        bool lut_is_not_memory_or_srl = !lut->lutInfo.is_memory && !lut->lutInfo.is_srl;
+                        if (lut_is_not_memory_or_srl)
+                            continue;
+                        bool lut_has_no_we = lut->lutInfo.we == nullptr;
+                        if (lut_has_no_we)
+                            continue;
+                        bool we_not_yet_recorded = we == nullptr;
+                        bool we_disagrees_with_recorded = we != lut->lutInfo.we;
+                        if (we_not_yet_recorded) {
+                            we = lut->lutInfo.we;
+                        } else if (we_disagrees_with_recorded) {
+                            if (dbg_validity_runtime)
+                                log_info("  invalid-arm: half-tile WE mismatch: %s vs %s\n", nameOf(we),
+                                         nameOf(lut->lutInfo.we));
+                            return false;
+                        }
+                    }
+                }
+            }
             NetInfo *clk = nullptr, *sr = nullptr, *ce = nullptr;
             bool clkinv = false, srinv = false, islatch = false, ffsync = false;
             for (int z = 4 * i; z < 4 * (i + 1); z++) {
@@ -1844,6 +1877,188 @@ void Arch::fixupPlacement()
             }
         }
     }
+
+    // BRAM cascade repair: before anything downstream commits to a cascade pair
+    // being unroutable (see fixupBramCascades() below).
+    fixupBramCascades();
+}
+
+// The RAMB36E1 data cascade is a dedicated route: a CASCADEOUT{A,B} bel pin
+// reaches exactly one other bel pin in the chipdb, the CASCADEIN{A,B} of the
+// BRAM tile the db wires it to.  Walk downhill from the driver's bel pin a few
+// pips (bel pin wire -> tile wire -> next tile's wire -> sink bel pin) to find it.
+BelId Arch::cascadePartnerBel(BelId drv, IdString out_pin, IdString in_pin) const
+{
+    WireId start = getBelPinWire(drv, out_pin);
+    const bool driver_pin_has_a_wire = start != WireId();
+    if (!driver_pin_has_a_wire)
+        return BelId();
+
+    const IdString ramb36 = id("RAMB36E1_RAMB36E1");
+    const int max_pips = 3;
+    std::vector<WireId> frontier{start}, next;
+    for (int depth = 0; depth < max_pips; depth++) {
+        const bool this_depth_is_empty = frontier.empty();
+        if (this_depth_is_empty)
+            break;
+        next.clear();
+        for (WireId w : frontier)
+            for (auto pip : getPipsDownhill(w))
+                next.push_back(getPipDstWire(pip));
+        for (WireId w : next)
+            for (auto bp : getWireBelPins(w)) {
+                const bool is_the_cascade_input = bp.pin == in_pin;
+                const bool belongs_to_another_ramb36 = bp.bel != drv && getBelType(bp.bel) == ramb36;
+                const bool this_is_the_next_cascade_hop = is_the_cascade_input && belongs_to_another_ramb36;
+                if (this_is_the_next_cascade_hop)
+                    return bp.bel;
+            }
+        frontier.swap(next);
+    }
+    return BelId();
+}
+
+// RAMB36E1 data cascades (CASCADEOUT{A,B} of one BRAM driving CASCADEIN{A,B} of
+// the next BRAM tile up) have exactly one route in the chipdb, so a pair the
+// placer separated -- or landed inverted, driver above sink -- has no path at
+// all and router2 aborts the entire build:
+//
+//   ERROR: Failed to route arc 0 of net '.../CAS_A',
+//   from SITEWIRE/RAMB36_X0Y29/CASCADEOUTA to SITEWIRE/RAMB36_X0Y20/CASCADEINA
+//
+// (openXC7/nextpnr-xilinx#39).  Unlike the DSP P cascade this is not a constant
+// offset -- BRAM tile rows step 5 *or* 6 in y (measured on xc7a100t: 108 hops of
+// -5, 22 of -6) -- so it cannot be expressed as the placer chain constraint
+// walk_dsp() uses.  Walk the db from the *placed* driver instead, and relocate
+// the sink to the one bel its cascade output is wired to.
+void Arch::fixupBramCascades()
+{
+    const IdString ramb36 = id("RAMB36E1_RAMB36E1");
+    struct Link
+    {
+        CellInfo *sink;
+        CellInfo *drv;
+        BelId want;
+    };
+    std::vector<Link> pending;
+    int n_legal = 0, n_moved = 0;
+
+    for (auto &cp : sorted(cells)) {
+        CellInfo *drv = cp.second;
+        // Unplaced cells are the validity-repair pass's business, and a stamped
+        // (BEL-constrained) cell is somebody else's decision.
+        const bool is_a_ramb36 = drv->type == ramb36;
+        const bool is_placed = drv->bel != BelId();
+        const bool is_stamped_or_pinned = drv->attrs.count(id("BEL")) > 0;
+        const bool is_ours_to_move = is_a_ramb36 && is_placed && !is_stamped_or_pinned;
+        if (!is_ours_to_move)
+            continue;
+        for (auto pins : {std::make_pair(id("CASCADEOUTA"), id("CASCADEINA")),
+                          std::make_pair(id("CASCADEOUTB"), id("CASCADEINB"))}) {
+            NetInfo *n = get_net_or_empty(drv, pins.first);
+            const bool drives_a_cascade_net = n != nullptr;
+            if (!drives_a_cascade_net)
+                continue;
+            BelId want = cascadePartnerBel(drv->bel, pins.first, pins.second);
+            const bool chipdb_knows_the_partner = want != BelId();
+            for (auto &u : n->users) {
+                CellInfo *sink = u.cell;
+                const bool is_the_cascade_sink = sink != drv && sink->type == ramb36 && u.port == pins.second;
+                if (!is_the_cascade_sink)
+                    continue;
+                if (!chipdb_knows_the_partner) {
+                    log_warning("BRAM cascade: no CASCADEIN bel reachable from %s/%s; '%s' left in place\n",
+                                getBelName(drv->bel).c_str(this), pins.first.c_str(this), sink->name.c_str(this));
+                    continue;
+                }
+                const bool sink_is_already_adjacent = sink->bel == want;
+                const bool sink_is_pinned = sink->attrs.count(id("BEL")) > 0 || sink->belStrength > STRENGTH_STRONG;
+                if (sink_is_already_adjacent)
+                    ++n_legal;
+                else if (sink_is_pinned)
+                    log_warning("BRAM cascade: '%s' is pinned to %s but '%s' cascades into %s; cannot move it\n",
+                                sink->name.c_str(this), getBelName(sink->bel).c_str(this), drv->name.c_str(this),
+                                getBelName(want).c_str(this));
+                else
+                    pending.push_back(Link{sink, drv, want});
+            }
+        }
+    }
+
+    // The bel a sink needs can be held by another cascade member (two chains can
+    // cross), and a swap resolves that; retry whatever stays blocked until a pass
+    // makes no progress.
+    const int max_passes = 4;
+    for (int pass = 0; pass < max_passes; pass++) {
+        const bool nothing_is_blocked_anymore = pending.empty();
+        if (nothing_is_blocked_anymore)
+            break;
+        std::vector<Link> retry;
+        for (auto &l : pending) {
+            const bool sink_arrived = l.sink->bel == l.want;
+            if (sink_arrived) {
+                ++n_legal;
+                continue;
+            }
+            BelId old = l.sink->bel;
+            const bool sink_has_an_old_bel = old != BelId();
+            CellInfo *occ = getBoundBelCell(l.want);
+            const bool target_is_free = occ == nullptr;
+            const bool occupant_is_a_ramb36 = !target_is_free && occ->type == ramb36;
+            const bool occupant_is_pinned =
+                    !target_is_free && (occ->attrs.count(id("BEL")) > 0 || occ->belStrength > STRENGTH_STRONG);
+            const bool occupant_is_in_a_cluster =
+                    !target_is_free && (occ->constr_parent != nullptr || !occ->constr_children.empty());
+            const bool occupant_can_be_swapped =
+                    occupant_is_a_ramb36 && !occupant_is_pinned && !occupant_is_in_a_cluster;
+            const bool the_occupant_can_take_the_sinks_old_bel = sink_has_an_old_bel && occupant_can_be_swapped;
+            if (target_is_free) {
+                if (sink_has_an_old_bel)
+                    unbindBel(old);
+                bindBel(l.want, l.sink, STRENGTH_STRONG);
+                const bool moved_to_a_legal_bel = isBelLocationValid(l.want);
+                if (moved_to_a_legal_bel) {
+                    ++n_moved;
+                    continue;
+                }
+                unbindBel(l.want);
+                if (sink_has_an_old_bel)
+                    bindBel(old, l.sink, STRENGTH_STRONG);
+                retry.push_back(l);
+            } else if (the_occupant_can_take_the_sinks_old_bel) {
+                unbindBel(old);
+                unbindBel(l.want);
+                bindBel(l.want, l.sink, STRENGTH_STRONG);
+                bindBel(old, occ, STRENGTH_STRONG);
+                const bool swap_left_both_legal = isBelLocationValid(l.want) && isBelLocationValid(old);
+                if (swap_left_both_legal) {
+                    ++n_moved;
+                    continue;
+                }
+                unbindBel(l.want);
+                unbindBel(old);
+                bindBel(old, l.sink, STRENGTH_STRONG);
+                bindBel(l.want, occ, STRENGTH_STRONG);
+                retry.push_back(l);
+            } else {
+                retry.push_back(l);
+            }
+        }
+        const bool this_pass_relocated_something = retry.size() != pending.size();
+        if (!this_pass_relocated_something)
+            break;
+        pending.swap(retry);
+    }
+    const bool some_links_stayed_unresolved = !pending.empty();
+    if (some_links_stayed_unresolved) {
+        Link &l = pending.front();
+        log_error("BRAM cascade: '%s' has to sit on bel %s (the only CASCADEIN the chipdb reaches from %s) "
+                  "but that bel is occupied; cannot build\n",
+                  l.sink->name.c_str(this), getBelName(l.want).c_str(this), getBelName(l.drv->bel).c_str(this));
+    }
+    const bool anything_worth_reporting = n_moved > 0 || n_legal > 0;
+    if (anything_worth_reporting)
+        log_info("    BRAM cascade: %d link(s) already legal, %d relocated\n", n_legal, n_moved);
 }
 
 void Arch::fixupRouting()

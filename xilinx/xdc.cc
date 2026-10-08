@@ -29,6 +29,7 @@ void Arch::parseXdc(std::istream &in)
     std::string line;
     std::string linebuf;
     int lineno = 0;
+    int missing_targets = 0;
 
     auto isempty = [](const std::string &str) {
         return std::all_of(str.begin(), str.end(), [](char c) { return std::isspace(c); });
@@ -86,6 +87,18 @@ void Arch::parseXdc(std::istream &in)
         }), s.end());
         return s;
     };
+    // Vivado calls a one-bit vector port "a[0]", but the JSON frontend collapses a
+    // width-1, offset-0 vector to the bare name "a" (get_bit_name(),
+    // frontend/frontend_base.h:367) because yosys' JSON carries nothing that tells
+    // `wire [0:0] a` apart from `wire a`. An XDC written against Vivado names
+    // therefore misses such a port, the constraint is dropped, and the design dies
+    // later with "port a of type PAD has no IOSTANDARD property" -- a message that
+    // points nowhere near the cause.  Strip a trailing "[0]" so the lookup can retry.
+    auto debus_zero = [](const std::string &str) {
+        if (str.size() > 3 && str.compare(str.size() - 3, 3, "[0]") == 0)
+            return str.substr(0, str.size() - 3);
+        return std::string();
+    };
     auto get_cells = [&](std::string str) {
         std::vector<CellInfo *> tgt_cells;
         if (str.empty() || str.front() != '[')
@@ -100,8 +113,23 @@ void Arch::parseXdc(std::istream &in)
         if (split.size() < 2)
             log_error("failed to parse target (on line %d)\n", lineno);
         IdString cellname = id(strip_quotes(split_name));
+        if (!cells.count(cellname)) {
+            std::string base = debus_zero(strip_quotes(split_name));
+            if (!base.empty() && cells.count(id(base)))
+                cellname = id(base);
+        }
         if (cells.count(cellname))
             tgt_cells.push_back(cells.at(cellname).get());
+        else {
+            // A board-level XDC legitimately constrains every pin of the
+            // board while a design uses a subset (the standard apio/PCF
+            // practice), so these are not reportable events: stay silent
+            // like the ice40 flow does, and itemise only in verbose mode.
+            missing_targets++;
+            if (getCtx()->verbose)
+                log_info("%s: no cell named '%s' (on line %d) - this target is ignored\n", split.front().c_str(),
+                         cellname.c_str(this), lineno);
+        }
         return tgt_cells;
     };
 
@@ -120,8 +148,19 @@ void Arch::parseXdc(std::istream &in)
             log_error("failed to parse target (on line %d)\n", lineno);
         IdString netname = id(strip_quotes(split_name));
         NetInfo *maybe_net = getNetByAlias(netname);
+        if (maybe_net == nullptr) {
+            std::string base = debus_zero(strip_quotes(split_name));
+            if (!base.empty())
+                maybe_net = getNetByAlias(id(base));
+        }
         if (maybe_net != nullptr)
             tgt_nets.push_back(maybe_net);
+        else {
+            missing_targets++;
+            if (getCtx()->verbose)
+                log_info("%s: no net or port named '%s' (on line %d) - this target is ignored\n",
+                         split.front().c_str(), netname.c_str(this), lineno);
+        }
         return tgt_nets;
     };
 
@@ -219,12 +258,68 @@ void Arch::parseXdc(std::istream &in)
                 n->clkconstr->high.delay = n->clkconstr->period.delay / 2;
                 n->clkconstr->low.delay = n->clkconstr->period.delay / 2;
             }
+        } else if (cmd == "set_multicycle_path") {
+            // set_multicycle_path <N> [-setup|-hold] -from [<sel>] -to [<sel>]
+            // Tags the destination (capture) cells with a multicycle factor so the
+            // timing engine can relax the setup requirement on those endpoints.
+            // Previously this command was silently ignored. Supports a NAME glob in the
+            // -to selector, e.g. -to [get_cells -hier -filter {NAME =~ *rf_reg*}]
+            auto glob_match = [](const std::string &name, const std::string &pat) {
+                // simple '*' wildcard match
+                size_t n = 0, p = 0, star = std::string::npos, mark = 0;
+                while (n < name.size()) {
+                    if (p < pat.size() && (pat[p] == name[n] || pat[p] == '?')) { ++n; ++p; }
+                    else if (p < pat.size() && pat[p] == '*') { star = p++; mark = n; }
+                    else if (star != std::string::npos) { p = star + 1; n = ++mark; }
+                    else return false;
+                }
+                while (p < pat.size() && pat[p] == '*') ++p;
+                return p == pat.size();
+            };
+            // group_brackets=true keeps a whole "[get_cells ... {NAME =~ *pat*}]" as ONE argument.
+            int mcp = 1; bool is_hold = false;
+            std::string to_sel;
+            for (int c = 1; c < int(arguments.size()); c++) {
+                const std::string &a = arguments.at(c);
+                if (a == "-hold") is_hold = true;
+                else if (a == "-to" && c + 1 < int(arguments.size())) to_sel = arguments.at(c + 1);
+                else if (!a.empty() && std::all_of(a.begin(), a.end(), ::isdigit)) mcp = std::stoi(a);
+            }
+            // extract the NAME glob from the -to selector (substring after "=~")
+            std::string to_pat;
+            size_t eq = to_sel.find("=~");
+            if (eq != std::string::npos) to_pat = to_sel.substr(eq + 2);
+            // trim whitespace and any leftover braces/brackets around the pattern
+            auto clean = [](std::string s) {
+                std::string o;
+                for (char ch : s) if (ch != '{' && ch != '}' && ch != ']' && ch != '[' && !std::isspace(ch)) o += ch;
+                return o;
+            };
+            to_pat = clean(to_pat);
+            if (!is_hold && !to_pat.empty()) {
+                int tagged = 0;
+                for (auto &kv : cells) {
+                    std::string cn = kv.first.str(this);
+                    if (glob_match(cn, to_pat)) {
+                        kv.second->attrs[id("NEXTPNR_MCP_SETUP")] = std::to_string(mcp);
+                        ++tagged;
+                    }
+                }
+                log_info("set_multicycle_path: setup multicycle %d tagged on %d cells matching '%s' (on line %d)\n",
+                         mcp, tagged, to_pat.c_str(), lineno);
+            } else {
+                log_info("set_multicycle_path: parsed (hold or no -to glob) — no setup tag (on line %d)\n", lineno);
+            }
         } else {
             log_info("ignoring unsupported XDC command '%s' (on line %d)\n", cmd.c_str(), lineno);
         }
     }
     if (!isempty(linebuf))
         log_error("unexpected end of XDC file\n");
+    if (missing_targets > 0 && getCtx()->verbose)
+        log_info("%d XDC constraint target(s) reference ports or nets that are not in this design and were "
+                 "ignored (a board-level XDC normally constrains more pins than a design uses)\n",
+                 missing_targets);
 }
 
 NEXTPNR_NAMESPACE_END

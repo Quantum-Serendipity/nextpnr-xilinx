@@ -121,6 +121,8 @@ po::options_description CommandHandler::getGeneralOptions()
     general.add_options()("post-route", po::value<std::vector<std::string>>(), "python file to run after routing");
 
 #endif
+    general.add_options()("report", po::value<std::string>(),
+                          "write timing and utilization report in JSON format");
     general.add_options()("json", po::value<std::string>(), "JSON design file to ingest");
     general.add_options()("write", po::value<std::string>(), "JSON design file to write");
     general.add_options()("seed", po::value<int>(), "seed value for random number generator");
@@ -165,8 +167,13 @@ po::options_description CommandHandler::getGeneralOptions()
 
 void CommandHandler::setupContext(Context *ctx)
 {
-    if (ctx->settings.find(ctx->id("seed")) != ctx->settings.end())
+    if (ctx->settings.find(ctx->id("seed")) != ctx->settings.end()) {
         ctx->rngstate = ctx->setting<uint64_t>("seed");
+        // settings["seed"] is overwritten with the derived rngstate at the
+        // end of this function, so record the restored value while it is
+        // still the seed and not the state.
+        ctx->settings[ctx->id("seed.arg")] = ctx->rngstate;
+    }
 
     if (vm.count("verbose")) {
         ctx->verbose = true;
@@ -183,6 +190,7 @@ void CommandHandler::setupContext(Context *ctx)
 
     if (vm.count("seed")) {
         ctx->rngseed(vm["seed"].as<int>());
+        ctx->settings[ctx->id("seed.arg")] = vm["seed"].as<int>();
     }
 
     if (vm.count("randomize-seed")) {
@@ -192,6 +200,7 @@ void CommandHandler::setupContext(Context *ctx)
             r = rand();
         } while (r == 0);
         ctx->rngseed(r);
+        ctx->settings[ctx->id("seed.arg")] = r;
     }
 
     if (vm.count("slack_redist_iter")) {
@@ -353,6 +362,15 @@ int CommandHandler::executeMain(std::unique_ptr<Context> ctx)
         }
 
         customBitstream(ctx.get());
+    }
+
+    if (vm.count("report")) {
+        std::string filename = vm["report"].as<std::string>();
+        std::ofstream f(filename);
+        if (!f)
+            log_error("Failed to open report file %s for writing.\n", filename.c_str());
+        f << ctx->reportJson();
+        log_info("Report written to %s.\n", filename.c_str());
     }
 
     if (vm.count("write")) {

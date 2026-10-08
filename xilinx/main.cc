@@ -56,6 +56,10 @@ po::options_description UspCommandHandler::getArchOptions()
                            "after routing, dump fabric routing in --fixed-routes format");
     specific.add_options()("region-only",
                            "restrict --fasm and --write-fixed-routes output to the NEXTPNR_PARTITION_ROI rectangle");
+    specific.add_options()("allow-const-holdouts",
+                           "only warn when a constant (GND/VCC) sink cannot be driven; the pin's silicon "
+                           "value is then undefined (default: error).  Does not cover a constant driver "
+                           "LUT whose net the router itself fails to route");
 
     return specific;
 }
@@ -133,6 +137,9 @@ void UspCommandHandler::customAfterLoad(Context *ctx)
     // asserting "a bad rectangle is rejected" would pass for the wrong reason.
     // The mechanism must fail at configuration time, not at first use.
     (void)ctx->roi_active();
+    const bool allow_const_holdouts_given = vm.count("allow-const-holdouts") != 0;
+    if (allow_const_holdouts_given)
+        ctx->allow_const_holdouts = true;
 }
 
 int main(int argc, char *argv[])

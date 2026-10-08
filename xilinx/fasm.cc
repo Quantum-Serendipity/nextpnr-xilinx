@@ -24,6 +24,7 @@
 #include <fstream>
 #include "log.h"
 #include "nextpnr.h"
+#include "version.h"
 #include "pins.h"
 #include "util.h"
 
@@ -235,7 +236,13 @@ struct FasmBackend
                                      // without it the routethru never propagates
                                      "IDELAY_Y" + i + ".IDELAY_TYPE_FIXED",
                                      "ILOGIC_Y" + i + ".IDELMUXE3.P1",
-                                     "ILOGIC_Y" + i + ".IFF.SRTYPE.ASYNC",
+                                     // IFF.SRTYPE deliberately NOT asserted here: this is
+                                     // the COMBINATORIAL pass-through, and the IFF's set/reset
+                                     // type is no part of it.  SRTYPE.ASYNC is an all-negated
+                                     // feature (!29_67), so asserting it sets nothing but does
+                                     // actively CLEAR the bit -- which collides with an IDDR on
+                                     // the same ILOGIC site emitting IFF.SRTYPE.SYNC, and
+                                     // fasm2frames then refuses the design outright.
                                      "ILOGIC_Y" + i + ".ISERDES.MODE.MASTER",
                                      "ILOGIC_Y" + i + ".ISERDES.NUM_CE.N1",
                                      "ILOGIC_Y" + i + ".ZINV_D"
@@ -284,7 +291,8 @@ struct FasmBackend
                                 // input): IDELMUXE3.P1 = direct D path
                                 "IDELAY_Y" + i + ".IDELAY_TYPE_FIXED",
                                 "ILOGIC_Y" + i + ".IDELMUXE3.P1",
-                                "ILOGIC_Y" + i + ".IFF.SRTYPE.ASYNC",
+                                // see the LIOI3 block above: IFF.SRTYPE is not part of a
+                                // combinatorial pass-through and collides with an IDDR here
                                 "ILOGIC_Y" + i + ".ISERDES.MODE.MASTER",
                                 "ILOGIC_Y" + i + ".ISERDES.NUM_CE.N1",
                                 "ILOGIC_Y" + i + ".ZINV_D"
@@ -367,11 +375,26 @@ struct FasmBackend
                     std::string ii = std::to_string(i);
                     std::string hck = s2 + ii;
                     std::string buf = std::string((s2 == "R") ? "X1Y" : "X0Y") + ii;
+                    std::string dst_wire, src_wire;
+                    bufhcePassthroughWireNames(hck, dst_wire, src_wire);
                     pp_config[{ ctx->id("CLK_HROW_" + s1 + "_R"),
-                                ctx->id("CLK_HROW_CK_HCLK_OUT_" + hck), ctx->id("CLK_HROW_CK_MUX_OUT_" + hck) }] = {
+                                ctx->id(dst_wire), ctx->id(src_wire) }] = {
                                     "BUFHCE.BUFHCE_" + buf + ".IN_USE",
-                                    "BUFHCE.BUFHCE_" + buf + ".ZINV_CE"
-                                };
+                                    // ZINV_CE IS set here (uninverted CE): Arch::routeBufhcePassthroughCE()
+                                    // ties this BUFHCE's CE to VCC, explicitly binding the same real,
+                                    // bitless net path the device's own default (INT tile IMUX inputs
+                                    // default to VCC_WIRE) already implied -- matching Vivado's own
+                                    // reference for this resource (IN_USE + ZINV_CE set, CE=1 uninverted,
+                                    // zero interconnect bits spent) bit for bit (nextpnr-xilinx#177, #187).
+                                    "BUFHCE.BUFHCE_" + buf + ".ZINV_CE",
+                                    // CE_TYPE.ASYNC and INIT_OUT deliberately NOT set here: a hardware
+                                    // A/B campaign against five real Vivado golden references for this
+                                    // exact pass-through resource (MMCM->BUFG/BUFH/BUFHCE, nextpnr-xilinx
+                                    // #177) found Vivado never sets either bit -- not even when the source
+                                    // netlist explicitly carries CE_TYPE("SYNC")/INIT_OUT(0) params -- so
+                                    // emitting them here doesn't match Vivado's actual behavior for a
+                                    // route-thru pass-through.
+                                    };
                 }
             }
 
@@ -707,6 +730,45 @@ struct FasmBackend
                 lbound = (i == 1) ? 0 : 32;
                 ubound = (i == 1) ? 32 : 64;
             }
+            std::string orig_type = str_or_default(lut->attrs, ctx->id("X_ORIG_TYPE"), "");
+            if (orig_type == "SRL16E" || orig_type == "SRLC32E") {
+                // pack_srls() keeps the shift register's own (16- or 32-bit)
+                // INIT on the SLICE_LUTX cell it creates, but this cell has
+                // no logical LUT inputs to map through X_ORIG_PORT_* -- the
+                // phys_to_log walk below would leave every bit zero. Each
+                // SRL INIT bit k is stored in the LUT INIT at both bit 2k
+                // and 2k+1 (nextpnr-xilinx#181).
+                //
+                // For SRL16E specifically, pack.cc's pack_srls() ties A6
+                // (LUT address bit 5) to VCC when the cell is in the 6LUT
+                // position (i==0) -- so only addresses [32:64) are ever
+                // physically read, regardless of whether the sibling 5LUT
+                // half happens to also be populated. The lbound/ubound
+                // computed above only narrows to that when lut5 AND lut6
+                // are BOTH non-null, which is a different (fracturing)
+                // condition -- when the 5LUT half is genuinely unused
+                // (lut5 == nullptr, the common case), lbound/ubound stay at
+                // the full, un-narrowed [0:64) range, and the real bits get
+                // written to the address half A6 ties off (unreachable),
+                // leaving the actually-read half all zero. Confirmed on
+                // real hardware: without this override the SRL16E half of
+                // this fix reads back as 0 regardless of its INIT; with it,
+                // it reads correctly. SRLC32E never hits this: it only ties
+                // A1, using the full 64-bit space directly regardless of
+                // position, so it needs no override here.
+                if (orig_type == "SRL16E") {
+                    lbound = (i == 1) ? 0 : 32;
+                    ubound = (i == 1) ? 32 : 64;
+                }
+                int width = (ubound - lbound) / 2;
+                Property srl_init = get_or_default(lut->params, ctx->id("INIT"), Property()).extract(0, width);
+                for (int k = 0; k < width; k++) {
+                    bool bit = (srl_init.str.at(k) == Property::S1);
+                    bits[lbound + 2 * k] = bit;
+                    bits[lbound + 2 * k + 1] = bit;
+                }
+                continue;
+            }
             Property init = get_or_default(lut->params, ctx->id("INIT"), Property()).extract(0, 64);
             for (int j = lbound; j < ubound; j++) {
                 int log_index = 0;
@@ -852,7 +914,19 @@ struct FasmBackend
                 // (PCS/PMA gmii_rst_sync, GT TX startup) at configuration.
                 int def_init = (type == "FDSE" || type == "FDSE_1" ||
                                 type == "FDPE" || type == "FDPE_1") ? 1 : 0;
-                zinit = (int_or_default(ff->params, ctx->id("INIT"), def_init) != 1);
+                // int_or_default only falls back to def_init when INIT is
+                // absent -- but a yosys/async2sync-built netlist (as
+                // opposed to a Vivado-authored one) commonly leaves INIT
+                // *present* with an undefined ('x') value instead of
+                // omitting it, which int_or_default resolves to 0 via
+                // Property::update_intval() (an 'x' bit contributes 0),
+                // silently reproducing the exact bug this comment already
+                // fixed for the absent-parameter case. Treat a present-but-
+                // undefined INIT the same as an absent one.
+                auto init_it = ff->params.find(ctx->id("INIT"));
+                bool init_defined = (init_it != ff->params.end()) && init_it->second.is_fully_def();
+                int init_val = init_defined ? int_or_default(ff->params, ctx->id("INIT"), def_init) : def_init;
+                zinit = (init_val != 1);
                 if (type == "FDRE") {
                     zrst = true;
                     SET_CHECK(negedge_ff, false);
@@ -930,6 +1004,37 @@ struct FasmBackend
 
                 found_ff = true;
             }
+        }
+        // A LUT-RAM shares the half-slice clock inverter with the FFs: on 7-series the
+        // CLKINV/NOCLKINV bit inverts the clock for every clocked element of the slice, so a
+        // distributed RAM whose write clock is inverted (the RAM*X1S_1 Unisim variants, or
+        // IS_WCLK_INVERTED on an imported netlist) is expressed by that same bit.  The packer
+        // carries the parameter this far; ignoring it here produced a FASM byte-identical to
+        // the non-inverted design, i.e. a wrong clock edge with a clean exit status.
+        bool found_mem = false, mem_clkinv = false;
+        for (int i = 0; i < 4; i++) {
+            for (int k = 0; k < 2; k++) {
+                CellInfo *lut = lts->cells[(half << 6) | (i << 4) | (k ? BEL_5LUT : BEL_6LUT)];
+                if (lut == nullptr || !lut->lutInfo.is_memory)
+                    continue;
+                const bool lut_clkinv = bool_or_default(lut->params, ctx->id("IS_WCLK_INVERTED"), false);
+                const bool mem_disagrees = found_mem && (lut_clkinv != mem_clkinv);
+                if (mem_disagrees)
+                    log_error("FASM: LUT-RAM '%s' (type %s) at bel %s disagrees with its half-slice on "
+                              "'IS_WCLK_INVERTED' (tile %s) -- control-set contention in the placement\n",
+                              lut->name.c_str(ctx), lut->type.c_str(ctx), ctx->getBelName(lut->bel).c_str(ctx),
+                              tname.c_str());
+                mem_clkinv = lut_clkinv;
+                found_mem = true;
+            }
+        }
+        if (found_mem) {
+            const bool mem_and_ff_disagree = found_ff && (mem_clkinv != is_clkinv);
+            if (mem_and_ff_disagree)
+                log_error("FASM: LUT-RAM in tile %s needs clock inversion %d, but the flipflops in the same "
+                          "half-slice need %d -- control-set contention in the placement\n",
+                          tname.c_str(), int(mem_clkinv), int(is_clkinv));
+            is_clkinv = mem_clkinv;
         }
         write_bit("LATCH", is_latch);
         write_bit("FFSYNC", is_sync);
@@ -1295,11 +1400,18 @@ struct FasmBackend
                     write_bit("LVCMOS15_SSTL15.DRIVE.I16_I_FIXED");
                 else if (iostandard == "LVCMOS18" && (drive == 12 || drive == 8))
                     write_bit("LVCMOS18.DRIVE.I12_I8");
-                else if ((iostandard == "LVCMOS33" && drive == 16) ||
-                         (iostandard == "LVTTL"    && drive == 16))
+                // prjxray-db names both patterns as covering DRIVE=12
+                // (I12_I8 and I12_I16), which cannot both be right.  The tie is
+                // broken by the four Vivado-built references in
+                // prjxray-db/artix7/harness/{arty-a7/{swbut,uart,pmod},basys3/swbut}:
+                // across all 35 LVCMOS33 output pads at Vivado's default drive
+                // the pattern is I12_I16, and I12_I8 does not occur once.  So 12
+                // belongs with 16 here, and I12_I8 is left to its other member, 8.
+                else if ((iostandard == "LVCMOS33" && (drive == 16 || drive == 12)) ||
+                         (iostandard == "LVTTL"    && (drive == 16 || drive == 12)))
                     write_bit("LVCMOS33_LVTTL.DRIVE.I12_I16");
-                else if ((iostandard == "LVCMOS33" && (drive == 8 || drive == 12)) ||
-                         (iostandard == "LVTTL"    && (drive == 8 || drive == 12)))
+                else if ((iostandard == "LVCMOS33" && drive == 8) ||
+                         (iostandard == "LVTTL"    && drive == 8))
                     write_bit("LVCMOS33_LVTTL.DRIVE.I12_I8");
                 else if ((iostandard == "LVCMOS33" && drive == 4) ||
                          (iostandard == "LVTTL"    && drive == 4))
@@ -1374,11 +1486,17 @@ struct FasmBackend
             // prjxray's DB has no SLEW.SLOW key for diff sites; emitting
             // it triggers FasmLookupError on round-trip.  Also skip if
             // is_output already covered the emit upstream.
-            if (!is_output && !is_diff && slew == "SLOW"
+            // The is_hp_bank guard is what the comment above always claimed but
+            // the condition did not check.  Measured against the Vivado-built
+            // reference in prjxray-db/artix7/harness/arty-a7/swbut/design.bit
+            // (xc7a35t, HR bank, LVCMOS33, PACKAGE_PIN + IOSTANDARD only):
+            // Vivado sets SLEW.SLOW on the 8 output pads and on none of the 9
+            // input pads, while we were setting it on all 17.  SLEW is an
+            // output-driver property; an input-only pad has no driver to slew.
+            if (!is_output && !is_diff && is_hp_bank && slew == "SLOW"
                 && iostandard != "LVDS_25" && iostandard != "TMDS_33") {
                 write_bit("LVCMOS12_LVCMOS15_LVCMOS18_LVCMOS25_LVCMOS33_LVTTL_SSTL135_SSTL15.SLEW.SLOW");
-                if (is_hp_bank)
-                    write_bit("LVCMOS12_LVCMOS15_LVCMOS18.SLEW.SLOW");
+                write_bit("LVCMOS12_LVCMOS15_LVCMOS18.SLEW.SLOW");
             }
             // HP-bank IBUF glue — fires per active input site (parallel to
             // OBUF_HP_BANK_GLUE).  For differential inputs Vivado uses a
@@ -1415,7 +1533,12 @@ struct FasmBackend
                     if (yLoc == 0)
                         write_bit(is_riob18 ? "IBUFDS_BANK_GLUE" : "IBUF_HP_BANK_GLUE");
                 } else if (!is_lefthp_se_in) {
-                    write_bit("IBUF_HP_BANK_GLUE");
+                    // The kintex7 RIOB18 db only carries IBUF_HP_BANK_GLUE on the
+                    // slave site (Y1); a single-ended input on the master site
+                    // (Y0) has no key in the fuzzed db, so emitting it trips
+                    // FasmLookupError (genesys2 ULPI clock on RIOB18_X95Y23).
+                    if (!(is_riob18 && yLoc == 0))
+                        write_bit("IBUF_HP_BANK_GLUE");
                 }
             }
             // Additional low-volt LVCMOS input bit on HP banks (not for a left-HP
@@ -1426,8 +1549,12 @@ struct FasmBackend
             // HP-bank IN_ONLY input-only variant (parallel to the wider one
             // emitted in the is_riob18 branch below).  Vivado emits both
             // for HP-bank input-only sites; the left-HP LVCMOS18 group includes
-            // LVCMOS18.
-            if (is_hp_bank && !is_output && !is_diff) {
+            // LVCMOS18.  Skip when the partner site drives an output: the
+            // IN_ONLY bits are complement encodings of the column
+            // IOB_COL_BANK_ACTIVE field, so emitting them next to the
+            // partner's active output makes fasm2frames refuse the
+            // clear-after-set conflict.
+            if (is_hp_bank && !is_output && !is_diff && !partner_is_output(pad)) {
                 if (is_lefthp_se_in && iostandard == "LVCMOS18")
                     write_bit("LVCMOS12_LVCMOS15_LVCMOS18_SSTL12_SSTL135_SSTL15.IN_ONLY");
                 else
@@ -1495,7 +1622,12 @@ struct FasmBackend
                         write_bit("ZIBUF_LOW_PWR");
                         fasm_ctx.back() = saved;
                     }
-                    write_bit("LVCMOS12_LVCMOS15_LVCMOS18.SLEW.SLOW");
+                    // Pure diff inputs only: a bidirectional IOBUFDS (DDR DQS)
+                    // drives the output SLEW field (e.g. SSTL15.SLEW.FAST), and
+                    // this input-side SLOW bit shares its prjxray bits ->
+                    // FasmInconsistentBits.
+                    if (!is_output)
+                        write_bit("LVCMOS12_LVCMOS15_LVCMOS18.SLEW.SLOW");
                 } else if (is_hp_bank) {
                     // LEFT HP bank (LIOB18): an LVDS input on a High-Performance bank
                     // uses the SSTL differential-input group (Y0 only), NOT the
@@ -1516,8 +1648,12 @@ struct FasmBackend
                     write_bit("IN_TERM." + pad->attrs.at(ctx->id("IN_TERM")).as_string());
             }
 
-            // IN_ONLY
-            if (!is_output) {
+            // IN_ONLY.  Same partner-output gate as above, HP banks only:
+            // the HP IN_ONLY bits are the complement of the column
+            // IOB_COL_BANK_ACTIVE field (mixed output+input columns
+            // otherwise trip FasmInconsistentBits); the HR-bank (IOB33)
+            // IN_ONLY encodes independently and must stay.
+            if (!is_output && (!partner_is_output(pad) || !is_hp_bank)) {
                 if (is_riob18) {
                     if (is_diff && (yLoc == 0)) {
                         // golden: master half of a diff input gets BOTH
@@ -1612,8 +1748,18 @@ struct FasmBackend
         // fasm2frames refuses the conflict.  Vivado's bitgen handles the
         // overlap natively but the FASM round-trip can't.  Keep the SLEW
         // dups (no conflict), skip the PULLDOWN cross-site.  Skip on SING
-        // tiles (only one site) and diff pairs (both halves are active).
-        if (is_hp_bank && !is_sing && !is_diff && slew == "SLOW"
+        // tiles (only one site), on diff pairs (both halves are active),
+        // and when the partner site is itself occupied: the defaults then
+        // collide with the partner's own SLEW bits (FasmInconsistentBits —
+        // e.g. an SSTL15 FAST output on IOB_Y1 next to an SSTL15 SLOW
+        // output on IOB_Y0).
+        bool partner_active = false;
+        if (pads_map_built_) {
+            auto it = pads_by_tile_.find(pad->bel.tile);
+            if (it != pads_by_tile_.end() && it->second[1 - ioLoc.y] != nullptr)
+                partner_active = true;
+        }
+        if (is_hp_bank && !is_sing && !is_diff && !partner_active && slew == "SLOW"
             && iostandard != "LVDS_25" && iostandard != "TMDS_33") {
             std::string other = "IOB_Y" + std::to_string(ioLoc.y) + ".";
             write_bit(other + "LVCMOS12_LVCMOS15_LVCMOS18_LVCMOS25_LVCMOS33_LVTTL_SSTL135_SSTL15.SLEW.SLOW");
@@ -1652,28 +1798,66 @@ struct FasmBackend
             else
                 write_bit("IDELMUXE3.P1");
 
-            // clock edge
+            // Clock edge.  DDR_CLK_EDGE is a three-valued parameter encoded in two bits
+            // (26_99 / 27_98 for LIOI3.ILOGIC_Y0), and the third value is the state where
+            // BOTH bits are clear:
+            //
+            //     OPPOSITE_EDGE         !26_99   27_98
+            //     SAME_EDGE              26_99  !27_98
+            //     SAME_EDGE_PIPELINED   !26_99  !27_98
+            //
+            // So SAME_EDGE_PIPELINED is expressed by writing NEITHER of the other two --
+            // there is no third feature to write, and adding one (e.g. IFF.PIPELINED) only
+            // produces a FasmLookupError, because no such key exists in any database.
+            //
+            // Our copy of prjxray-db has only the first two rows. That is not because the
+            // silicon lacks the mode but because of an omission in the fuzzer: prjxray
+            // sweeps all three values (fuzzers/035-iob-ilogic/top.py:285,
+            // fuzzers/035b-iob-iserdes/generate.py:217 emits the
+            // IFF.DDR_CLK_EDGE.SAME_EDGE_PIPELINED tag), yet
+            // fuzzers/035-iob-ilogic/tag_groups.txt lists only OPPOSITE_EDGE and
+            // SAME_EDGE in the group.  An all-bits-clear member of a group that is
+            // declared with one value missing cannot be resolved, so the row never lands
+            // in segbits.  The third row is present in the freshmakerzhao/prjxray-db fork
+            // (branch dev, artix7/segbits_lioi3.db) and agrees with the table above.
+            //
+            // Emitting nothing is safe against our own database too: no other feature on
+            // the IDDR path touches 26_99, and the ISERDES modes that set 27_98 do not
+            // apply to a plain IDDR.
             std::string edge = str_or_default(ci->params, ctx->id("DDR_CLK_EDGE"), "OPPOSITE_EDGE");
-            if (edge == "SAME_EDGE")          write_bit("IFF.DDR_CLK_EDGE.SAME_EDGE");
-            else if (edge == "OPPOSITE_EDGE") write_bit("IFF.DDR_CLK_EDGE.OPPOSITE_EDGE");
-            else log_error("unsupported clock edge parameter for cell '%s' at %s: %s. Supported are: SAME_EDGE and OPPOSITE_EDGE",
+            if (edge == "SAME_EDGE")               write_bit("IFF.DDR_CLK_EDGE.SAME_EDGE");
+            else if (edge == "OPPOSITE_EDGE")      write_bit("IFF.DDR_CLK_EDGE.OPPOSITE_EDGE");
+            else if (edge == "SAME_EDGE_PIPELINED") { /* both bits clear: write nothing */ }
+            else log_error("unsupported clock edge parameter for cell '%s' at %s: %s. Supported are: "
+                           "SAME_EDGE, OPPOSITE_EDGE and SAME_EDGE_PIPELINED",
                             ci->name.c_str(ctx), site.c_str(), edge.c_str());
 
             std::string srtype = str_or_default(ci->params, ctx->id("SRTYPE"), "SYNC");
             if (srtype == "SYNC") write_bit("IFF.SRTYPE.SYNC"); else write_bit("IFF.SRTYPE.ASYNC");
 
             write_bit("IFF.ZINV_C", !bool_or_default(ci->params, ctx->id("IS_CLK_INVERTED"), false));
+            // NB (issue #114): the ISERDESE2 path below also writes IFF.ZINV_OCLK
+            // and IFFDELMUXE3, which this branch omits. Adding IFF.ZINV_OCLK here
+            // was tested on silicon and changed NOTHING -- the captured bytes were
+            // bit-identical with and without it (Q1 stuck 0, Q2 stuck 1 either way),
+            // so the missing OCLK bit is ruled out as the cause. Left unwritten.
             write_bit("ZINV_D", !bool_or_default(ci->params, ctx->id("IS_D_INVERTED"), false));
 
-            auto init = int_or_default(ci->params, ctx->id("INIT_Q1"), 0);
-            if (init == 0) write_bit("IFF.ZINIT_Q1");
-            init = int_or_default(ci->params, ctx->id("INIT_Q2"), 0);
-            if (init == 0) write_bit("IFF.ZINIT_Q2");
+            // The IFF is physically a four-flop block shared with ISERDESE2, and the
+            // ISERDESE2 path below initialises all four. An IDDR only exposes Q1/Q2, so
+            // Q3/Q4 were left unwritten -- and on silicon that is observable: with Q3/Q4
+            // uninitialised the outputs read Q1=0, Q2=1 despite both being programmed
+            // INIT=0; writing all four makes them read their programmed value. IDDR has
+            // no INIT_Q3/Q4 parameters, so those default to 0.
+            for (int i = 1; i <= 4; i++) {
+                auto init = int_or_default(ci->params, ctx->id("INIT_Q" + std::to_string(i)), 0);
+                if (init == 0) write_bit("IFF.ZINIT_Q" + std::to_string(i));
+            }
 
             auto sr_name = str_or_default(ci->attrs, ctx->id("X_ORIG_PORT_SR"), "R");
             if (sr_name == "R") {
-                write_bit("IFF.ZSRVAL_Q1");
-                write_bit("IFF.ZSRVAL_Q2");
+                for (int i = 1; i <= 4; i++)
+                    write_bit("IFF.ZSRVAL_Q" + std::to_string(i));
             }
         } else if (ci->type == ctx->id("OLOGICE2_OUTFF") || ci->type == ctx->id("OLOGICE3_OUTFF")) {
             // prjxray characterises ODDR.DDR_CLK_EDGE.SAME_EDGE as a lone bit
@@ -1759,6 +1943,21 @@ struct FasmBackend
 #endif
             write_bit("SRTYPE.SYNC");
             write_bit("TSRTYPE.SYNC");
+            // TRISTATE_WIDTH is a two-valued parameter whose W1 state is encoded as the
+            // absence of bits, so only W4 appears in segbits (32_90 on OLOGIC_Y0).  The
+            // fuzzer sweeps both (036-iob-ologic/generate.py:106-110) and 036-iob-ologic/
+            // top.py:71-79 picks 4 exactly when DATA_WIDTH==4 with both rates DDR.  Never
+            // writing it left every OSERDESE2 programmed as TRISTATE_WIDTH=1, silently
+            // overriding the cell's own parameter -- which defaults to 4 in the library.
+            if (int_or_default(ci->params, ctx->id("TRISTATE_WIDTH"), 4) == 4)
+                write_bit("TRISTATE_WIDTH.W4");
+            // An explicitly requested CLKDIV inversion on an OSERDESE2 was discarded:
+            // the bit is documented (OLOGIC_Y*.IS_CLKDIV_INVERTED) and was written
+            // nowhere.  It sits on the OLOGIC, not inside the OSERDES prefix.
+            pop();
+            write_bit("IS_CLKDIV_INVERTED",
+                      bool_or_default(ci->params, ctx->id("IS_CLKDIV_INVERTED"), false));
+            push("OSERDES");
             if (is_slave) write_bit("SERDES_MODE.SLAVE");
 
             pop();
@@ -1775,7 +1974,17 @@ struct FasmBackend
                           !bool_or_default(ci->params, ctx->id("SRVAL_Q" + std::to_string(i)), false));
             }
             write_bit("IFF.ZINV_C", !bool_or_default(ci->params, ctx->id("IS_CLK_INVERTED"), false));
-            write_bit("IFF.ZINV_OCLK", !bool_or_default(ci->params, ctx->id("IS_OCLK_INVERTED"), false));
+            // INV_OCLK (28_124) and ZINV_OCLK (28_64) are two DISTINCT physical bits, not
+            // one bit and its complement -- they are absent from
+            // fuzzers/035-iob-ilogic/tag_groups.txt, so dbfixup never collapsed them.
+            // The fuzzer sets them as exact complements (035-iob-ilogic/generate.py:180-184:
+            // INV_OCLK = IS_OCLK_INVERTED, ZINV_OCLK = !IS_OCLK_INVERTED), so exactly one
+            // of the two must always be set.  Writing only the Z half meant that
+            // IS_OCLK_INVERTED=TRUE emitted NEITHER bit, leaving the OCLK inverter in an
+            // unprogrammed state that corresponds to no value of the parameter.
+            bool oclk_inv = bool_or_default(ci->params, ctx->id("IS_OCLK_INVERTED"), false);
+            write_bit("IFF.INV_OCLK", oclk_inv);
+            write_bit("IFF.ZINV_OCLK", !oclk_inv);
 
             std::string iobdelay = str_or_default(ci->params, ctx->id("IOBDELAY"), "NONE");
             write_bit("IFFDELMUXE3.P0", (iobdelay == "IFD"));
@@ -2016,7 +2225,14 @@ struct FasmBackend
                 if (prog_usr != "TRUE" && prog_usr != "FALSE")
                     log_error("Invalid PROG_USR attribute in STARTUPE2 of '%s\n'. Allowed values are: TRUE, FALSE.", prog_usr.c_str());
                 write_bit("STARTUP.PROG_USR", prog_usr == "TRUE");
-                write_bit("STARTUP.USRCCLKO_CONNECTED", !net_is_constant(get_net_or_empty(ci, ctx->id("USRCCLKO"))));
+                // A constant-tied USRCCLKO is now disconnected entirely by pack_cfg()
+                // (nullptr net) rather than left wired to $PACKER_GND_NET/_VCC_NET, so
+                // net_is_constant(nullptr) -- which returns false -- can no longer be
+                // used to detect "not really connected" here. Treat "no net at all"
+                // the same as "constant": only a genuine dynamic net counts as connected.
+                NetInfo *usrcclko_net = get_net_or_empty(ci, ctx->id("USRCCLKO"));
+                bool usrcclko_connected = usrcclko_net != nullptr && !net_is_constant(usrcclko_net);
+                write_bit("STARTUP.USRCCLKO_CONNECTED", usrcclko_connected);
             }
 
             pop();
@@ -2036,6 +2252,23 @@ struct FasmBackend
                 wires.push_back(wire);
         }
         return wires;
+    }
+
+    // A regional-buffer source name carries either BUFHCLK or BUFRCLK. Both
+    // the emit test and the suffix that goes into hclk_by_row need the same
+    // offset, so find it once and hand it back: testing with `contains` and
+    // then calling `find` again separately is how the two drifted apart, and
+    // it is why widening only the test would emit a bit whose row key is
+    // still cut at the wrong place.
+    //
+    // Returns npos when the name is neither.
+    static size_t regional_buffer_offset(const std::string &s)
+    {
+        size_t off = s.find("BUFHCLK");
+        const bool is_bufhclk = (off != std::string::npos);
+        if (is_bufhclk)
+            return off;
+        return s.find("BUFRCLK");
     }
 
     void write_clocking()
@@ -2152,9 +2385,16 @@ struct FasmBackend
                 auto used_sources = used_wires_starting_with(tile, "HCLK_CK_", true);
                 push("ENABLE_BUFFER");
                 for (auto s : used_sources) {
-                    if (boost::contains(s, "BUFHCLK")) {
+                    // BUFRCLK as well as BUFHCLK. The four
+                    // HCLK_L.ENABLE_BUFFER.HCLK_CK_BUFRCLK0..3 rows exist in
+                    // prjxray-db as of openXC7/prjxray-db#13, so emitting the
+                    // feature no longer produces a FasmLookupError -- which is
+                    // the criterion this change was held against.
+                    size_t off = regional_buffer_offset(s);
+                    const bool is_regional_buffer_source = (off != std::string::npos);
+                    if (is_regional_buffer_source) {
                         write_bit(s);
-                        hclk_by_row[tile / ctx->chip_info->width].insert(s.substr(s.find("BUFHCLK")));
+                        hclk_by_row[tile / ctx->chip_info->width].insert(s.substr(off));
                     }
                 }
                 pop();
@@ -2185,9 +2425,11 @@ struct FasmBackend
                 }
                 auto used_hclk = used_wires_starting_with(tile, "HCLK_CMT_CK_", true);
                 for (auto s : used_hclk) {
-                    if (boost::contains(s, "BUFHCLK")) {
+                    size_t off = regional_buffer_offset(s);
+                    const bool is_regional_buffer_source = (off != std::string::npos);
+                    if (is_regional_buffer_source) {
                         write_bit(s + "_USED");
-                        hclk_by_row[tile / ctx->chip_info->width].insert(s.substr(s.find("BUFHCLK")));
+                        hclk_by_row[tile / ctx->chip_info->width].insert(s.substr(off));
                     }
                 }
             }
@@ -2357,6 +2599,23 @@ struct FasmBackend
                 write_bit("ZINV_" + pn,
                           !bool_or_default(ci->params, ctx->id("IS_" + pn + "_INVERTED"), false));
             }
+            // REGCLKARDRCLK and REGCLKB are SITE pins, not RAMB18E1/RAMB36E1 cell
+            // ports, so they are absent from invertible_pins (pins.cc lists eight
+            // pins for these types and neither of those two).  The `pn ==
+            // "REGCLKARDRCLK"` / `pn == "REGCLKB"` guards above therefore never
+            // fire, and the bits were emitted nowhere at all.
+            //
+            // prjxray's fuzzer states the rule (fuzzers/025-bram-config/generate.py):
+            // with DO*_REG == 1 the output-register clock FOLLOWS the corresponding
+            // data clock, and with DO*_REG == 0 it is always inverted -- i.e. tag 0,
+            // which is the bit clear, which is what emitting nothing already gives.
+            // So only the registered case needs anything written.
+            if (bool_or_default(ci->params, ctx->id("DOA_REG"), false))
+                write_bit("ZINV_REGCLKARDRCLK",
+                          !bool_or_default(ci->params, ctx->id("IS_CLKARDCLK_INVERTED"), false));
+            if (bool_or_default(ci->params, ctx->id("DOB_REG"), false))
+                write_bit("ZINV_REGCLKB",
+                          !bool_or_default(ci->params, ctx->id("IS_CLKBWRCLK_INVERTED"), false));
             // golden per-half defaults (dcp2fasm campaign):
             if (str_or_default(ci->params, ctx->id("RDADDR_COLLISION_HWCONFIG"), "DELAYED_WRITE") == "PERFORMANCE")
                 write_bit("RDADDR_COLLISION_HWCONFIG_PERFORMANCE");
@@ -2481,7 +2740,13 @@ struct FasmBackend
         bool no_count = false, edge = false;
         std::string divide_attr = name + ((name == "CLKFBOUT") ? "_MULT" : "_DIVIDE");
         double divide = float_or_default(ci, divide_attr, 1);
-        double phase = float_or_default(ci, name + "_PHASE", 1);
+        // Xilinx's documented default for CLKOUT<n>_PHASE/CLKFBOUT_PHASE is 0.0
+        // degrees (UG472) -- defaulting to 1 here computed a spurious non-zero
+        // PHASE_MUX bit for any counter whose PHASE param the source netlist
+        // doesn't set explicitly (e.g. CLKFBOUT, when only CLKOUT0 has an
+        // explicit PHASE), found via a raw-bit diff against a real Vivado
+        // MMCM bitstream (nextpnr-xilinx#177 MMCM-lock investigation).
+        double phase = float_or_default(ci, name + "_PHASE", 0);
         if (divide <= 1) {
             no_count = true;
         } else {
@@ -2523,6 +2788,113 @@ struct FasmBackend
         }
     }
 
+    // A placed BUFR emits nothing today, and the divider is unreachable.
+    //
+    // BUFR configuration is carried by pp_config, the pseudo-pip table, keyed on
+    //
+    //     HCLK_IOI_RCLK_BEFORE_DIV<i>  ->  HCLK_IOI_RCLK_OUT<i>
+    //
+    // which is the route taken when a BUFR site is traversed as routing. When a
+    // BUFR is an actual placed cell the router enters and leaves the site, no
+    // pip is crossed, and the table never fires. Measured on a probe that
+    // instantiates a BUFR driving an ODDR: nextpnr reports "BUFR: 1/20" and the
+    // HCLK_IOI3 tile gets its eight routing pips --
+    //
+    //     HCLK_IOI3_X113Y78.HCLK_IOI_RCLK_BEFORE_DIV3.HCLK_IOI_RCLK0
+    //     HCLK_IOI3_X113Y78.HCLK_IOI_RCLK2RCLK3.HCLK_IOI_RCLK_OUT3
+    //     HCLK_IOI3_X113Y78.HCLK_IOI_BUFR3_CE.HCLK_RCLK_DIV_CE3
+    //     ...
+    //
+    // -- with no BUFR_Y*.IN_USE and no BUFR_Y*.BUFR_DIVIDE.* anywhere. The
+    // buffer is placed, wired, clocked and left unconfigured.
+    //
+    // The divider compounds it: pp_config hardcodes BUFR_DIVIDE.BYPASS, so even
+    // on the pass-through path a design asking for BUFR_DIVIDE("5") produced a
+    // bitstream bit-identical to one asking for BYPASS. prjxray-db has
+    // documented BYPASS and D1..D8 for all four slots since it was fuzzed
+    // (HCLK_IOI3.BUFR_Y0.BUFR_DIVIDE.D5 32_22 33_18 33_19 !33_20 !33_21), so
+    // the ladder was reachable in silicon and in the database, and unreachable
+    // only through this flow.
+    //
+    // Emitting from the cell rather than from the route fixes both: the
+    // configuration follows the instance, which is where the parameters are.
+    // The pp_config entries are left alone -- they cover the pass-through case,
+    // which is disjoint from this one.
+    void write_bufr(CellInfo *ci)
+    {
+        // Site name is BUFR_X0Y<y> and the feature is BUFR_Y<y>, so the site's
+        // y within the tile is the slot index. (The RCLK wire index is a
+        // different number: pp_config maps slot->wire through {2,3,0,1}.)
+        auto xy = ctx->getSiteLocInTile(ci->bel);
+
+        // Vivado's BUFR_DIVIDE is a string: "BYPASS" or "1".."8".
+        std::string divide = str_or_default(ci->params, ctx->id("BUFR_DIVIDE"), "BYPASS");
+        std::string divide_feature;
+        if (divide == "BYPASS" || divide.empty()) {
+            divide_feature = "BYPASS";
+        } else if (divide.size() == 1 && divide[0] >= '1' && divide[0] <= '8') {
+            divide_feature = std::string("D") + divide[0];
+        } else {
+            // Emitting an undocumented feature instead would fail later in
+            // fasm2frames with a FasmLookupError naming a bit, which is the
+            // same information with the cell removed.
+            log_error("BUFR '%s' has BUFR_DIVIDE=\"%s\"; supported are BYPASS and 1..8\n",
+                      ci->name.c_str(ctx), divide.c_str());
+        }
+
+        push(get_tile_name(ci->bel.tile));
+        push("BUFR_Y" + std::to_string(xy.y));
+        write_bit("IN_USE");
+        push("BUFR_DIVIDE");
+        write_bit(divide_feature);
+        pop();
+        pop();
+        pop();
+    }
+
+    // A placed BUFIO emits nothing today, so the buffer is never switched on.
+    //
+    // #157 gave BUFIO a packer -- the cell is renamed to BUFIO_BUFIO and binds
+    // to the bel -- and from then on a design places and routes.  The clock
+    // reaches the site and leaves it through ordinary tile routing, which
+    // write_pip already emits:
+    //
+    //     HCLK_IOI3_X113Y78.HCLK_IOI_IO_PLL_CLK0_DMUX.HCLK_IOI_I2IOCLK_TOP0
+    //     HCLK_IOI3_X113Y78.HCLK_IOI_IOCLK0.HCLK_IOI_BUFIO_O0
+    //
+    // What is missing is the enable.  prjxray-db carries two bits per slot,
+    //
+    //     HCLK_IOI3.BUFIO_Y0.IN_USE 36_16 36_18
+    //     HCLK_IOI3.BUFIO_Y1.IN_USE 37_16 37_18
+    //     HCLK_IOI3.BUFIO_Y2.IN_USE 36_31 37_31
+    //     HCLK_IOI3.BUFIO_Y3.IN_USE 36_21 37_22
+    //
+    // (segbits_hclk_ioi3.db, added by openXC7/prjxray-db#7 from a
+    // 039-hclk-config campaign; the rows come out identical whether the BUFIO
+    // is fed from a clock-capable pad or from the region's MMCM, so they are
+    // an enable and not a record of the route).  Without them the bitstream
+    // assembles with those bits clear: valid-looking, and the I/O clock never
+    // starts -- the same silent-death shape as the RCLK2IO leaf that the same
+    // database change fixed on the BUFR side.
+    //
+    // Emitted from the cell for the reason given above write_bufr: the
+    // configuration belongs to the instance, and the pseudo-pip table only
+    // fires when the site is crossed as routing rather than occupied.
+    void write_bufio(CellInfo *ci)
+    {
+        // Site name is BUFIO_X0Y<y> and the feature is BUFIO_Y<y>, where the
+        // index is the site's y within its tile -- the same convention BUFR
+        // uses above, and the one the fuzzer used to mint the rows (the site's
+        // y minus the lowest BUFIO y of the tile).
+        auto xy = ctx->getSiteLocInTile(ci->bel);
+
+        push(get_tile_name(ci->bel.tile));
+        push("BUFIO_Y" + std::to_string(xy.y));
+        write_bit("IN_USE");
+        pop();
+        pop();
+    }
+
     void write_pll(CellInfo *ci)
     {
         cur_tile = ci->bel.tile;
@@ -2552,34 +2924,75 @@ struct FasmBackend
         }
         pop();
 
-        // PLL loop-filter / lock lookup.  These MUST be computed from CLKFBOUT_MULT
-        // (same lock table as the MMCM); the old hardcoded LKTABLE/TABLE were wrong for
-        // most MULT values, giving a PLL with the wrong loop filter -> a clock clean
-        // enough for a free-running counter but too jittery for synchronous logic (the
-        // open-flow USER_CLOCK/PLL designs were silent on HW while Vivado's worked).
-        // lk_table[] is the same per-MULT table write_mmcm() uses (verified: lk_table[3]
-        // == Vivado's LKTABLE for MULT=4).
-        static const int64_t lk_table[64] = {
-            0x31BE8FA401LL, 0x31BE8FA401LL, 0x423E8FA401LL, 0x5AFE8FA401LL, 0x73BE8FA401LL,
-            0x8C7E8FA401LL, 0x9CFE8FA401LL, 0xB5BE8FA401LL, 0xCE7E8FA401LL, 0xE73E8FA401LL,
-            0xFF7E8FA401LL, 0xFF7E8FA401LL, 0xFFFE8FA401LL, 0xFFFE8FA401LL, 0xFFFE8FA401LL,
-            0xFFFE8FA401LL, 0xFFFE8FA401LL, 0xFFFE8FA401LL, 0xFFFE8FA401LL, 0xFFFE8FA401LL,
-            0xFFFE8FA401LL, 0xFFFE8FA401LL, 0xFFFE8FA401LL, 0xFFFE8FA401LL, 0xFFFE8FA401LL,
-            0xFFFE8FA401LL, 0xFFFE8FA401LL, 0xFFFE8FA401LL, 0xFFFE8FA401LL, 0xFFFE8FA401LL,
-            0xFFFE8FA401LL, 0xFFFE8FA401LL, 0xFFFE8FA401LL, 0xFFFE8FA401LL, 0xFFFE8FA401LL,
-            0xFFFE8FA401LL, 0xFFFE8FA401LL, 0xFFFE8FA401LL, 0xFFFE8FA401LL, 0xFFFE8FA401LL,
-            0xFFFE8FA401LL, 0xFFFE8FA401LL, 0xFFFE8FA401LL, 0xFFFE8FA401LL, 0xFFFE8FA401LL,
-            0xFFFE8FA401LL, 0xFFFE8FA401LL, 0xFFFE8FA401LL, 0xFFFE8FA401LL, 0xFFFE8FA401LL,
-            0xFFFE8FA401LL, 0xFFFE8FA401LL, 0xFFFE8FA401LL, 0xFFFE8FA401LL, 0xFFFE8FA401LL,
-            0xFFFE8FA401LL, 0xFFFE8FA401LL, 0xFFFE8FA401LL, 0xFFFE8FA401LL, 0xFFFE8FA401LL,
-            0xFFFE8FA401LL, 0xFFFE8FA401LL, 0xFFFE8FA401LL, 0xFFFE8FA401LL};
+        // PLLE2 lock & loop-filter configuration, from CLKFBOUT_MULT.
+        //
+        // These are PLL-specific tables harvested from Vivado golden
+        // bitstreams: one minimal PLLE2_ADV design per CLKFBOUT_MULT
+        // (2..64), built by Vivado and disassembled with prjxray bit2fasm;
+        // the values below are the exact bits Vivado programs.  Facts from
+        // that harvest:
+        //  - the values depend on CLKFBOUT_MULT only (same MULT at two
+        //    different VCO frequencies yields identical bits);
+        //  - LKTABLE matches the XAPP888 MMCM lock table only up to
+        //    MULT=10.  From MULT=11 the PLL table diverges: the delay
+        //    fields saturate at 31 and LockCnt *decreases* per MULT (900,
+        //    825, ... 250) where the MMCM table stays at 1000.  So the
+        //    MMCM lock table must not be reused here (it was, and the
+        //    single-point check at MULT=4 -- where both tables agree --
+        //    hid the divergence);
+        //  - TABLE (loop filter: CP/RES/LFHF) varies across the whole
+        //    range; the old hardcoded 0x1FC is Vivado's value for MULT=4
+        //    only.  A wrong loop filter yields a clock clean enough for a
+        //    free-running counter but too jittery for synchronous logic;
+        //  - BANDWIDTH=HIGH programs the same filter as OPTIMIZED (all 63
+        //    MULTs harvested for both); LOW has its own filter table;
+        //    LKTABLE does not depend on BANDWIDTH.
+        static const int64_t plle2_lock_table[63] = {
+            0x31BE8FA401LL, 0x423E8FA401LL, 0x5AFE8FA401LL, 0x73BE8FA401LL,
+            0x8C7E8FA401LL, 0x9CFE8FA401LL, 0xB5BE8FA401LL, 0xCE7E8FA401LL,
+            0xE73E8FA401LL, 0xFFF84FA401LL, 0xFFF39FA401LL, 0xFFEEEFA401LL,
+            0xFFEBCFA401LL, 0xFFE8AFA401LL, 0xFFE71FA401LL, 0xFFE3FFA401LL,
+            0xFFE26FA401LL, 0xFFE0DFA401LL, 0xFFDF4FA401LL, 0xFFDDBFA401LL,
+            0xFFDC2FA401LL, 0xFFDA9FA401LL, 0xFFD90FA401LL, 0xFFD90FA401LL,
+            0xFFD77FA401LL, 0xFFD5EFA401LL, 0xFFD5EFA401LL, 0xFFD45FA401LL,
+            0xFFD45FA401LL, 0xFFD2CFA401LL, 0xFFD2CFA401LL, 0xFFD2CFA401LL,
+            0xFFD13FA401LL, 0xFFD13FA401LL, 0xFFD13FA401LL, 0xFFCFAFA401LL,
+            0xFFCFAFA401LL, 0xFFCFAFA401LL, 0xFFCFAFA401LL, 0xFFCFAFA401LL,
+            0xFFCFAFA401LL, 0xFFCFAFA401LL, 0xFFCFAFA401LL, 0xFFCFAFA401LL,
+            0xFFCFAFA401LL, 0xFFCFAFA401LL, 0xFFCFAFA401LL, 0xFFCFAFA401LL,
+            0xFFCFAFA401LL, 0xFFCFAFA401LL, 0xFFCFAFA401LL, 0xFFCFAFA401LL,
+            0xFFCFAFA401LL, 0xFFCFAFA401LL, 0xFFCFAFA401LL, 0xFFCFAFA401LL,
+            0xFFCFAFA401LL, 0xFFCFAFA401LL, 0xFFCFAFA401LL, 0xFFCFAFA401LL,
+            0xFFCFAFA401LL, 0xFFCFAFA401LL, 0xFFCFAFA401LL};
+        static const uint16_t plle2_filter_optimized[63] = {
+            0x0DC, 0x17C, 0x1FC, 0x1EC, 0x35C, 0x3AC, 0x3B4, 0x3F4,
+            0x3DC, 0x3EC, 0x3F4, 0x3CC, 0x394, 0x3D4, 0x3D4, 0x3D4,
+            0x3D4, 0x1D8, 0x1D8, 0x1D8, 0x1D8, 0x170, 0x170, 0x170,
+            0x304, 0x304, 0x304, 0x304, 0x304, 0x304, 0x304, 0x304,
+            0x108, 0x108, 0x108, 0x0A0, 0x0A0, 0x0A0, 0x0D0, 0x0A0,
+            0x0A0, 0x0A0, 0x0A0, 0x0A0, 0x0A0, 0x0A0, 0x0A0, 0x0A0,
+            0x0A0, 0x0A0, 0x0A0, 0x0A0, 0x130, 0x130, 0x130, 0x130,
+            0x130, 0x130, 0x130, 0x090, 0x090, 0x090, 0x090};
+        static const uint16_t plle2_filter_low[63] = {
+            0x0BC, 0x09C, 0x0B4, 0x094, 0x094, 0x0A4, 0x0B8, 0x0B8,
+            0x084, 0x084, 0x098, 0x098, 0x098, 0x098, 0x0A8, 0x0A8,
+            0x0A8, 0x0A8, 0x0B0, 0x0B0, 0x0B0, 0x0B0, 0x0B0, 0x0B0,
+            0x0B0, 0x0B0, 0x0B0, 0x0B0, 0x0B0, 0x088, 0x088, 0x088,
+            0x088, 0x088, 0x088, 0x088, 0x088, 0x088, 0x088, 0x0F0,
+            0x0F0, 0x0F0, 0x0F0, 0x0F0, 0x0F0, 0x0F0, 0x090, 0x090,
+            0x090, 0x090, 0x090, 0x090, 0x090, 0x090, 0x090, 0x090,
+            0x090, 0x090, 0x090, 0x090, 0x090, 0x090, 0x090};
         int pll_mult = (int)float_or_default(ci, "CLKFBOUT_MULT", 1);
-        if (pll_mult < 1) pll_mult = 1;
+        if (pll_mult < 2) pll_mult = 2;
         if (pll_mult > 64) pll_mult = 64;
+        std::string pll_bw = str_or_default(ci->params, ctx->id("BANDWIDTH"), "OPTIMIZED");
         write_int_vector("FILTREG1_RESERVED[11:0]", 0x8, 12);
-        write_int_vector("LKTABLE[39:0]", lk_table[pll_mult - 1], 40);
+        write_int_vector("LKTABLE[39:0]", plle2_lock_table[pll_mult - 2], 40);
         write_bit("LOCKREG3_RESERVED[0]");
-        write_int_vector("TABLE[9:0]", 0x1FC, 10);
+        write_int_vector("TABLE[9:0]",
+                         (pll_bw == "LOW") ? plle2_filter_low[pll_mult - 2]
+                                           : plle2_filter_optimized[pll_mult - 2],
+                         10);
         pop(2);
     }
 
@@ -2592,7 +3005,13 @@ struct FasmBackend
         std::string divide_attr = name + ((name == "CLKFBOUT") ? "_MULT_F" :
                                           (name == "CLKOUT0" ? "_DIVIDE_F" : "_DIVIDE"));
         double divide = float_or_default(ci, divide_attr, 1);
-        double phase = float_or_default(ci, name + "_PHASE", 1);
+        // Xilinx's documented default for CLKOUT<n>_PHASE/CLKFBOUT_PHASE is 0.0
+        // degrees (UG472) -- defaulting to 1 here computed a spurious non-zero
+        // PHASE_MUX bit for any counter whose PHASE param the source netlist
+        // doesn't set explicitly (e.g. CLKFBOUT, when only CLKOUT0 has an
+        // explicit PHASE), found via a raw-bit diff against a real Vivado
+        // MMCM bitstream (nextpnr-xilinx#177 MMCM-lock investigation).
+        double phase = float_or_default(ci, name + "_PHASE", 0);
         if (divide <= 1) {
             no_count = true;
         } else {
@@ -2781,10 +3200,14 @@ struct FasmBackend
             0b1111111111001111101011111010010000000001UL
         };
         auto clkfbout_mult = (int)float_or_default(ci, "CLKFBOUT_MULT_F", 5.000);
-        if (63 < clkfbout_mult)
-            log_error("MMCME2_ADV: CLKFBOUT_MULT_F must not be greater than 63");
-        if (0 == clkfbout_mult)
-            log_error("MMCME2_ADV: CLKFBOUT_MULT_F must not be 0");
+        // lk_table[] and filter_lookup*[] hold 64 entries and are read at [mult-1].
+        // The old pair of tests rejected 0 and >63 but let every NEGATIVE value
+        // through, and (int) of an out-of-range double is undefined behaviour that
+        // differs by host -- x86-64 yields INT_MIN, arm64 saturates to INT_MAX -- so
+        // the same netlist crashed on one machine and passed on another (#78).
+        // Range-check both ends and name the offending value.
+        if (clkfbout_mult < 1 || clkfbout_mult > 64)
+            log_error("MMCME2_ADV: CLKFBOUT_MULT_F must be in the range 1..64 (got %d)\n", clkfbout_mult);
         write_int_vector("LKTABLE[39:0]", lk_table[clkfbout_mult - 1], 40);
 
         uint16_t filter_lookup_low [] = {
@@ -5197,6 +5620,16 @@ void write_gtx_channel(CellInfo *ci)
                 blank();
                 continue;
             }
+            if (ci->type == id_BUFR_BUFR && ci->bel != BelId()) {
+                write_bufr(ci);
+                blank();
+                continue;
+            }
+            if (ci->type == id_BUFIO_BUFIO && ci->bel != BelId()) {
+                write_bufio(ci);
+                blank();
+                continue;
+            }
         }
     }
 
@@ -5253,6 +5686,22 @@ void Arch::writeFasm(const std::string &filename, bool region_only)
     std::ofstream out(filename);
     if (!out)
         log_error("failed to open file %s for writing (%s)\n", filename.c_str(), strerror(errno));
+
+    // Run identity.  A seed alone does not identify a run: the same --seed on
+    // two different binaries or chipdbs gives two different placements, so
+    // "it fails at seed 4" is not reproducible information on its own.  This
+    // cost a real round of confusion between contributors comparing seed
+    // sweeps.  Comments are dropped by fasm2frames, so the bitstream and the
+    // demos gate's normalized-hash comparison are unaffected.
+    out << "# nextpnr-xilinx " << GIT_DESCRIBE_STR << std::endl;
+    out << "# chipdb " << chip_info->name.get() << " version " << chip_info->version
+        << " generator " << chip_info->generator.get() << std::endl;
+    if (settings.count(id("seed.arg")))
+        out << "# placer seed " << getCtx()->setting<uint64_t>("seed.arg") << std::endl;
+    else
+        out << "# placer seed default" << std::endl;
+    if (settings.count(id("seed")))
+        out << "# placer rngstate " << getCtx()->setting<uint64_t>("seed") << std::endl;
 
     FasmBackend be(getCtx(), out);
     if (region_only) {
