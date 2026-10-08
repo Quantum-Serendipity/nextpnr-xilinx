@@ -321,7 +321,8 @@ void Arch::routeConstants(std::function<void()> reroute)
     if (passes_overridden)
         max_passes = atoi(passes_env);
     const bool allow = getenv("NEXTPNR_ALLOW_CONST_HOLDOUTS") != nullptr || allow_const_holdouts;
-    const bool no_drivers = getenv("NEXTPNR_NO_CONST_LUT_DRIVERS") != nullptr;
+    const bool partition_rect_active = roi_active();
+    const bool no_drivers = getenv("NEXTPNR_NO_CONST_LUT_DRIVERS") != nullptr || partition_rect_active;
 
     // Fatal by default: an unrouted constant sink reads as 1 in silicon.
     auto report = [&](const std::vector<std::pair<ConstHoldout, const char *>> &left) {
@@ -352,7 +353,9 @@ void Arch::routeConstants(std::function<void()> reroute)
 
     std::set<std::pair<IdString, IdString>> given_up; // (cell, port) already reported
     std::vector<std::pair<ConstHoldout, const char *>> given_up_list;
-    const char *why_unplaced = no_drivers ? "constant LUT drivers disabled" : "no route or no free LUT bel";
+    const char *why_unplaced = partition_rect_active
+                                       ? "constant LUT drivers disabled under NEXTPNR_PARTITION_ROI"
+                                       : (no_drivers ? "constant LUT drivers disabled" : "no route or no free LUT bel");
     auto give_up = [&](const ConstHoldout &h, const char *why) {
         given_up.insert(std::make_pair(h.cell->name, h.port));
         given_up_list.push_back(std::make_pair(h, why));
