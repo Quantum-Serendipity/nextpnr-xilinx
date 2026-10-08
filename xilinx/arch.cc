@@ -3208,6 +3208,72 @@ bool Arch::dsp48e1IsTimedOutput(IdString base) const
            s == "OVERFLOW" || s == "UNDERFLOW" || s == "ACOUT" || s == "BCOUT";
 }
 
+Arch::BramPinTiming Arch::bramPinTiming(const CellInfo *cell, IdString port) const
+{
+    // Values in ns are the slow-corner maxima of prjxray-db artix7
+    // timings/BRAM_L.sdf, which match the DS181 Table 30 -1 column.
+    BramPinTiming t;
+    bool is36 = cell->type == id_RAMB36E1_RAMB36E1;
+    if (!is36 && cell->type != id_RAMB18E1_RAMB18E1)
+        return t;
+    std::string s = port.str(this);
+    size_t n = s.size();
+    while (n > 0 && s[n - 1] >= '0' && s[n - 1] <= '9')
+        --n;
+    s.resize(n);
+    std::string half = is36 ? "L" : "";
+    if (is36 && !s.empty() && (s.back() == 'L' || s.back() == 'U')) {
+        half = s.substr(s.size() - 1);
+        s.pop_back();
+    }
+    bool sdp = str_or_default(cell->params, id("RAM_MODE"), "TDP") == "SDP";
+    auto clock_of = [&](char side) { return id(std::string(side == 'A' ? "CLKARDCLK" : "CLKBWRCLK") + half); };
+
+    if (s == "CLKARDCLK" || s == "CLKBWRCLK") {
+        t.kind = BRAM_PIN_CLOCK;
+        t.clock = port;
+        return t;
+    }
+
+    if (s == "DOADO" || s == "DOPADOP" || s == "DOBDO" || s == "DOPBDOP") {
+        bool a = (s == "DOADO" || s == "DOPADOP");
+        bool reg = int_or_default(cell->params, a ? id_DOA_REG : id("DOB_REG"), 0) != 0;
+        t.kind = BRAM_PIN_OUTPUT;
+        t.clock = clock_of((a || sdp) ? 'A' : 'B');
+        t.clk_to_q_max = reg ? 0.882 : 2.454;
+        t.clk_to_q_min = reg ? 0.204 : 0.585;
+        return t;
+    }
+
+    struct InputPin
+    {
+        const char *root;
+        char side;
+        double setup, hold;
+    };
+    static const InputPin inputs[] = {
+            {"ADDRARDADDR", 'A', 0.566, 0.360},   {"ADDRBWRADDR", 'B', 0.566, 0.360},
+            {"WEA", 'A', 0.532, 0.197},           {"WEBWE", 'B', 0.532, 0.197},
+            {"ENARDEN", 'A', 0.443, 0.227},       {"ENBWREN", 'B', 0.443, 0.227},
+            {"RSTRAMARSTRAM", 'A', 0.359, 0.453}, {"RSTRAMB", 'B', 0.359, 0.453},
+            {"RSTREGARSTREG", 'A', 0.342, 0.067}, {"RSTREGB", 'B', 0.342, 0.067},
+            {"REGCEAREGCE", 'A', 0.360, 0.155},   {"REGCEB", 'B', 0.360, 0.155},
+            {"DIADI", 'A', 0.737, 0.667},         {"DIPADIP", 'A', 0.737, 0.667},
+            {"DIBDI", 'B', 0.737, 0.667},         {"DIPBDIP", 'B', 0.737, 0.667},
+    };
+    for (const auto &in : inputs) {
+        if (s != in.root)
+            continue;
+        bool sdp_write_data = sdp && (s == "DIADI" || s == "DIPADIP");
+        t.kind = BRAM_PIN_INPUT;
+        t.clock = clock_of(sdp_write_data ? 'B' : in.side);
+        t.setup = in.setup;
+        t.hold = in.hold;
+        return t;
+    }
+    return t;
+}
+
 bool Arch::getCellDelay(const CellInfo *cell, IdString fromPort, IdString toPort, DelayInfo &delay) const
 {
     int tt_id = -1, inst_id = -1;
@@ -3333,6 +3399,18 @@ TimingPortClass Arch::getPortTimingClass(const CellInfo *cell, IdString port, in
         if (dsp48e1CombInputDelayNS(base) > 0.0)
             return TMG_COMB_INPUT;
         return TMG_IGNORE; // CLK / CE* / RST* / config pins
+    } else if (cell->type == id_RAMB18E1_RAMB18E1 || cell->type == id_RAMB36E1_RAMB36E1) {
+        BramPinTiming t = bramPinTiming(cell, port);
+        if (t.kind == BRAM_PIN_NONE)
+            return TMG_IGNORE;
+        const NetInfo *clk = get_net_or_empty(cell, t.clock);
+        if (clk == nullptr || clk->driver.cell == nullptr || clk->driver.cell->type == id_PSEUDO_VCC ||
+            clk->driver.cell->type == id_PSEUDO_GND)
+            return TMG_IGNORE;
+        if (t.kind == BRAM_PIN_CLOCK)
+            return TMG_CLOCK_INPUT;
+        clockInfoCount = 1;
+        return t.kind == BRAM_PIN_OUTPUT ? TMG_REGISTER_OUTPUT : TMG_REGISTER_INPUT;
     }
     return TMG_IGNORE;
 }
@@ -3340,6 +3418,19 @@ TimingPortClass Arch::getPortTimingClass(const CellInfo *cell, IdString port, in
 TimingClockingInfo Arch::getPortClockingInfo(const CellInfo *cell, IdString port, int index) const
 {
     TimingClockingInfo info;
+    if (cell->type == id_RAMB18E1_RAMB18E1 || cell->type == id_RAMB36E1_RAMB36E1) {
+        BramPinTiming t = bramPinTiming(cell, port);
+        info.setup = getDelayFromNS(t.setup);
+        info.hold = getDelayFromNS(t.hold);
+        info.clockToQ = getDelayFromNS(t.clk_to_q_max);
+        info.clockToQ.min = getDelayFromNS(t.clk_to_q_min).delay;
+        info.clock_port = t.clock;
+        std::string ck = t.clock.str(this);
+        if (cell->type == id_RAMB36E1_RAMB36E1)
+            ck.pop_back();
+        info.edge = bool_or_default(cell->params, id("IS_" + ck + "_INVERTED"), false) ? FALLING_EDGE : RISING_EDGE;
+        return info;
+    }
     // FF (SLICE_FFX/FDRE-family) timing.  Was a flat 0.1ns stub for all three,
     // which under-set clk->Q (real slow-corner ~0.26ns) and made hold analysis
     // impossible.  Values below are the golden-Vivado xc7 -2 calibration

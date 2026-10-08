@@ -1866,6 +1866,21 @@ struct Arch : BaseCtx
     bool dsp48e1IsCombinational(const CellInfo *cell) const;
     double dsp48e1CombInputDelayNS(IdString base) const;
     bool dsp48e1IsTimedOutput(IdString base) const;
+    // RAMB18E1/RAMB36E1 synchronous pin timing (see arch.cc).
+    enum BramPinKind
+    {
+        BRAM_PIN_NONE,
+        BRAM_PIN_CLOCK,
+        BRAM_PIN_INPUT,
+        BRAM_PIN_OUTPUT
+    };
+    struct BramPinTiming
+    {
+        BramPinKind kind = BRAM_PIN_NONE;
+        IdString clock;
+        double setup = 0, hold = 0, clk_to_q_max = 0, clk_to_q_min = 0;
+    };
+    BramPinTiming bramPinTiming(const CellInfo *cell, IdString port) const;
     // Get the TimingClockingInfo of a port
     TimingClockingInfo getPortClockingInfo(const CellInfo *cell, IdString port, int index) const;
 
