@@ -34,6 +34,8 @@
 #include <deque>
 #include <fstream>
 #include <map>
+#include <memory>
+#include <stdexcept>
 #include <queue>
 #include <thread>
 #include "log.h"
@@ -101,12 +103,56 @@ struct Router2
     // it (this is what makes the reservation fixpoint terminate).
     static constexpr int RESERVED_CONTESTED = -2;
 
-    struct PerWireData
+    struct BoundNets
+    {
+        typedef std::map<int, std::pair<int, PipId>> map_t;
+        std::unique_ptr<map_t> m;
+        BoundNets() = default;
+        BoundNets(const BoundNets &o) : m(o.m ? new map_t(*o.m) : nullptr) {}
+        BoundNets(BoundNets &&) = default;
+        BoundNets &operator=(const BoundNets &o)
+        {
+            m.reset(o.m ? new map_t(*o.m) : nullptr);
+            return *this;
+        }
+        BoundNets &operator=(BoundNets &&) = default;
+        static const map_t &empty_map()
+        {
+            static const map_t e;
+            return e;
+        }
+        size_t size() const { return m ? m->size() : 0; }
+        bool empty() const { return !m || m->empty(); }
+        size_t count(int k) const { return m ? m->count(k) : 0; }
+        std::pair<int, PipId> &at(int k)
+        {
+            if (!m)
+                throw std::out_of_range("BoundNets::at");
+            return m->at(k);
+        }
+        const std::pair<int, PipId> &at(int k) const
+        {
+            if (!m)
+                throw std::out_of_range("BoundNets::at");
+            return m->at(k);
+        }
+        std::pair<int, PipId> &operator[](int k)
+        {
+            if (!m)
+                m.reset(new map_t);
+            return (*m)[k];
+        }
+        size_t erase(int k) { return m ? m->erase(k) : 0; }
+        map_t::const_iterator begin() const { return m ? m->cbegin() : empty_map().cbegin(); }
+        map_t::const_iterator end() const { return m ? m->cend() : empty_map().cend(); }
+    };
+
+    struct alignas(64) PerWireData
     {
         // nextpnr
         WireId w;
         // net --> number of arcs; driving pip
-        std::map<int, std::pair<int, PipId>> bound_nets;
+        BoundNets bound_nets;
         // Historical congestion cost
         float hist_cong_cost = 1.0;
         // Wire is unavailable as locked to another arc
@@ -128,6 +174,7 @@ struct Router2
             WireScore score;
         } visit;
     };
+    static_assert(sizeof(PerWireData) == 64, "PerWireData must stay one cache line");
 
     float present_wire_cost(const PerWireData &w, int net_uid)
     {
