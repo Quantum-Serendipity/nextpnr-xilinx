@@ -167,13 +167,8 @@ po::options_description CommandHandler::getGeneralOptions()
 
 void CommandHandler::setupContext(Context *ctx)
 {
-    if (ctx->settings.find(ctx->id("seed")) != ctx->settings.end()) {
+    if (ctx->settings.find(ctx->id("seed")) != ctx->settings.end())
         ctx->rngstate = ctx->setting<uint64_t>("seed");
-        // settings["seed"] is overwritten with the derived rngstate at the
-        // end of this function, so record the restored value while it is
-        // still the seed and not the state.
-        ctx->settings[ctx->id("seed.arg")] = ctx->rngstate;
-    }
 
     if (vm.count("verbose")) {
         ctx->verbose = true;
@@ -190,7 +185,6 @@ void CommandHandler::setupContext(Context *ctx)
 
     if (vm.count("seed")) {
         ctx->rngseed(vm["seed"].as<int>());
-        ctx->settings[ctx->id("seed.arg")] = vm["seed"].as<int>();
     }
 
     if (vm.count("randomize-seed")) {
@@ -200,7 +194,6 @@ void CommandHandler::setupContext(Context *ctx)
             r = rand();
         } while (r == 0);
         ctx->rngseed(r);
-        ctx->settings[ctx->id("seed.arg")] = r;
     }
 
     if (vm.count("slack_redist_iter")) {
