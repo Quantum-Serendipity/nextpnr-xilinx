@@ -371,7 +371,7 @@ void Arch::routeConstants(std::function<void()> reroute)
             // Don't-cares first: a pin nothing selects is never an error.
             const bool is_dont_care = holdout_is_dont_care(ctx, h);
             if (is_dont_care) {
-                log_info("    %s.%s (bel %s): CARRY4 DI with S=1 never selected, left unrouted\n",
+                log_info("    %s.%s (bel %s) is undriven by design: CARRY4 DI with S=1 is never selected\n",
                          h.cell->name.c_str(ctx), h.port.c_str(ctx), nameOfBel(h.cell->bel));
                 disconnect_port(ctx, h.cell, h.port);
                 dont_care++;
@@ -426,8 +426,8 @@ void Arch::routeConstants(std::function<void()> reroute)
     }
     const bool anything_changed = drivers > 0 || dont_care > 0;
     if (anything_changed)
-        log_info("Constant holdouts: %d local constant LUT(s) added, %d re-route pass(es), %d don't-care CARRY4 DI "
-                 "pin(s) left unrouted\n",
+        log_info("Constant holdouts: %d local constant LUT(s) added, %d re-route pass(es), %d CARRY4 DI pin(s) "
+                 "undriven by design (S=1, never selected)\n",
                  drivers, passes, dont_care);
     // Only report sinks the final fill still left unreached.
     std::set<std::pair<IdString, IdString>> still_left;
