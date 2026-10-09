@@ -424,7 +424,32 @@ struct Router2
         }
     }
 
+#ifdef ARCH_XILINX
+    struct WireIndexMap
+    {
+        std::vector<std::vector<int>> by_tile;
+        int &operator[](WireId w)
+        {
+            size_t t = size_t(w.tile + 1);
+            if (by_tile.size() <= t)
+                by_tile.resize(t + 1);
+            auto &v = by_tile[t];
+            if (v.size() <= size_t(w.index))
+                v.resize(size_t(w.index) + 1, -1);
+            return v[w.index];
+        }
+        int at(WireId w) const
+        {
+            size_t t = size_t(w.tile + 1);
+            if (t >= by_tile.size() || size_t(w.index) >= by_tile[t].size() || by_tile[t][w.index] < 0)
+                throw std::out_of_range("wire_to_idx");
+            return by_tile[t][w.index];
+        }
+    };
+    WireIndexMap wire_to_idx;
+#else
     dict<WireId, int> wire_to_idx;
+#endif
     std::vector<PerWireData> flat_wires;
 
     PerWireData &wire_data(WireId w) { return flat_wires[wire_to_idx.at(w)]; }
