@@ -116,9 +116,9 @@ struct Router2
             return *this;
         }
         BoundNets &operator=(BoundNets &&) = default;
-        static const map_t &empty_map()
+        static map_t &empty_map()
         {
-            static const map_t e;
+            static map_t e;
             return e;
         }
         size_t size() const { return m ? m->size() : 0; }
@@ -143,8 +143,12 @@ struct Router2
             return (*m)[k];
         }
         size_t erase(int k) { return m ? m->erase(k) : 0; }
+        map_t::const_iterator find(int k) const { return m ? m->find(k) : empty_map().cend(); }
+        map_t::iterator find(int k) { return m ? m->find(k) : empty_map().end(); }
         map_t::const_iterator begin() const { return m ? m->cbegin() : empty_map().cbegin(); }
         map_t::const_iterator end() const { return m ? m->cend() : empty_map().cend(); }
+        map_t::iterator begin() { return m ? m->begin() : empty_map().begin(); }
+        map_t::iterator end() { return m ? m->end() : empty_map().end(); }
     };
 
     struct alignas(64) PerWireData
