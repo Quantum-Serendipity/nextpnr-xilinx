@@ -364,13 +364,19 @@ void Arch::routeConstants(std::function<void()> reroute)
     };
     int drivers = 0, dont_care = 0, passes = 0;
     std::vector<ConstHoldout> holdouts;
+    std::set<std::pair<IdString, IdString>> final_dont_cares;
     for (int pass = 0;; pass++) {
+        const_fill_lines.clear();
+        final_dont_cares.clear();
+        const_fill_deferred = true;
         holdouts = routeVcc();
+        const_fill_deferred = false;
         std::vector<ConstHoldout> real;
         for (auto &h : holdouts) {
             // Don't-cares first: a pin nothing selects is never an error.
             const bool is_dont_care = holdout_is_dont_care(ctx, h);
             if (is_dont_care) {
+                final_dont_cares.insert(std::make_pair(h.cell->name, h.port));
                 log_info("    %s.%s (bel %s) is undriven by design: CARRY4 DI with S=1 is never selected\n",
                          h.cell->name.c_str(ctx), h.port.c_str(ctx), nameOfBel(h.cell->bel));
                 disconnect_port(ctx, h.cell, h.port);
@@ -424,6 +430,17 @@ void Arch::routeConstants(std::function<void()> reroute)
         reroute();
         passes++;
     }
+    for (auto &l : const_fill_lines) {
+        const bool superseded_by_dont_care =
+                l.warning && final_dont_cares.count(std::make_pair(l.cell, l.port)) != 0;
+        if (superseded_by_dont_care)
+            continue;
+        if (l.warning)
+            log_warning("%s", l.text.c_str());
+        else
+            log_info("%s", l.text.c_str());
+    }
+    const_fill_lines.clear();
     const bool anything_changed = drivers > 0 || dont_care > 0;
     if (anything_changed)
         log_info("Constant holdouts: %d local constant LUT(s) added, %d re-route pass(es), %d CARRY4 DI pin(s) "

@@ -2027,6 +2027,14 @@ struct Arch : BaseCtx
         bool value; // constant the pin requires
     };
     std::vector<ConstHoldout> routeVcc();
+    struct ConstFillLine
+    {
+        bool warning;
+        IdString cell, port;
+        std::string text;
+    };
+    bool const_fill_deferred = false;
+    std::vector<ConstFillLine> const_fill_lines;
     bool allow_const_holdouts = false;
     void routeConstants(std::function<void()> reroute);
     int insertConstDrivers(const std::vector<ConstHoldout> &holdouts, std::vector<ConstHoldout> &unplaced);

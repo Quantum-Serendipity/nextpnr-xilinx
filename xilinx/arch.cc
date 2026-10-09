@@ -1158,12 +1158,22 @@ std::vector<Arch::ConstHoldout> Arch::routeVcc()
     std::ofstream holdout_out;
     if (const char *hf = getenv("NEXTPNR_GND_HOLDOUT_FILE"))
         holdout_out.open(hf);
+    auto say = [&](bool warning, IdString cell, IdString port, const std::string &text) {
+        if (const_fill_deferred) {
+            const_fill_lines.push_back(ConstFillLine{warning, cell, port, text});
+            return;
+        }
+        if (warning)
+            log_warning("%s", text.c_str());
+        else
+            log_info("%s", text.c_str());
+    };
     for (auto &cn : cnets) {
         if (!nets.count(cn.first))
             continue;
         NetInfo *net = nets[cn.first].get();
         int pseudo_intent = cn.second;
-        log_info("Routing %s connections...\n", cn.first.c_str(this));
+        say(false, IdString(), IdString(), stringf("Routing %s connections...\n", cn.first.c_str(this)));
         WireId src = getCtx()->getNetinfoSourceWire(net);
         if (src != WireId())
             bindWire(src, net, STRENGTH_STRONG);
@@ -1190,11 +1200,12 @@ std::vector<Arch::ConstHoldout> Arch::routeVcc()
                     max_iter_seen = iter;
                 if (!bridged) {
                     failed.push_back(ui);
-                    log_info("    %s: pass %d left %s.%s (bel %s) unbridged -- BFS %s after %d of %d wires\n",
-                             cn.first.c_str(this), passes, usr.cell->name.c_str(this), usr.port.c_str(this),
-                             nameOfBel(usr.cell->bel),
-                             iter < budget ? "exhausted the reachable free-wire graph" : "hit its iteration cap",
-                             iter, budget);
+                    say(false, IdString(), IdString(),
+                        stringf("    %s: pass %d left %s.%s (bel %s) unbridged -- BFS %s after %d of %d wires\n",
+                                cn.first.c_str(this), passes, usr.cell->name.c_str(this), usr.port.c_str(this),
+                                nameOfBel(usr.cell->bel),
+                                iter < budget ? "exhausted the reachable free-wire graph" : "hit its iteration cap",
+                                iter, budget));
                 }
             }
             if (failed.empty())
@@ -1212,22 +1223,25 @@ std::vector<Arch::ConstHoldout> Arch::routeVcc()
             auto &usr = net->users.at(ui);
             if (const_sink_is_config_delivered(usr)) {
                 ++config_delivered;
-                log_warning("%s: sink %s.%s (bel %s) not bridged, but its value is delivered by a "
+                say(true, IdString(), IdString(),
+                    stringf("%s: sink %s.%s (bel %s) not bridged, but its value is delivered by a "
                             "configuration bit (PRECYINIT.C0/.C1), so this is not a defect\n",
                             cn.first.c_str(this), usr.cell->name.c_str(this), usr.port.c_str(this),
-                            nameOfBel(usr.cell->bel));
+                            nameOfBel(usr.cell->bel)));
             } else {
-                log_warning("%s: no reachable constant source for sink %s.%s (bel %s)\n", cn.first.c_str(this),
-                            usr.cell->name.c_str(this), usr.port.c_str(this), nameOfBel(usr.cell->bel));
+                say(true, usr.cell->name, usr.port,
+                    stringf("%s: no reachable constant source for sink %s.%s (bel %s)\n", cn.first.c_str(this),
+                            usr.cell->name.c_str(this), usr.port.c_str(this), nameOfBel(usr.cell->bel)));
                 holdouts.push_back(ConstHoldout{net, usr.cell, usr.port, pseudo_intent == ID_PSEUDO_VCC});
             }
             if (holdout_out.is_open() && cn.second == ID_PSEUDO_GND)
                 holdout_out << usr.cell->name.c_str(this) << " " << usr.port.c_str(this) << "\n";
         }
-        log_info("    %s: %d/%d sinks bridged (%d unrouted, %d of them config-delivered; %d fill pass(es); "
-                 "max BFS %d)\n",
-                 cn.first.c_str(this), int(net->users.size()) - unrouted, int(net->users.size()), unrouted,
-                 config_delivered, passes, max_iter_seen);
+        say(false, IdString(), IdString(),
+            stringf("    %s: %d/%d sinks bridged (%d unrouted, %d of them config-delivered; %d fill pass(es); "
+                    "max BFS %d)\n",
+                    cn.first.c_str(this), int(net->users.size()) - unrouted, int(net->users.size()), unrouted,
+                    config_delivered, passes, max_iter_seen));
     }
     return holdouts;
 }
