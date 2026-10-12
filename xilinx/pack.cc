@@ -1007,9 +1007,9 @@ void XilinxPacker::pack_constants()
         }
 
         if (!cval && invertible_pins.count(ci->type) && invertible_pins.at(ci->type).count(pname)) {
-            // Invertible pins connected to zero are optimised to a connection to Vcc (which is easier to route)
-            // and an inversion
-            ci->params[ctx->id("IS_" + pname.str(ctx) + "_INVERTED")] = Property(1);
+            IdString inv_param = ctx->id("IS_" + pname.str(ctx) + "_INVERTED");
+            bool was_inverted = bool_or_default(ci->params, inv_param, false);
+            ci->params[inv_param] = Property(was_inverted ? 0 : 1);
             cval = true;
         }
 
