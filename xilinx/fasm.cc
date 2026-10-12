@@ -1637,8 +1637,8 @@ struct FasmBackend
                     if (yLoc == 0)
                         write_bit("SSTL12_SSTL135_SSTL15.IN_DIFF");
                 } else {
-                    if (iostandard == "TDMS_33")
-                        write_bit("TDMS_33.IN_DIFF");
+                    if (iostandard == "TMDS_33" && yLoc == 0)
+                        write_bit("TMDS_33.IN_DIFF");
                     else
                         write_bit("LVDS_25_SSTL135_SSTL15.IN_DIFF");
                 }
