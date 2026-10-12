@@ -1007,9 +1007,41 @@ void XilinxPacker::pack_constants()
         }
 
         if (!cval && invertible_pins.count(ci->type) && invertible_pins.at(ci->type).count(pname)) {
-            IdString inv_param = ctx->id("IS_" + pname.str(ctx) + "_INVERTED");
-            bool was_inverted = bool_or_default(ci->params, inv_param, false);
-            ci->params[inv_param] = Property(was_inverted ? 0 : 1);
+            std::string pstr = pname.str(ctx);
+            size_t lb = pstr.find('[');
+            IdString vec_param;
+            int bit = -1;
+            if (lb != std::string::npos && pstr.back() == ']') {
+                vec_param = ctx->id("IS_" + pstr.substr(0, lb) + "_INVERTED");
+                bit = std::stoi(pstr.substr(lb + 1, pstr.size() - lb - 2));
+            }
+            if (bit >= 0 && ci->params.count(vec_param)) {
+                Property &vec = ci->params.at(vec_param);
+                if (!vec.is_string && bit < int(vec.str.size()) &&
+                    (vec.str.at(bit) == Property::S0 || vec.str.at(bit) == Property::S1)) {
+                    vec.str.at(bit) = vec.str.at(bit) == Property::S1 ? Property::S0 : Property::S1;
+                    vec.update_intval();
+                } else {
+                    std::string bus_prefix = pstr.substr(0, lb + 1);
+                    int bus_width = bit + 1;
+                    for (IdString ip : invertible_pins.at(ci->type)) {
+                        std::string is = ip.str(ctx);
+                        if (is.size() > bus_prefix.size() && is.compare(0, bus_prefix.size(), bus_prefix) == 0 &&
+                            is.back() == ']')
+                            bus_width = std::max(
+                                    bus_width,
+                                    std::stoi(is.substr(bus_prefix.size(), is.size() - bus_prefix.size() - 1)) + 1);
+                    }
+                    if (!vec.is_string)
+                        bus_width = std::max(bus_width, int(vec.str.size()));
+                    int64_t v = int_or_default(ci->params, vec_param, 0) ^ (int64_t(1) << bit);
+                    vec = Property(v, bus_width);
+                }
+            } else {
+                IdString inv_param = ctx->id("IS_" + pstr + "_INVERTED");
+                bool was_inverted = bool_or_default(ci->params, inv_param, false);
+                ci->params[inv_param] = Property(was_inverted ? 0 : 1);
+            }
             cval = true;
         }
 
