@@ -2649,6 +2649,25 @@ struct FasmBackend
                         write_bit(std::string("BRAM36_") + pname + "_1");
                 }
                 pop();
+                for (auto &pp :
+                     std::initializer_list<std::pair<const char *, const char *>>{{"READ_WIDTH_A", "DOPADOP0"},
+                                                                                  {"READ_WIDTH_B", "DOPBDOP0"},
+                                                                                  {"WRITE_WIDTH_A", "DIPADIP0"},
+                                                                                  {"WRITE_WIDTH_B", "DIPBDIP0"}}) {
+                    if (int_or_default(ci->params, ctx->id(pp.first), 0) != 9)
+                        continue;
+                    NetInfo *p0 = get_net_or_empty(ci, ctx->id(pp.second));
+                    if (p0 == nullptr || p0->name == ctx->id("$PACKER_GND_NET") ||
+                        p0->name == ctx->id("$PACKER_VCC_NET"))
+                        continue;
+                    bool is_output = pp.second[1] == 'O';
+                    if (is_output ? p0->users.empty() : p0->driver.cell == nullptr)
+                        continue;
+                    log_error("RAMB36E1 '%s' has %s = 9 with parity bit %s in use (net '%s'); the x9 parity bit "
+                              "is mapped to the lower RAMB18 half only and reads 0 at odd addresses. Use a "
+                              "data-only width or a wider port.\n",
+                              ci->name.c_str(ctx), pp.first, pp.second, p0->name.c_str(ctx));
+                }
             }
             auto used_rdaddrcasc = used_wires_starting_with(tile, "BRAM_CASCOUT_ADDRARDADDR", false);
             auto used_wraddrcasc = used_wires_starting_with(tile, "BRAM_CASCOUT_ADDRBWRADDR", false);
