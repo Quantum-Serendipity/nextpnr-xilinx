@@ -308,6 +308,36 @@ PipId Arch::getPipByName(IdString name) const
                 break;
             }
         }
+        if (ret == PipId())
+            for (int i = 0; i < tile_info.num_pips; i++) {
+                if (tile_info.pip_data[i].site == site && tile_info.pip_data[i].bel == belname.index &&
+                    tile_info.wire_data[tile_info.pip_data[i].src_index].name == pinname.index) {
+                    ret.tile = tile;
+                    ret.index = i;
+                    break;
+                }
+            }
+    } else if (s.find("->") != std::string::npos) {
+        size_t arrow = s.find("->");
+        WireId src = getWireByName(id(s.substr(0, arrow)));
+        WireId dst = getWireByName(id(s.substr(arrow + 2)));
+        if (src != WireId() && dst != WireId()) {
+            src = canonicalWireId(chip_info, src.tile, src.index);
+            dst = canonicalWireId(chip_info, dst.tile, dst.index);
+            for (auto p : getPipsDownhill(src)) {
+                if (getPipDstWire(p) == dst) {
+                    ret = p;
+                    break;
+                }
+            }
+            if (ret == PipId())
+                for (auto p : getPipsUphill(dst)) {
+                    if (getPipSrcWire(p) == src) {
+                        ret = p;
+                        break;
+                    }
+                }
+        }
     } else {
         auto sp = split_identifier_name(s);
         int tile = tile_by_name.at(sp.first);

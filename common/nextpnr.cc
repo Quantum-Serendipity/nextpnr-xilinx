@@ -673,10 +673,19 @@ void BaseCtx::attributesToArchInfo()
                 std::string wire = strs[i * 3];
                 std::string pip = strs[i * 3 + 1];
                 PlaceStrength strength = (PlaceStrength)std::stoi(strs[i * 3 + 2]);
-                if (pip.empty())
-                    getCtx()->bindWire(getCtx()->getWireByName(id(wire)), ni, strength);
-                else
-                    getCtx()->bindPip(getCtx()->getPipByName(id(pip)), ni, strength);
+                if (pip.empty()) {
+                    WireId w = getCtx()->getWireByName(id(wire));
+                    if (w == WireId())
+                        log_error("ROUTING import on net '%s': unresolved wire '%s'\n",
+                                  ni->name.c_str(getCtx()), wire.c_str());
+                    getCtx()->bindWire(w, ni, strength);
+                } else {
+                    PipId p = getCtx()->getPipByName(id(pip));
+                    if (p == PipId())
+                        log_error("ROUTING import on net '%s': unresolved pip '%s'\n",
+                                  ni->name.c_str(getCtx()), pip.c_str());
+                    getCtx()->bindPip(p, ni, strength);
+                }
             }
         }
     }

@@ -361,6 +361,9 @@ int CommandHandler::executeMain(std::unique_ptr<Context> ctx)
             run_script_hook("post-route");
         }
 
+        if (getenv("NEXTPNR_TIMING_ONLY") != nullptr)
+            timing_analysis(ctx.get(), true, true, true, false);
+
         customBitstream(ctx.get());
     }
 

@@ -109,6 +109,7 @@ struct Timing
         delay_t slack;
     };
     std::vector<HoldEndpoint> hold_endpoints;
+    std::ofstream setup_export;
     CriticalPathMap *crit_path;
     DelayFrequency *slack_histogram;
     NetCriticalityMap *net_crit;
@@ -168,6 +169,13 @@ struct Timing
             }
             if (!async_groups.empty())
                 log_info("timing: loaded %zu async clock group(s) from %s\n", async_groups.size(), fn);
+        }
+        if (slack_histogram != nullptr) {
+            if (const char *sf = getenv("NEXTPNR_SETUP_EXPORT")) {
+                setup_export.open(sf);
+                if (setup_export)
+                    setup_export << "cell\tport\tslack_ns\tnet\tnet_delay_ns\tdriver_arrival_ns\tsetup_ns\tperiod_ns\tlaunch_clk\tcapture_clk\tpath_len\n";
+            }
         }
     }
 
@@ -478,6 +486,14 @@ struct Timing
                             if (slack_histogram) {
                                 int slack_ps = ctx->getDelayNS(path_budget) * 1000;
                                 (*slack_histogram)[slack_ps]++;
+                            }
+                            if (setup_export.is_open()) {
+                                setup_export << usr.cell->name.c_str(ctx) << '\t' << usr.port.c_str(ctx) << '\t'
+                                             << ctx->getDelayNS(path_budget) << '\t' << net->name.c_str(ctx) << '\t'
+                                             << ctx->getDelayNS(net_delay) << '\t' << ctx->getDelayNS(net_arrival)
+                                             << '\t' << ctx->getDelayNS(setup) << '\t' << ctx->getDelayNS(period)
+                                             << '\t' << startdomain.first.clock.c_str(ctx) << '\t'
+                                             << clksig.c_str(ctx) << '\t' << nd.max_path_length << '\n';
                             }
                             ClockEvent dest_ev{clksig, edge};
                             ClockPair clockPair{startdomain.first, dest_ev};
