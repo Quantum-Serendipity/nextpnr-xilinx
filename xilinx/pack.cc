@@ -1375,6 +1375,22 @@ void XC7Packer::pack_bram()
                 disconnect_port(ctx, ci, ctx->id("DIPBDIP0"));
                 disconnect_port(ctx, ci, ctx->id("DIPBDIP1"));
             }
+            for (char port : {'A', 'B'}) {
+                if (int_or_default(ci->params, ctx->id(std::string("WRITE_WIDTH_") + port), 0) != 9)
+                    continue;
+                std::string dip = (port == 'A') ? "DIPADIP" : "DIPBDIP";
+                IdString lower = ctx->id(dip + "0"), upper = ctx->id(dip + "1");
+                NetInfo *parity = get_net_or_empty(ci, lower);
+                if (parity == nullptr)
+                    continue;
+                if (!ci->ports.count(upper)) {
+                    ci->ports[upper].name = upper;
+                    ci->ports[upper].type = PORT_IN;
+                }
+                disconnect_port(ctx, ci, upper);
+                connect_port(ctx, parity, ci, upper);
+                ci->attrs[ctx->id("X_ORIG_PORT_" + dip + "1")] = dip + "[0]";
+            }
             if (int_or_default(ci->params, ctx->id("WRITE_WIDTH_B"), 0) != 72) {
                 for (std::string s : {"L", "U"}) {
                     for (int i = 4; i < 8; i++) {
