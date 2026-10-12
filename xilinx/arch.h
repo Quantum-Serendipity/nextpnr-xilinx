@@ -2076,7 +2076,9 @@ struct Arch : BaseCtx
     void routeClock();
     void routeBufhcePassthroughCE();
     bool bridgeConstToWire(NetInfo *net, int pseudo_intent, WireId sink, int iter_max, int *iters_out = nullptr);
-    void applyFixedRoutes(const std::string &filename);
+    bool isGlobalClockNet(const NetInfo *clk_net, bool &lenient) const;
+    std::unordered_set<IdString> fixedRouteClocks(const std::string &filename) const;
+    void applyFixedRoutes(const std::string &filename, std::function<void()> route_unlocked_clocks);
     // region_only restricts the dump to the NEXTPNR_PARTITION_ROI rectangle.
     void writeFixedRoutes(const std::string &filename, bool region_only = false) const;
     bool gtClockTemplateRoute(NetInfo *clk_net, PortRef &usr);

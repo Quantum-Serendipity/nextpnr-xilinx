@@ -1491,7 +1491,7 @@ bool Arch::gtClockTemplateRoute(NetInfo *clk_net, PortRef &usr)
 // a true freeze must lock them).  '#' begins a comment; blank lines ignored.
 // The net name must match a net in the loaded design.  writeFixedRoutes() emits
 // exactly this form.
-void Arch::applyFixedRoutes(const std::string &filename)
+void Arch::applyFixedRoutes(const std::string &filename, std::function<void()> route_unlocked_clocks)
 {
     std::ifstream in(filename);
     if (!in)
@@ -1507,6 +1507,7 @@ void Arch::applyFixedRoutes(const std::string &filename)
         return s.substr(a, b - a + 1);
     };
 
+    const std::unordered_set<IdString> fixed_clocks = fixedRouteClocks(filename);
     int nbound = 0, nlines = 0, miss_net = 0, miss_tile = 0, miss_pip = 0, conflict = 0, malformed = 0,
         redundant = 0;
     std::unordered_set<NetInfo *> fixed_nets;
@@ -1640,6 +1641,7 @@ void Arch::applyFixedRoutes(const std::string &filename)
         return true;
     };
     std::unordered_map<std::string, std::vector<std::pair<WireId, WireId>>> byname;
+    std::vector<std::string> lines;
     {
         std::string pl;
         while (std::getline(in, pl)) {
@@ -1649,6 +1651,7 @@ void Arch::applyFixedRoutes(const std::string &filename)
             pl = trim(pl);
             if (pl.empty())
                 continue;
+            lines.push_back(pl);
             size_t sp2 = pl.find_first_of(" \t");
             if (sp2 == std::string::npos)
                 continue;
@@ -1656,8 +1659,6 @@ void Arch::applyFixedRoutes(const std::string &filename)
             if (resolve_sd(trim(pl.substr(sp2)), s, d))
                 byname[pl.substr(0, sp2)].push_back({s, d});
         }
-        in.clear();
-        in.seekg(0);
     }
     std::unordered_map<std::string, NetInfo *> topo_net;
     int topo_hits = 0;
@@ -1756,24 +1757,7 @@ void Arch::applyFixedRoutes(const std::string &filename)
         return PipId();
     };
 
-    std::string line;
-    while (std::getline(in, line)) {
-        auto hash = line.find('#');
-        if (hash != std::string::npos)
-            line = line.substr(0, hash);
-        line = trim(line);
-        if (line.empty())
-            continue;
-        nlines++;
-        size_t sp = line.find_first_of(" \t");
-        if (sp == std::string::npos) {
-            if (malformed++ < 20)
-                log_warning("fixed-routes: malformed line (no pip): '%s'\n", line.c_str());
-            continue;
-        }
-        std::string netname = line.substr(0, sp);
-        std::string pipspec = trim(line.substr(sp));
-
+    auto resolve_net = [&](const std::string &netname) -> NetInfo * {
         NetInfo *net = nullptr;
         auto ov = topo_net.find(netname);
         if (ov != topo_net.end())
@@ -1800,139 +1784,160 @@ void Arch::applyFixedRoutes(const std::string &filename)
             if (pk != nullptr)
                 net = getNetByAlias(id(pk));
         }
-        if (net == nullptr) {
-            if (miss_net++ < 20)
-                log_warning("fixed-routes: net not found: '%s'\n", netname.c_str());
-            continue;
-        }
+        return net;
+    };
 
-        // Two accepted pip forms:
-        //  (a) index form  <tile>/<src_idx>.<dst_idx>   (nextpnr-native; writeFixedRoutes emits this)
-        //  (b) wire-name   <src_wire>-><dst_wire>       (from Vivado/RapidWright extraction; wire names
-        //                                                are shared Xilinx nomenclature, resolved by getWireByName)
-        PipId pip;
-        size_t arrow = pipspec.find("->");
-        if (arrow != std::string::npos) {
-            std::string srcname = trim(pipspec.substr(0, arrow));
-            std::string dstname = trim(pipspec.substr(arrow + 2));
-            WireId src = getWireByName(id(srcname));
-            WireId dst = getWireByName(id(dstname));
-            if (src == WireId() || dst == WireId()) {
-                if (miss_tile++ < 20)
-                    log_warning("fixed-routes: wire not found: '%s' or '%s'\n", srcname.c_str(), dstname.c_str());
+    auto bind_lines = [&](bool locked_clocks) {
+        for (const std::string &line : lines) {
+            size_t sp = line.find_first_of(" \t");
+            std::string netname = line.substr(0, sp);
+            NetInfo *net = sp == std::string::npos ? nullptr : resolve_net(netname);
+            if ((net != nullptr && fixed_clocks.count(net->name) != 0) != locked_clocks)
+                continue;
+            nlines++;
+            if (sp == std::string::npos) {
+                if (malformed++ < 20)
+                    log_warning("fixed-routes: malformed line (no pip): '%s'\n", line.c_str());
                 continue;
             }
-            // Vivado-extracted names may be ANY member wire of a node (Vivado's
-            // node root differs from ours); pips attach only to the canonical
-            // node-root WireId, so canonicalise before the pip scan.
-            src = canonicalWireId(chip_info, src.tile, src.index);
-            dst = canonicalWireId(chip_info, dst.tile, dst.index);
-            for (auto p : getPipsDownhill(src))
-                if (getPipDstWire(p) == dst) {
-                    pip = p;
-                    break;
+            std::string pipspec = trim(line.substr(sp));
+            if (net == nullptr) {
+                if (miss_net++ < 20)
+                    log_warning("fixed-routes: net not found: '%s'\n", netname.c_str());
+                continue;
+            }
+
+            // Two accepted pip forms:
+            //  (a) index form  <tile>/<src_idx>.<dst_idx>   (nextpnr-native; writeFixedRoutes emits this)
+            //  (b) wire-name   <src_wire>-><dst_wire>       (from Vivado/RapidWright extraction; wire names
+            //                                                are shared Xilinx nomenclature, resolved by getWireByName)
+            PipId pip;
+            size_t arrow = pipspec.find("->");
+            if (arrow != std::string::npos) {
+                std::string srcname = trim(pipspec.substr(0, arrow));
+                std::string dstname = trim(pipspec.substr(arrow + 2));
+                WireId src = getWireByName(id(srcname));
+                WireId dst = getWireByName(id(dstname));
+                if (src == WireId() || dst == WireId()) {
+                    if (miss_tile++ < 20)
+                        log_warning("fixed-routes: wire not found: '%s' or '%s'\n", srcname.c_str(), dstname.c_str());
+                    continue;
                 }
-            if (pip == PipId()) // fall back to an uphill scan (e.g. site-pin entry pips)
-                for (auto p : getPipsUphill(dst))
-                    if (getPipSrcWire(p) == src) {
+                // Vivado-extracted names may be ANY member wire of a node (Vivado's
+                // node root differs from ours); pips attach only to the canonical
+                // node-root WireId, so canonicalise before the pip scan.
+                src = canonicalWireId(chip_info, src.tile, src.index);
+                dst = canonicalWireId(chip_info, dst.tile, dst.index);
+                for (auto p : getPipsDownhill(src))
+                    if (getPipDstWire(p) == dst) {
                         pip = p;
                         break;
                     }
-            if (pip == PipId())
-                pip = xmux_site_pip(net, srcname, dstname);
-            if (pip == PipId()) {
-                if (miss_pip++ < 20)
-                    log_warning("fixed-routes: no pip %s->%s\n", srcname.c_str(), dstname.c_str());
-                continue;
-            }
-        } else {
-            size_t slash = pipspec.find('/');
-            size_t dot = pipspec.rfind('.');
-            if (slash == std::string::npos || dot == std::string::npos || dot < slash) {
-                if (malformed++ < 20)
-                    log_warning("fixed-routes: bad pip spec: '%s'\n", pipspec.c_str());
-                continue;
-            }
-            std::string tilename = pipspec.substr(0, slash);
-            int src_idx, dst_idx;
-            try {
-                src_idx = std::stoi(pipspec.substr(slash + 1, dot - slash - 1));
-                dst_idx = std::stoi(pipspec.substr(dot + 1));
-            } catch (...) {
-                if (malformed++ < 20)
-                    log_warning("fixed-routes: non-numeric wire index: '%s'\n", pipspec.c_str());
-                continue;
-            }
-            auto tbn = tile_by_name.find(tilename);
-            if (tbn == tile_by_name.end()) {
-                if (miss_tile++ < 20)
-                    log_warning("fixed-routes: tile not found: '%s'\n", tilename.c_str());
-                continue;
-            }
-            int tile = tbn->second;
-            auto &td = chip_info->tile_types[chip_info->tile_insts[tile].type];
-            for (int i = 0; i < td.num_pips; i++) {
-                if (td.pip_data[i].src_index == src_idx && td.pip_data[i].dst_index == dst_idx) {
-                    pip.tile = tile;
-                    pip.index = i;
-                    break;
+                if (pip == PipId()) // fall back to an uphill scan (e.g. site-pin entry pips)
+                    for (auto p : getPipsUphill(dst))
+                        if (getPipSrcWire(p) == src) {
+                            pip = p;
+                            break;
+                        }
+                if (pip == PipId())
+                    pip = xmux_site_pip(net, srcname, dstname);
+                if (pip == PipId()) {
+                    if (miss_pip++ < 20)
+                        log_warning("fixed-routes: no pip %s->%s\n", srcname.c_str(), dstname.c_str());
+                    continue;
+                }
+            } else {
+                size_t slash = pipspec.find('/');
+                size_t dot = pipspec.rfind('.');
+                if (slash == std::string::npos || dot == std::string::npos || dot < slash) {
+                    if (malformed++ < 20)
+                        log_warning("fixed-routes: bad pip spec: '%s'\n", pipspec.c_str());
+                    continue;
+                }
+                std::string tilename = pipspec.substr(0, slash);
+                int src_idx, dst_idx;
+                try {
+                    src_idx = std::stoi(pipspec.substr(slash + 1, dot - slash - 1));
+                    dst_idx = std::stoi(pipspec.substr(dot + 1));
+                } catch (...) {
+                    if (malformed++ < 20)
+                        log_warning("fixed-routes: non-numeric wire index: '%s'\n", pipspec.c_str());
+                    continue;
+                }
+                auto tbn = tile_by_name.find(tilename);
+                if (tbn == tile_by_name.end()) {
+                    if (miss_tile++ < 20)
+                        log_warning("fixed-routes: tile not found: '%s'\n", tilename.c_str());
+                    continue;
+                }
+                int tile = tbn->second;
+                auto &td = chip_info->tile_types[chip_info->tile_insts[tile].type];
+                for (int i = 0; i < td.num_pips; i++) {
+                    if (td.pip_data[i].src_index == src_idx && td.pip_data[i].dst_index == dst_idx) {
+                        pip.tile = tile;
+                        pip.index = i;
+                        break;
+                    }
+                }
+                if (pip == PipId()) {
+                    if (miss_pip++ < 20)
+                        log_warning("fixed-routes: no pip %s/%d.%d\n", tilename.c_str(), src_idx, dst_idx);
+                    continue;
                 }
             }
-            if (pip == PipId()) {
-                if (miss_pip++ < 20)
-                    log_warning("fixed-routes: no pip %s/%d.%d\n", tilename.c_str(), src_idx, dst_idx);
+            // Already claimed (e.g. by the clock spine or a duplicate line)?  Skip
+            // rather than trip the bindPip assert; warn only on a real conflict.
+            NetInfo *pn = getBoundPipNet(pip);
+            if (pn != nullptr) {
+                if (pn != net && conflict++ < 20)
+                    log_warning("fixed-routes: pip %s already bound to '%s', wanted '%s'\n",
+                                getPipName(pip).str(this).c_str(), nameOf(pn), nameOf(net));
                 continue;
             }
-        }
-        // Already claimed (e.g. by the clock spine or a duplicate line)?  Skip
-        // rather than trip the bindPip assert; warn only on a real conflict.
-        NetInfo *pn = getBoundPipNet(pip);
-        if (pn != nullptr) {
-            if (pn != net && conflict++ < 20)
-                log_warning("fixed-routes: pip %s already bound to '%s', wanted '%s'\n",
-                            getPipName(pip).str(this).c_str(), nameOf(pn), nameOf(net));
-            continue;
-        }
-        WireId src = getPipSrcWire(pip), dst = getPipDstWire(pip);
-        NetInfo *sn = getBoundWireNet(src), *dn = getBoundWireNet(dst);
-        // A wire already owned by a DIFFERENT net means the file mis-associates
-        // pips (e.g. a lossy net-name mapping).  Skip with a warning rather than
-        // trip bindPip's wire-ownership assert.
-        if ((sn != nullptr && sn != net) || (dn != nullptr && dn != net)) {
-            if (conflict++ < 20)
-                log_warning("fixed-routes: pip %s wire owned by another net (%s); skipping\n",
-                            getPipName(pip).str(this).c_str(), nameOf(sn != nullptr && sn != net ? sn : dn));
-            continue;
-        }
-        // A wire has exactly ONE driver.  If dst already belongs to this net it
-        // may already be DRIVEN -- routeClock() runs before us and routes the
-        // dedicated clock backbone, so a whole-design import (which carries the
-        // clock nets too, they are TYPE == SIGNAL in Vivado) can offer a second,
-        // fabric-side source for a BUFGCTRL input the backbone already feeds.
-        // The check above only rejects a different NET, so the second pip was
-        // bound and the FASM selected two sources for one mux -- fasm2frames
-        // then aborts with FasmInconsistentBits (measured: 3 BUFGCTRL I0 muxes,
-        // each CK_MUXED* from routeClock plus IMUX* from the import).
-        if (dn == net) {
-            bool already_driven = false;
-            for (auto up : getPipsUphill(dst))
-                if (getBoundPipNet(up) != nullptr) {
-                    already_driven = true;
-                    break;
+            WireId src = getPipSrcWire(pip), dst = getPipDstWire(pip);
+            NetInfo *sn = getBoundWireNet(src), *dn = getBoundWireNet(dst);
+            // A wire already owned by a DIFFERENT net means the file mis-associates
+            // pips (e.g. a lossy net-name mapping).  Skip with a warning rather than
+            // trip bindPip's wire-ownership assert.
+            if ((sn != nullptr && sn != net) || (dn != nullptr && dn != net)) {
+                if (conflict++ < 20)
+                    log_warning("fixed-routes: pip %s wire owned by another net (%s); skipping\n",
+                                getPipName(pip).str(this).c_str(), nameOf(sn != nullptr && sn != net ? sn : dn));
+                continue;
+            }
+            // A wire has exactly ONE driver.  If dst already belongs to this net it
+            // may already be DRIVEN -- routeClock() runs before us and routes the
+            // dedicated clock backbone, so a whole-design import (which carries the
+            // clock nets too, they are TYPE == SIGNAL in Vivado) can offer a second,
+            // fabric-side source for a BUFGCTRL input the backbone already feeds.
+            // The check above only rejects a different NET, so the second pip was
+            // bound and the FASM selected two sources for one mux -- fasm2frames
+            // then aborts with FasmInconsistentBits (measured: 3 BUFGCTRL I0 muxes,
+            // each CK_MUXED* from routeClock plus IMUX* from the import).
+            if (dn == net) {
+                bool already_driven = false;
+                for (auto up : getPipsUphill(dst))
+                    if (getBoundPipNet(up) != nullptr) {
+                        already_driven = true;
+                        break;
+                    }
+                if (already_driven) {
+                    redundant++;
+                    continue;
                 }
-            if (already_driven) {
-                redundant++;
-                continue;
             }
+            if (sn == nullptr)
+                bindWire(src, net, STRENGTH_LOCKED);
+            if (dn == nullptr)
+                bindWire(dst, net, STRENGTH_LOCKED);
+            bindPip(pip, net, STRENGTH_LOCKED);
+            fixed_nets.insert(net);
+            nbound++;
         }
-        if (sn == nullptr)
-            bindWire(src, net, STRENGTH_LOCKED);
-        if (dn == nullptr)
-            bindWire(dst, net, STRENGTH_LOCKED);
-        bindPip(pip, net, STRENGTH_LOCKED);
-        fixed_nets.insert(net);
-        nbound++;
-    }
+    };
+    bind_lines(true);
+    route_unlocked_clocks();
+    bind_lines(false);
     log_info("    fixed-routes: bound %d/%d pips (net-miss %d, tile-miss %d, pip-miss %d, conflict %d, malformed %d, "
              "redundant-driver %d)\n",
              nbound, nlines, miss_net, miss_tile, miss_pip, conflict, malformed, redundant);
@@ -2569,14 +2574,55 @@ void Arch::writeFixedRoutes(const std::string &filename, bool region_only) const
         log_info("Wrote %d fixed-route pips across %d nets to '%s'\n", npips, nnets, filename.c_str());
 }
 
-void Arch::routeClock()
+bool Arch::isGlobalClockNet(const NetInfo *clk_net, bool &lenient) const
 {
-    log_info("Routing global clocks...\n");
+    auto clk_driver = clk_net->driver;
+    if (clk_driver.cell == nullptr)
+        return false;
+    auto driver_type = clk_driver.cell->type;
+    auto no_users = clk_net->users.size();
+    auto clk_net_user = no_users == 1 ? clk_net->users.front().cell : nullptr;
+    auto clk_net_user_type = clk_net_user == nullptr ? IdString() : clk_net_user->type;
+    auto from_pll_or_mmcm =
+        driver_type == id_PLLE2_ADV_PLLE2_ADV ||
+        driver_type == id_MMCME2_ADV_MMCME2_ADV;
+    auto to_pll_or_mmcm =
+        clk_net_user_type == id_PLLE2_ADV_PLLE2_ADV ||
+        clk_net_user_type == id_MMCME2_ADV_MMCME2_ADV;
+    auto to_pll_mmcm_clkin1 = to_pll_or_mmcm && clk_net->users.front().port == id_CLKIN1;
+
+    // A single-user net feeding a BUFGCTRL clock input (I0) — e.g. the
+    // IBUFDS->BUFG input net — must reach the buffer through the dedicated
+    // CCIO->HCLK_CMT->CLK_HROW->CK_MUXED backbone.  Left to the general
+    // router it grabs the fabric pip CLK_BUFG_..._IMUX*_*->BUFGCTRL_I0,
+    // which does NOT deliver a working clock (the BUFG output is dead and
+    // the whole design freezes).  Route it here as a global so the
+    // dedicated path is bound LOCKED before the general router runs.
+    auto to_bufg_input = (no_users == 1 && clk_net_user_type == id_BUFGCTRL &&
+                          clk_net->users.front().port == id_I0);
+
+    lenient = to_pll_mmcm_clkin1 || to_bufg_input;
+    if ((driver_type == id_BUFGCTRL    || driver_type == id_BUFCE_BUFG_PS ||
+         driver_type == id_BUFCE_BUFCE || driver_type == id_BUFGCE_DIV_BUFGCE_DIV) &&
+        clk_driver.port == id_O)
+        return true;
+    if (no_users == 1 && from_pll_or_mmcm &&
+        (clk_net_user_type == id_BUFGCTRL || clk_net_user_type == id_BUFCE_BUFCE ||
+         clk_net_user_type == id_BUFGCE_DIV_BUFGCE_DIV))
+        return true;
+    return lenient;
+}
+
+std::unordered_set<IdString> Arch::fixedRouteClocks(const std::string &filename) const
+{
     // Clock nets whose golden distribution is captured in the fixed-routes file
     // (the frozen hard-macro's 125MHz eth clock: txoutclk / bufg_userclk / ...)
     // must NOT be (re)built here -- routeClock picks its own, unvalidated GCLK
     // lanes (GCLKxx) that don't propagate on silicon.  Leave them for
     // applyFixedRoutes to bind EXACTLY as golden (validated GCLK16/17 spine).
+    std::unordered_set<IdString> fixed_clocks;
+    if (filename.empty())
+        return fixed_clocks;
     auto clknorm = [](const std::string &s) {
         std::string r;
         for (char c : s)
@@ -2584,72 +2630,41 @@ void Arch::routeClock()
                 r += (c == '/' ? '.' : c);
         return r;
     };
-    std::unordered_set<std::string> fixed_clocks;
-    {
-        std::string fn = str_or_default(settings, id("fixed-routes"), "");
-        if (!fn.empty()) {
-            std::ifstream fin(fn);
-            std::string ln;
-            while (std::getline(fin, ln)) {
-                auto h = ln.find('#');
-                if (h != std::string::npos)
-                    ln = ln.substr(0, h);
-                size_t b = ln.find_first_not_of(" \t\r\n");
-                if (b == std::string::npos)
-                    continue;
-                size_t sp = ln.find_first_of(" \t", b);
-                if (sp == std::string::npos)
-                    continue;
-                fixed_clocks.insert(clknorm(ln.substr(b, sp - b)));
-            }
-        }
+    std::unordered_set<std::string> named;
+    std::ifstream fin(filename);
+    std::string ln;
+    while (std::getline(fin, ln)) {
+        auto h = ln.find('#');
+        if (h != std::string::npos)
+            ln = ln.substr(0, h);
+        size_t b = ln.find_first_not_of(" \t\r\n");
+        if (b == std::string::npos)
+            continue;
+        size_t sp = ln.find_first_of(" \t", b);
+        if (sp == std::string::npos)
+            continue;
+        named.insert(clknorm(ln.substr(b, sp - b)));
     }
-    // Special pass for faster routing of global clock psuedo-net
+    for (auto &net : nets) {
+        bool lenient;
+        if (isGlobalClockNet(net.second.get(), lenient) && named.count(clknorm(net.first.str(this))))
+            fixed_clocks.insert(net.first);
+    }
+    return fixed_clocks;
+}
+
+void Arch::routeClock()
+{
+    log_info("Routing global clocks...\n");
+    const std::unordered_set<IdString> fixed_clocks =
+            fixedRouteClocks(str_or_default(settings, id("fixed-routes"), ""));
     for (auto net : sorted(nets)) {
         NetInfo *clk_net = net.second;
-        auto clk_driver = clk_net->driver;
-        if (clk_driver.cell == nullptr)
-            continue;
-        auto driver_type = clk_driver.cell->type;
-        auto no_users = clk_net->users.size();
-        auto clk_net_user = no_users == 1 ? clk_net->users.front().cell : nullptr;
-        auto clk_net_user_type = clk_net_user == nullptr ? IdString() : clk_net_user->type;
-        auto from_pll_or_mmcm =
-            driver_type == id_PLLE2_ADV_PLLE2_ADV ||
-            driver_type == id_MMCME2_ADV_MMCME2_ADV;
-        auto to_pll_or_mmcm =
-            clk_net_user_type == id_PLLE2_ADV_PLLE2_ADV ||
-            clk_net_user_type == id_MMCME2_ADV_MMCME2_ADV;
-        auto to_pll_mmcm_clkin1 = to_pll_or_mmcm && clk_net->users.front().port == id_CLKIN1;
-
-        // A single-user net feeding a BUFGCTRL clock input (I0) — e.g. the
-        // IBUFDS->BUFG input net — must reach the buffer through the dedicated
-        // CCIO->HCLK_CMT->CLK_HROW->CK_MUXED backbone.  Left to the general
-        // router it grabs the fabric pip CLK_BUFG_..._IMUX*_*->BUFGCTRL_I0,
-        // which does NOT deliver a working clock (the BUFG output is dead and
-        // the whole design freezes).  Route it here as a global so the
-        // dedicated path is bound LOCKED before the general router runs.
-        auto to_bufg_input = (no_users == 1 && clk_net_user_type == id_BUFGCTRL &&
-                              clk_net->users.front().port == id_I0);
-
-        // check if we have a global clock net, skip otherwise
-        bool is_global = false;
-        if ((driver_type == id_BUFGCTRL    || driver_type == id_BUFCE_BUFG_PS ||
-             driver_type == id_BUFCE_BUFCE || driver_type == id_BUFGCE_DIV_BUFGCE_DIV) &&
-            clk_driver.port == id_O)
-            is_global = true;
-        else if (no_users == 1 && from_pll_or_mmcm &&
-                 (clk_net_user_type == id_BUFGCTRL || clk_net_user_type == id_BUFCE_BUFCE ||
-                  clk_net_user_type == id_BUFGCE_DIV_BUFGCE_DIV))
-            is_global = true;
-        else if (to_pll_mmcm_clkin1)
-            is_global = true;
-        else if (to_bufg_input)
-            is_global = true;
-        if (!is_global)
+        bool lenient = false;
+        if (!isGlobalClockNet(clk_net, lenient))
             continue;
 
-        if (fixed_clocks.count(clknorm(clk_net->name.str(this)))) {
+        if (fixed_clocks.count(clk_net->name)) {
             log_info("    clock '%s' left to fixed-routes (golden distribution)\n", clk_net->name.c_str(this));
             continue;
         }
@@ -2726,7 +2741,7 @@ void Arch::routeClock()
             }
             if (dest == WireId()) {
                 log_info("            failed to find a route using dedicated resources.\n");
-                if (to_pll_mmcm_clkin1 || to_bufg_input) {
+                if (lenient) {
                     // Due to some missing pips, currently special case more lenient solution
                     std::queue<WireId> empty;
                     std::swap(visit, empty);
@@ -2927,22 +2942,12 @@ bool Arch::route()
     // forcing the IBUFDS->BUFG input onto a fabric IMUX pip that does not
     // deliver a working clock (dead design).  Clocks first; Vcc routes around
     // the LOCKED clock wires afterwards.
-    // Lock any frozen hard-macro routing BEFORE routeClock and the general
-    // router: macro-internal clock trees (BUFG spine included) come fully
-    // bound from the fixed-routes file; routeClock then only fills in the
-    // user clocks around the locked wires, and router2 treats everything
-    // locked as immovable exactly like the clock spine.
-    // routeClock FIRST so it has the full routing graph for the dedicated
-    // clock backbone (IBUFDS_GTE2->BUFG etc.) exactly like the vanilla R0
-    // flow -- locking macro data pips beforehand starves routeClock's
-    // dedicated-resource search and the GT refclk arc falls to (and fails
-    // in) router2.  Safe now that fixed-routes carries DATA nets only
-    // (SIGNAL-typed); the macro clock trees are (re)built by routeClock.
-    routeClock();
     {
         std::string fixed = str_or_default(settings, id("fixed-routes"), "");
-        if (!fixed.empty())
-            applyFixedRoutes(fixed);
+        if (fixed.empty())
+            routeClock();
+        else
+            applyFixedRoutes(fixed, [&]() { routeClock(); });
     }
     // NEXTPNR_ROUTE_FIXED_ONLY=1: treat the IMPORTED routing AS the routing and
     // run no general router at all.  Replaying a complete external route (e.g.
