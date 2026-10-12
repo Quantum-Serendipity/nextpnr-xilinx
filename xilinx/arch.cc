@@ -100,6 +100,29 @@ Arch::Arch(ArchArgs args) : args(args)
 
     if (xc7)
         setup_pip_blacklist();
+
+    static const char *const ff_variant_names[3] = {"FF_INIT", "REG_INIT_FF", "REG_INIT_LAT"};
+    for (int i = 0; i < 3; i++) {
+        id_ff_variant[i] = id(ff_variant_names[i]);
+        id_ff_variant_qh[i] = id(std::string(ff_variant_names[i]) + "_QH");
+        id_ff_variant_ql[i] = id(std::string(ff_variant_names[i]) + "_QL");
+    }
+    id_ff_din = id("DIN");
+    const TimingDataPOD *td = chip_info->timing_data.get();
+    for (int t = 0; td != nullptr && t < td->num_tile_types && !chipdb_has_timing_checks; t++) {
+        const TileCellTimingPOD &tt = td->tile_cell_timings[t];
+        for (int i = 0; i < tt.num_instances && !chipdb_has_timing_checks; i++)
+            for (int v = 0; v < tt.instances[i].num_celltypes; v++)
+                if (tt.instances[i].celltypes[v].num_checks > 0) {
+                    chipdb_has_timing_checks = true;
+                    break;
+                }
+    }
+    if (xc7 && !chipdb_has_timing_checks)
+        log_warning("chipdb %s carries no cell timing checks; every SLICE flip-flop is timed with the fixed "
+                    "setup 0.050ns, hold 0.143ns, clk->Q 0.259/0.117ns. Rebuild the chipdb with an exporter "
+                    "that reads the SDF's SETUP/HOLD/RECOVERY/REMOVAL entries.\n",
+                    args.chipdb.c_str());
 }
 
 // -----------------------------------------------------------------------
@@ -4089,20 +4112,88 @@ TimingClockingInfo Arch::getPortClockingInfo(const CellInfo *cell, IdString port
         info.edge = bool_or_default(cell->params, id("IS_" + ck + "_INVERTED"), false) ? FALLING_EDGE : RISING_EDGE;
         return info;
     }
-    // FF (SLICE_FFX/FDRE-family) timing.  Was a flat 0.1ns stub for all three,
-    // which under-set clk->Q (real slow-corner ~0.26ns) and made hold analysis
-    // impossible.  Values below are the golden-Vivado xc7 -2 calibration
-    // (arcs.tsv per-type slow corner: FDRE clk->Q ~0.26, setup ~0.05, hold
-    // ~0.14ns).  DelayInfo is single-valued today (min==max) so these are the
-    // slow/late corner; the min/early (hold) corner scales by ~0.45 once
-    // DelayInfo carries a separate min (Phase-1 hold pass).
     info.setup = getDelayFromNS(0.05);
-    info.hold = getDelayFromNS(0.143);    // hold requirement: use as-is (min==max)
+    info.hold = getDelayFromNS(0.143);
     info.clockToQ = getDelayFromNS(0.259);
-    info.clockToQ.min = getDelayFromNS(0.117).delay;  // fast-corner clk->Q for hold
+    info.clockToQ.min = getDelayFromNS(0.117).delay;
     info.clock_port = xc7 ? id_CK : id_CLK;
     info.edge = RISING_EDGE;
+
+    if (!xc7 || !chipdb_has_timing_checks || cell->type != id_SLICE_FFX || cell->bel == BelId())
+        return info;
+    int tt_id = locInfo(cell->bel).timing_index;
+    int inst_id = locInfo(cell->bel).bel_data[cell->bel.index].timing_inst;
+    int vi = ((locInfo(cell->bel).bel_data[cell->bel.index].z & 0xF) == BEL_FF2) ? 0
+             : cell->ffInfo.is_latch                                              ? 2
+                                                                                  : 1;
+    IdString variant = id_ff_variant[vi];
+
+    if (port == id_Q) {
+        DelayInfo ctq;
+        if (xc7_cell_timing_lookup(tt_id, inst_id, variant, id_CLK, id_Q, ctq, &ctq.min))
+            info.clockToQ = ctq;
+        else
+            xc7FFTimingFallback(cell, variant, id_Q, TIMING_CHECK_SETUP, false, 0.259);
+        return info;
+    }
+    if (port == info.clock_port)
+        return info;
+
+    delay_t v = 0;
+    if (port == id_SR) {
+        delay_t rec = 0, rem = 0;
+        bool got_rec = false, got_rem = false;
+        for (IdString sr_variant : {id_ff_variant_qh[vi], id_ff_variant_ql[vi]}) {
+            if (xc7_cell_timing_check_lookup(tt_id, inst_id, sr_variant, TIMING_CHECK_RECOVERY, id_SR, id_CLK, v)) {
+                rec = got_rec ? std::max(rec, v) : v;
+                got_rec = true;
+            }
+            if (xc7_cell_timing_check_lookup(tt_id, inst_id, sr_variant, TIMING_CHECK_REMOVAL, id_SR, id_CLK, v)) {
+                rem = got_rem ? std::max(rem, v) : v;
+                got_rem = true;
+            }
+        }
+        if (got_rec)
+            info.setup.delay = rec;
+        else
+            xc7FFTimingFallback(cell, variant, port, TIMING_CHECK_RECOVERY, vi == 2, 0.05);
+        if (got_rem)
+            info.hold.delay = std::max<delay_t>(rem, 0);
+        else
+            xc7FFTimingFallback(cell, variant, port, TIMING_CHECK_REMOVAL, vi == 2, 0.143);
+        return info;
+    }
+
+    IdString sig = (port == id_D) ? id_ff_din : port;
+    bool expected = vi == 2 && port == id_CE;
+    if (xc7_cell_timing_check_lookup(tt_id, inst_id, variant, TIMING_CHECK_SETUP, sig, id_CLK, v))
+        info.setup.delay = v;
+    else
+        xc7FFTimingFallback(cell, variant, port, TIMING_CHECK_SETUP, expected, 0.05);
+    if (xc7_cell_timing_check_lookup(tt_id, inst_id, variant, TIMING_CHECK_HOLD, sig, id_CLK, v))
+        info.hold.delay = std::max<delay_t>(v, 0);
+    else
+        xc7FFTimingFallback(cell, variant, port, TIMING_CHECK_HOLD, expected, 0.143);
     return info;
+}
+
+void Arch::xc7FFTimingFallback(const CellInfo *cell, IdString variant, IdString port, TimingCheckType kind,
+                               bool expected, double fallback_ns) const
+{
+    IdString tile_type = getBelTileType(cell->bel);
+    if (!ff_timing_fallback_logged.emplace(tile_type, variant, port, int(kind)).second)
+        return;
+    static const char *const kind_names[] = {"setup check", "hold check", "width check", "recovery check",
+                                             "removal check"};
+    const char *what = port == id_Q ? "CLK->Q delay" : kind_names[kind];
+    if (expected)
+        log_info("prjxray has no %s for %s.%s in tile type %s (first cell '%s' at %s); using the fixed %.3fns\n",
+                 what, variant.c_str(this), port.c_str(this), tile_type.c_str(this), cell->name.c_str(this),
+                 getBelName(cell->bel).c_str(this), fallback_ns);
+    else
+        log_warning("prjxray has no %s for %s.%s in tile type %s (first cell '%s' at %s); using the fixed %.3fns\n",
+                    what, variant.c_str(this), port.c_str(this), tile_type.c_str(this), cell->name.c_str(this),
+                    getBelName(cell->bel).c_str(this), fallback_ns);
 }
 
 int Arch::getHclkForIob(BelId pad)
@@ -4167,16 +4258,22 @@ boost::optional<const Tres &> db_binary_search(const Tres *list, int count, Tget
 }
 } // namespace
 
-bool Arch::xc7_cell_timing_lookup(int tt_id, int inst_id, IdString variant, IdString from_port, IdString to_port,
-                                  DelayInfo &delay) const
+const CellTimingPOD *Arch::xc7_cell_timing_variant(int tt_id, int inst_id, IdString variant) const
 {
     if (tt_id == -1 || inst_id == -1)
-        return false;
+        return nullptr;
     const InstanceTimingPOD &inst = chip_info->timing_data->tile_cell_timings[tt_id].instances[inst_id];
     auto found_var = db_binary_search(
             inst.celltypes.get(), inst.num_celltypes, [](const CellTimingPOD &ct) { return ct.variant_name; },
             variant.index);
-    if (!found_var)
+    return found_var ? &*found_var : nullptr;
+}
+
+bool Arch::xc7_cell_timing_lookup(int tt_id, int inst_id, IdString variant, IdString from_port, IdString to_port,
+                                  DelayInfo &delay, delay_t *min_delay) const
+{
+    const CellTimingPOD *found_var = xc7_cell_timing_variant(tt_id, inst_id, variant);
+    if (found_var == nullptr)
         return false;
 
     const CellTimingPOD &ct = *found_var;
@@ -4187,6 +4284,24 @@ bool Arch::xc7_cell_timing_lookup(int tt_id, int inst_id, IdString variant, IdSt
     if (!found_delay)
         return false;
     delay.delay = found_delay->max_delay;
+    if (min_delay != nullptr)
+        *min_delay = found_delay->min_delay;
+    return true;
+}
+
+bool Arch::xc7_cell_timing_check_lookup(int tt_id, int inst_id, IdString variant, TimingCheckType type,
+                                        IdString sig_port, IdString clock_port, delay_t &value) const
+{
+    const CellTimingPOD *found_var = xc7_cell_timing_variant(tt_id, inst_id, variant);
+    if (found_var == nullptr)
+        return false;
+    auto found_check = db_binary_search(
+            found_var->checks.get(), found_var->num_checks,
+            [](const CellTimingCheckPOD &c) { return std::make_tuple(c.sig_port, c.clock_port, c.check_type); },
+            std::make_tuple(sig_port.index, clock_port.index, int32_t(type)));
+    if (!found_check)
+        return false;
+    value = found_check->max_value;
     return true;
 }
 

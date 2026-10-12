@@ -28,6 +28,8 @@
 
 #include <functional>
 #include <iostream>
+#include <set>
+#include <tuple>
 
 NEXTPNR_NAMESPACE_BEGIN
 
@@ -1952,8 +1954,16 @@ struct Arch : BaseCtx
     // Perform placement validity checks, returning false on failure (all
     // implemented in arch_place.cc)
 
+    const CellTimingPOD *xc7_cell_timing_variant(int tt_id, int inst_id, IdString variant) const;
     bool xc7_cell_timing_lookup(int tt_id, int inst_id, IdString variant, IdString from_port, IdString to_port,
-                                DelayInfo &delay) const;
+                                DelayInfo &delay, delay_t *min_delay = nullptr) const;
+    bool xc7_cell_timing_check_lookup(int tt_id, int inst_id, IdString variant, TimingCheckType type,
+                                      IdString sig_port, IdString clock_port, delay_t &value) const;
+    void xc7FFTimingFallback(const CellInfo *cell, IdString variant, IdString port, TimingCheckType kind,
+                             bool expected, double fallback_ns) const;
+    bool chipdb_has_timing_checks = false;
+    IdString id_ff_variant[3], id_ff_variant_qh[3], id_ff_variant_ql[3], id_ff_din;
+    mutable std::set<std::tuple<IdString, IdString, IdString, int>> ff_timing_fallback_logged;
 
     // Whether or not a given cell can be placed at a given Bel
     // This is not intended for Bel type checks, but finer-grained constraints
