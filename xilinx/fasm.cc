@@ -2787,38 +2787,6 @@ struct FasmBackend
         }
     }
 
-    // A placed BUFR emits nothing today, and the divider is unreachable.
-    //
-    // BUFR configuration is carried by pp_config, the pseudo-pip table, keyed on
-    //
-    //     HCLK_IOI_RCLK_BEFORE_DIV<i>  ->  HCLK_IOI_RCLK_OUT<i>
-    //
-    // which is the route taken when a BUFR site is traversed as routing. When a
-    // BUFR is an actual placed cell the router enters and leaves the site, no
-    // pip is crossed, and the table never fires. Measured on a probe that
-    // instantiates a BUFR driving an ODDR: nextpnr reports "BUFR: 1/20" and the
-    // HCLK_IOI3 tile gets its eight routing pips --
-    //
-    //     HCLK_IOI3_X113Y78.HCLK_IOI_RCLK_BEFORE_DIV3.HCLK_IOI_RCLK0
-    //     HCLK_IOI3_X113Y78.HCLK_IOI_RCLK2RCLK3.HCLK_IOI_RCLK_OUT3
-    //     HCLK_IOI3_X113Y78.HCLK_IOI_BUFR3_CE.HCLK_RCLK_DIV_CE3
-    //     ...
-    //
-    // -- with no BUFR_Y*.IN_USE and no BUFR_Y*.BUFR_DIVIDE.* anywhere. The
-    // buffer is placed, wired, clocked and left unconfigured.
-    //
-    // The divider compounds it: pp_config hardcodes BUFR_DIVIDE.BYPASS, so even
-    // on the pass-through path a design asking for BUFR_DIVIDE("5") produced a
-    // bitstream bit-identical to one asking for BYPASS. prjxray-db has
-    // documented BYPASS and D1..D8 for all four slots since it was fuzzed
-    // (HCLK_IOI3.BUFR_Y0.BUFR_DIVIDE.D5 32_22 33_18 33_19 !33_20 !33_21), so
-    // the ladder was reachable in silicon and in the database, and unreachable
-    // only through this flow.
-    //
-    // Emitting from the cell rather than from the route fixes both: the
-    // configuration follows the instance, which is where the parameters are.
-    // The pp_config entries are left alone -- they cover the pass-through case,
-    // which is disjoint from this one.
     void write_bufr(CellInfo *ci)
     {
         // Site name is BUFR_X0Y<y> and the feature is BUFR_Y<y>, so the site's
@@ -2841,6 +2809,7 @@ struct FasmBackend
                       ci->name.c_str(ctx), divide.c_str());
         }
 
+        cur_tile = ci->bel.tile;
         push(get_tile_name(ci->bel.tile));
         push("BUFR_Y" + std::to_string(xy.y));
         write_bit("IN_USE");
@@ -2851,34 +2820,6 @@ struct FasmBackend
         pop();
     }
 
-    // A placed BUFIO emits nothing today, so the buffer is never switched on.
-    //
-    // #157 gave BUFIO a packer -- the cell is renamed to BUFIO_BUFIO and binds
-    // to the bel -- and from then on a design places and routes.  The clock
-    // reaches the site and leaves it through ordinary tile routing, which
-    // write_pip already emits:
-    //
-    //     HCLK_IOI3_X113Y78.HCLK_IOI_IO_PLL_CLK0_DMUX.HCLK_IOI_I2IOCLK_TOP0
-    //     HCLK_IOI3_X113Y78.HCLK_IOI_IOCLK0.HCLK_IOI_BUFIO_O0
-    //
-    // What is missing is the enable.  prjxray-db carries two bits per slot,
-    //
-    //     HCLK_IOI3.BUFIO_Y0.IN_USE 36_16 36_18
-    //     HCLK_IOI3.BUFIO_Y1.IN_USE 37_16 37_18
-    //     HCLK_IOI3.BUFIO_Y2.IN_USE 36_31 37_31
-    //     HCLK_IOI3.BUFIO_Y3.IN_USE 36_21 37_22
-    //
-    // (segbits_hclk_ioi3.db, added by openXC7/prjxray-db#7 from a
-    // 039-hclk-config campaign; the rows come out identical whether the BUFIO
-    // is fed from a clock-capable pad or from the region's MMCM, so they are
-    // an enable and not a record of the route).  Without them the bitstream
-    // assembles with those bits clear: valid-looking, and the I/O clock never
-    // starts -- the same silent-death shape as the RCLK2IO leaf that the same
-    // database change fixed on the BUFR side.
-    //
-    // Emitted from the cell for the reason given above write_bufr: the
-    // configuration belongs to the instance, and the pseudo-pip table only
-    // fires when the site is crossed as routing rather than occupied.
     void write_bufio(CellInfo *ci)
     {
         // Site name is BUFIO_X0Y<y> and the feature is BUFIO_Y<y>, where the
@@ -2887,6 +2828,7 @@ struct FasmBackend
         // y minus the lowest BUFIO y of the tile).
         auto xy = ctx->getSiteLocInTile(ci->bel);
 
+        cur_tile = ci->bel.tile;
         push(get_tile_name(ci->bel.tile));
         push("BUFIO_Y" + std::to_string(xy.y));
         write_bit("IN_USE");
