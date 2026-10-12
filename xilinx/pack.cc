@@ -1419,6 +1419,50 @@ void XC7Packer::pack_bram()
     }
 }
 
+void Arch::warn_prepacked_x9_parity() const
+{
+    int n_cells = 0, n_ports = 0;
+    for (auto cell : sorted(cells)) {
+        const CellInfo *ci = cell.second;
+        if (ci->type != id_RAMB36E1_RAMB36E1)
+            continue;
+        std::string bad;
+        for (char port : {'A', 'B'}) {
+            IdString width_key = (port == 'A') ? id_WRITE_WIDTH_A : id_WRITE_WIDTH_B;
+            if (int_or_default(ci->params, width_key, 0) != 9)
+                continue;
+            const char *dip = (port == 'A') ? "DIPADIP" : "DIPBDIP";
+            const NetInfo *lower = get_net_or_empty(ci, (port == 'A') ? id_DIPADIP0 : id_DIPBDIP0);
+            const NetInfo *upper = get_net_or_empty(ci, (port == 'A') ? id_DIPADIP1 : id_DIPBDIP1);
+            if (lower == nullptr || upper == lower)
+                continue;
+            if (!bad.empty())
+                bad += "; ";
+            if (upper == nullptr)
+                bad += stringf("port %c: %s1 is unconnected, so the upper-half parity input is undriven and "
+                               "odd-address parity writes do not carry %s0 ('%s')",
+                               port, dip, dip, lower->name.c_str(this));
+            else
+                bad += stringf("port %c: %s1 is on '%s', not on %s0's net '%s', so odd-address parity writes "
+                               "store '%s' instead",
+                               port, dip, upper->name.c_str(this), dip, lower->name.c_str(this),
+                               upper->name.c_str(this));
+            n_ports++;
+        }
+        if (bad.empty())
+            continue;
+        n_cells++;
+        log_warning("RAMB36E1 '%s' at WRITE_WIDTH 9 looks as if packed before the x9 parity rule -- %s; re-pack "
+                    "from the synthesis netlist\n",
+                    ci->name.c_str(this), bad.c_str());
+    }
+    if (n_cells > 0)
+        log_warning("x9 parity: %d RAMB36E1 cell(s), %d write port(s) loaded with packing skipped have a DIPxDIP1 "
+                    "that is not on DIPxDIP0's net, as if packed before the x9 parity rule; their odd-address "
+                    "parity writes do not carry DIPxDIP0 -- re-pack from the synthesis netlist\n",
+                    n_cells, n_ports);
+}
+
 void USPacker::pack_uram()
 {
     std::unordered_map<IdString, XFormRule> uram_rules;

@@ -140,6 +140,8 @@ void UspCommandHandler::customAfterLoad(Context *ctx)
     // set is available to any later diagnostic and so its cost and its census
     // line appear in every log rather than only in confined runs.
     ctx->snapshot_rm_cells();
+    if (vm.count("no-pack") && !vm.count("pack-only"))
+        ctx->warn_prepacked_x9_parity();
     // Force the partition rectangle to load NOW rather than lazily on the first
     // checkBelAvail. Laziness would make a malformed or impossible rectangle
     // fatal only if something later happened to ask about a bel -- so a run

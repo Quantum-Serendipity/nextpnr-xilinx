@@ -1052,6 +1052,7 @@ struct Arch : BaseCtx
     // confines a shrinking subset of the RM logic while still reporting
     // non-zero vetoes. check_partition_nets() refuses to run under a stale set.
     bool packed_since_rm_snapshot = false;
+    void warn_prepacked_x9_parity() const;
 
     bool is_rm_cell(const CellInfo *ci) const
     {
