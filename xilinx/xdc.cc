@@ -316,10 +316,11 @@ void Arch::parseXdc(std::istream &in)
     }
     if (!isempty(linebuf))
         log_error("unexpected end of XDC file\n");
-    if (missing_targets > 0 && getCtx()->verbose)
-        log_info("%d XDC constraint target(s) reference ports or nets that are not in this design and were "
-                 "ignored (a board-level XDC normally constrains more pins than a design uses)\n",
-                 missing_targets);
+    if (missing_targets > 0)
+        log_warning("%d XDC constraint target(s) reference ports or nets that are not in this design and were "
+                    "ignored, counting any create_clock target warned about above (a board-level XDC normally "
+                    "constrains more pins than a design uses; --verbose itemises them)\n",
+                    missing_targets);
 }
 
 NEXTPNR_NAMESPACE_END
