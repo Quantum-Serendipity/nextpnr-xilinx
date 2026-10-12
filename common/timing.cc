@@ -251,6 +251,18 @@ struct Timing
                         if (is_path)
                             port_fanin[o]++;
                     }
+                    if (portClass == TMG_COMB_OUTPUT && clocks > 0) {
+                        for (int i = 0; i < clocks; i++) {
+                            TimingClockingInfo clkInfo = ctx->getPortClockingInfo(cell.second.get(), o->name, i);
+                            const NetInfo *clknet = get_net_or_empty(cell.second.get(), clkInfo.clock_port);
+                            IdString clksig = clknet ? clknet->name : async_clock;
+                            auto &sd = net_data[o->net][ClockEvent{clksig, clknet ? clkInfo.edge : RISING_EDGE}];
+                            sd = TimingData{clkInfo.clockToQ.maxDelay()};
+                            sd.min_arrival = clkInfo.clockToQ.minDelay();
+                        }
+                        if (!port_fanin.count(o))
+                            topographical_order.emplace_back(o->net);
+                    }
                     // If there is no fanin, add the port as a false startpoint
                     if (!port_fanin.count(o) && !net_data.count(o->net)) {
                         topographical_order.emplace_back(o->net);
@@ -564,6 +576,22 @@ struct Timing
                 while (crit_net) {
                     const PortInfo *crit_ipin = nullptr;
                     delay_t max_arrival = std::numeric_limits<delay_t>::min();
+                    delay_t launch_arrival = std::numeric_limits<delay_t>::min();
+                    {
+                        int drv_clocks = 0;
+                        TimingPortClass drv_class = ctx->getPortTimingClass(crit_net->driver.cell,
+                                                                            crit_net->driver.port, drv_clocks);
+                        if (drv_class == TMG_COMB_OUTPUT) {
+                            for (int i = 0; i < drv_clocks; i++) {
+                                TimingClockingInfo ci =
+                                        ctx->getPortClockingInfo(crit_net->driver.cell, crit_net->driver.port, i);
+                                const NetInfo *clknet = get_net_or_empty(crit_net->driver.cell, ci.clock_port);
+                                if (clknet != nullptr && clknet->name == crit_pair.first.start.clock &&
+                                    ci.edge == crit_pair.first.start.edge)
+                                    launch_arrival = std::max(launch_arrival, ci.clockToQ.maxDelay());
+                            }
+                        }
+                    }
                     // Look at all input ports on its driving cell
                     for (const auto &port : crit_net->driver.cell->ports) {
                         if (port.second.type != PORT_IN || !port.second.net)
@@ -598,7 +626,7 @@ struct Timing
                         }
                     }
 
-                    if (!crit_ipin)
+                    if (!crit_ipin || launch_arrival >= max_arrival)
                         break;
                     // Now convert PortInfo* into a PortRef*
                     for (auto &usr : crit_ipin->net->users) {
@@ -1115,11 +1143,11 @@ void timing_analysis(Context *ctx, bool print_histogram, bool print_fmax, bool p
             auto &front_port = front->cell->ports.at(front->port);
             auto &front_driver = front_port.net->driver;
 
-            int port_clocks;
+            int port_clocks = 0;
             auto portClass = ctx->getPortTimingClass(front_driver.cell, front_driver.port, port_clocks);
             IdString last_port = front_driver.port;
             int clock_start = -1;
-            if (portClass == TMG_REGISTER_OUTPUT) {
+            if (portClass == TMG_REGISTER_OUTPUT || (portClass == TMG_COMB_OUTPUT && port_clocks > 0)) {
                 for (int i = 0; i < port_clocks; i++) {
                     TimingClockingInfo clockInfo = ctx->getPortClockingInfo(front_driver.cell, front_driver.port, i);
                     const NetInfo *clknet = get_net_or_empty(front_driver.cell, clockInfo.clock_port);

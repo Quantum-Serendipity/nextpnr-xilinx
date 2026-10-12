@@ -1934,6 +1934,9 @@ struct Arch : BaseCtx
     Dsp48e1Drive dsp48e1ComputeDrive(const CellInfo *cell, const Dsp48e1Config &c) const;
     Dsp48e1Cached dsp48e1Get(const CellInfo *cell) const;
     void dsp48e1CacheDrive();
+    void dsp48e1CheckCache() const;
+    double dsp48e1InternalFmaxMHz(const CellInfo *cell) const;
+    void dsp48e1WarnInternalPaths() const;
     Dsp48e1Config dsp48e1ComputeConfig(const CellInfo *cell) const;
     Dsp48e1Config dsp48e1Config(const CellInfo *cell) const;
     Dsp48e1Stage dsp48e1InputStage(const Dsp48e1Config &cfg, const std::string &base) const;

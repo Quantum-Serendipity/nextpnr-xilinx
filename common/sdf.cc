@@ -283,7 +283,7 @@ void Context::writeSDF(std::ostream &out, bool cvc_mode) const
                     sc.iopaths.push_back(iop);
                 }
                 // Add clock-to-output delays, also as IOPaths
-                if (cls == TMG_REGISTER_OUTPUT)
+                if (cls == TMG_REGISTER_OUTPUT || cls == TMG_COMB_OUTPUT)
                     for (int i = 0; i < clockCount; i++) {
                         auto clkInfo = getPortClockingInfo(ci, port.first, i);
                         IOPath cqp;

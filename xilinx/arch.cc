@@ -885,6 +885,7 @@ bool Arch::getBudgetOverride(const NetInfo *net_info, const PortRef &sink, delay
 
 bool Arch::place()
 {
+    dsp48e1CacheDrive();
     // Steer the solver into the partition rectangle, in addition to forbidding
     // everything outside it.
     //
@@ -2915,6 +2916,7 @@ void Arch::findSourceSinkLocations()
 
 bool Arch::route()
 {
+    dsp48e1CacheDrive();
     assign_budget(getCtx(), true);
     std::string router = str_or_default(settings, id("router"), defaultRouter);
     // Route dedicated clocks BEFORE the Vcc flood.  The packer ties BUFGCTRL
@@ -3158,6 +3160,8 @@ bool Arch::route()
     //   NEXTPNR_POST_ROUTE_TIMING=0  skip it; the analysis is not free
     //   NEXTPNR_POST_ROUTE_TIMING=1  ask for it under router1 as well
     //   NEXTPNR_CRIT_PATH_REPORT=1   also dump the critical path stage by stage
+    dsp48e1CheckCache();
+    dsp48e1WarnInternalPaths();
     const char *post_route_timing = getenv("NEXTPNR_POST_ROUTE_TIMING");
     bool do_post_route_timing = (router == "router2");
     if (post_route_timing != nullptr)
@@ -3613,6 +3617,75 @@ Arch::Dsp48e1Cached Arch::dsp48e1Get(const CellInfo *cell) const
     return e;
 }
 
+void Arch::dsp48e1CheckCache() const
+{
+    for (auto &cell : cells) {
+        const CellInfo *ci = cell.second.get();
+        if (ci->type != id_DSP48E1_DSP48E1)
+            continue;
+        auto it = dsp48e1_cache.find(ci->name);
+        if (it == dsp48e1_cache.end())
+            continue;
+        Dsp48e1Config c = dsp48e1ComputeConfig(ci);
+        Dsp48e1Drive d = dsp48e1ComputeDrive(ci, c);
+        const Dsp48e1Config &k = it->second.config;
+        const Dsp48e1Drive &e = it->second.drive;
+        bool same = c.areg == k.areg && c.breg == k.breg && c.creg == k.creg && c.dreg == k.dreg &&
+                    c.adreg == k.adreg && c.mreg == k.mreg && c.preg == k.preg && c.opmodereg == k.opmodereg &&
+                    c.alumodereg == k.alumodereg && c.carryinreg == k.carryinreg &&
+                    c.carryinselreg == k.carryinselreg && c.inmodereg == k.inmodereg && c.use_mult == k.use_mult &&
+                    c.use_dport == k.use_dport && d.live_comb == e.live_comb && d.live_reg == e.live_reg &&
+                    d.launch_p == e.launch_p;
+        if (!same)
+            log_error("DSP48E1 '%s': its parameters or input connections changed after the DSP timing summary was "
+                      "taken, so the timing graph describes a different configuration\n",
+                      ci->name.c_str(this));
+    }
+}
+
+double Arch::dsp48e1InternalFmaxMHz(const CellInfo *cell) const
+{
+    Dsp48e1Config c = dsp48e1Config(cell);
+    bool ad = c.use_mult && c.use_dport;
+    bool in_reg = c.areg || c.breg || (ad && (c.dreg || c.inmodereg));
+    bool mid_reg = (c.use_mult && c.mreg) || (ad && c.adreg);
+    bool out_reg = c.preg;
+    if ((in_reg ? 1 : 0) + (mid_reg ? 1 : 0) + (out_reg ? 1 : 0) < 2)
+        return 0;
+    auto it = cell->params.find(id("USE_PATTERN_DETECT"));
+    bool patdet = it != cell->params.end() && it->second.str == "PATDET";
+    if (!c.use_mult)
+        return patdet ? 465.77 : 550.66;
+    if (!c.mreg && !(ad && c.adreg))
+        return patdet ? 211.15 : 227.01;
+    if (!c.mreg)
+        return patdet ? 277.62 : 305.62;
+    if (ad && !c.adreg)
+        return 346.26;
+    return patdet ? 465.77 : 550.66;
+}
+
+void Arch::dsp48e1WarnInternalPaths() const
+{
+    for (auto &cell : cells) {
+        const CellInfo *ci = cell.second.get();
+        if (ci->type != id_DSP48E1_DSP48E1)
+            continue;
+        double fmax = dsp48e1InternalFmaxMHz(ci);
+        if (fmax <= 0)
+            continue;
+        const NetInfo *clk = get_net_or_empty(ci, id_CLK);
+        if (clk == nullptr || clk->clkconstr == nullptr)
+            continue;
+        double want = 1000.0 / getDelayNS(clk->clkconstr->period.minDelay());
+        if (want > fmax)
+            log_warning("DSP48E1 '%s': its register-to-register paths inside the DSP are not in the timing graph, "
+                        "and DS181 limits this register configuration to %.2f MHz at -2, below the %.2f MHz "
+                        "constraint on '%s'\n",
+                        ci->name.c_str(this), fmax, want, clk->name.c_str(this));
+    }
+}
+
 void Arch::dsp48e1CacheDrive()
 {
     dsp48e1_cache.clear();
@@ -3711,7 +3784,7 @@ Arch::SyncPinTiming Arch::dsp48e1PinTiming(const CellInfo *cell, IdString port) 
     {
         const char *base;
         double preg_max, preg_min, launch_offset;
-        bool needs_preg;
+        bool always_registered;
     };
     static const OutPin outs[] = {
             {"P", 0.37, 0.126, 0.0, false},
@@ -3727,22 +3800,21 @@ Arch::SyncPinTiming Arch::dsp48e1PinTiming(const CellInfo *cell, IdString port) 
     for (const auto &o : outs) {
         if (b != o.base)
             continue;
-        if (c.preg) {
+        if (c.preg || o.always_registered) {
             t.kind = SYNC_PIN_OUTPUT;
             t.clk_to_q_max = o.preg_max;
             t.clk_to_q_min = o.preg_min;
             return t;
         }
-        if (o.needs_preg)
-            return t;
         const Dsp48e1Drive &drive = cached.drive;
-        if (drive.live_comb) {
-            t.kind = SYNC_PIN_COMB_OUTPUT;
-        } else if (drive.live_reg) {
-            t.kind = SYNC_PIN_OUTPUT;
+        if (drive.live_reg) {
             t.clk_to_q_max = drive.launch_p + o.launch_offset;
             t.clk_to_q_min = 0.44;
         }
+        if (drive.live_comb)
+            t.kind = SYNC_PIN_COMB_OUTPUT;
+        else if (drive.live_reg)
+            t.kind = SYNC_PIN_OUTPUT;
         return t;
     }
     return t;
@@ -3754,11 +3826,15 @@ TimingPortClass Arch::syncPinClass(const CellInfo *cell, const SyncPinTiming &t,
         return TMG_IGNORE;
     if (t.kind == SYNC_PIN_COMB_INPUT)
         return TMG_COMB_INPUT;
-    if (t.kind == SYNC_PIN_COMB_OUTPUT)
-        return TMG_COMB_OUTPUT;
     const NetInfo *clk = get_net_or_empty(cell, t.clock);
-    if (clk == nullptr || clk->driver.cell == nullptr || clk->driver.cell->type == id_PSEUDO_VCC ||
-        clk->driver.cell->type == id_PSEUDO_GND)
+    bool clk_live = clk != nullptr && clk->driver.cell != nullptr && clk->driver.cell->type != id_PSEUDO_VCC &&
+                    clk->driver.cell->type != id_PSEUDO_GND;
+    if (t.kind == SYNC_PIN_COMB_OUTPUT) {
+        if (clk_live && t.clk_to_q_max > 0)
+            clockInfoCount = 1;
+        return TMG_COMB_OUTPUT;
+    }
+    if (!clk_live)
         return TMG_IGNORE;
     if (t.kind == SYNC_PIN_CLOCK)
         return TMG_CLOCK_INPUT;
