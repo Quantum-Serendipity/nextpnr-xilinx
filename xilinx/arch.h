@@ -1888,26 +1888,57 @@ struct Arch : BaseCtx
     // Get the port class, also setting clockInfoCount to the number of TimingClockingInfos associated with a port
     TimingPortClass getPortTimingClass(const CellInfo *cell, IdString port, int &clockInfoCount) const;
 
-    // DSP48E1 combinational timing helpers (see arch.cc). Phase 1: model the
-    // fully-combinational DSP48E1; registered configs stay TMG_IGNORE.
     IdString dspStripBusIndex(IdString port) const;
     bool dsp48e1IsCombinational(const CellInfo *cell) const;
     double dsp48e1CombInputDelayNS(IdString base) const;
     bool dsp48e1IsTimedOutput(IdString base) const;
-    enum BramPinKind
+    enum SyncPinKind
     {
-        BRAM_PIN_NONE,
-        BRAM_PIN_CLOCK,
-        BRAM_PIN_INPUT,
-        BRAM_PIN_OUTPUT
+        SYNC_PIN_NONE,
+        SYNC_PIN_CLOCK,
+        SYNC_PIN_INPUT,
+        SYNC_PIN_OUTPUT,
+        SYNC_PIN_COMB_INPUT,
+        SYNC_PIN_COMB_OUTPUT
     };
-    struct BramPinTiming
+    struct SyncPinTiming
     {
-        BramPinKind kind = BRAM_PIN_NONE;
+        SyncPinKind kind = SYNC_PIN_NONE;
         IdString clock;
         double setup = 0, hold = 0, clk_to_q_max = 0, clk_to_q_min = 0;
     };
-    BramPinTiming bramPinTiming(const CellInfo *cell, IdString port) const;
+    SyncPinTiming bramPinTiming(const CellInfo *cell, IdString port) const;
+    SyncPinTiming icapPinTiming(const CellInfo *cell, IdString port) const;
+    struct Dsp48e1Config
+    {
+        bool areg, breg, creg, dreg, adreg, mreg, preg;
+        bool opmodereg, alumodereg, carryinreg, carryinselreg, inmodereg;
+        bool use_mult, use_dport;
+    };
+    struct Dsp48e1Stage
+    {
+        bool data = false, registered = false;
+        double setup = 0, hold = 0, launch_p = 0;
+    };
+    struct Dsp48e1Drive
+    {
+        bool live_comb = false, live_reg = false;
+        double launch_p = 0;
+    };
+    struct Dsp48e1Cached
+    {
+        Dsp48e1Config config;
+        Dsp48e1Drive drive;
+    };
+    std::unordered_map<IdString, Dsp48e1Cached> dsp48e1_cache;
+    Dsp48e1Drive dsp48e1ComputeDrive(const CellInfo *cell, const Dsp48e1Config &c) const;
+    Dsp48e1Cached dsp48e1Get(const CellInfo *cell) const;
+    void dsp48e1CacheDrive();
+    Dsp48e1Config dsp48e1ComputeConfig(const CellInfo *cell) const;
+    Dsp48e1Config dsp48e1Config(const CellInfo *cell) const;
+    Dsp48e1Stage dsp48e1InputStage(const Dsp48e1Config &cfg, const std::string &base) const;
+    SyncPinTiming dsp48e1PinTiming(const CellInfo *cell, IdString port) const;
+    TimingPortClass syncPinClass(const CellInfo *cell, const SyncPinTiming &t, int &clockInfoCount) const;
     // Get the TimingClockingInfo of a port
     TimingClockingInfo getPortClockingInfo(const CellInfo *cell, IdString port, int index) const;
 

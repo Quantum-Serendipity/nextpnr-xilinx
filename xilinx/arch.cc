@@ -3331,18 +3331,9 @@ IdString Arch::dspStripBusIndex(IdString port) const
 
 bool Arch::dsp48e1IsCombinational(const CellInfo *cell) const
 {
-    // Combinational only if every internal register is bypassed. Params are
-    // stored as binary strings; any '1' bit means the register is enabled.
-    static const char *regs[] = {"AREG", "BREG",  "CREG", "DREG",    "ADREG",
-                                 "MREG", "PREG",  "ACASCREG", "BCASCREG"};
-    for (const char *r : regs) {
-        auto it = cell->params.find(id(r));
-        // Property::as_bool() handles the numeric (bit-string) params without
-        // asserting is_string; any non-zero register value means it's enabled.
-        if (it != cell->params.end() && it->second.as_bool())
-            return false;
-    }
-    return true;
+    Dsp48e1Config c = dsp48e1Config(cell);
+    return !(c.areg || c.breg || c.creg || c.dreg || c.adreg || c.mreg || c.preg || c.opmodereg || c.alumodereg ||
+             c.carryinreg || c.carryinselreg || c.inmodereg);
 }
 
 double Arch::dsp48e1CombInputDelayNS(IdString base) const
@@ -3376,9 +3367,9 @@ bool Arch::dsp48e1IsTimedOutput(IdString base) const
            s == "OVERFLOW" || s == "UNDERFLOW" || s == "ACOUT" || s == "BCOUT";
 }
 
-Arch::BramPinTiming Arch::bramPinTiming(const CellInfo *cell, IdString port) const
+Arch::SyncPinTiming Arch::bramPinTiming(const CellInfo *cell, IdString port) const
 {
-    BramPinTiming t;
+    SyncPinTiming t;
     bool is36 = cell->type == id_RAMB36E1_RAMB36E1;
     if (!is36 && cell->type != id_RAMB18E1_RAMB18E1)
         return t;
@@ -3396,7 +3387,7 @@ Arch::BramPinTiming Arch::bramPinTiming(const CellInfo *cell, IdString port) con
     auto clock_of = [&](char side) { return id(std::string(side == 'A' ? "CLKARDCLK" : "CLKBWRCLK") + half); };
 
     if (s == "CLKARDCLK" || s == "CLKBWRCLK") {
-        t.kind = BRAM_PIN_CLOCK;
+        t.kind = SYNC_PIN_CLOCK;
         t.clock = port;
         return t;
     }
@@ -3404,7 +3395,7 @@ Arch::BramPinTiming Arch::bramPinTiming(const CellInfo *cell, IdString port) con
     if (s == "DOADO" || s == "DOPADOP" || s == "DOBDO" || s == "DOPBDOP") {
         bool a = (s == "DOADO" || s == "DOPADOP");
         bool reg = int_or_default(cell->params, a ? id_DOA_REG : id("DOB_REG"), 0) != 0;
-        t.kind = BRAM_PIN_OUTPUT;
+        t.kind = SYNC_PIN_OUTPUT;
         t.clock = clock_of((a || sdp) ? 'A' : 'B');
         t.clk_to_q_max = reg ? 0.74 : 2.13;
         t.clk_to_q_min = reg ? 0.204 : 0.585;
@@ -3432,7 +3423,7 @@ Arch::BramPinTiming Arch::bramPinTiming(const CellInfo *cell, IdString port) con
             continue;
         bool is_di = (s == "DIADI" || s == "DIPADIP" || s == "DIBDI" || s == "DIPBDIP");
         bool sdp_write_data = sdp && (s == "DIADI" || s == "DIPADIP");
-        t.kind = BRAM_PIN_INPUT;
+        t.kind = SYNC_PIN_INPUT;
         t.clock = clock_of(sdp_write_data ? 'B' : in.side);
         t.setup = in.setup;
         t.hold = in.hold;
@@ -3446,6 +3437,333 @@ Arch::BramPinTiming Arch::bramPinTiming(const CellInfo *cell, IdString port) con
         return t;
     }
     return t;
+}
+
+Arch::SyncPinTiming Arch::icapPinTiming(const CellInfo *cell, IdString port) const
+{
+    SyncPinTiming t;
+    if (cell->type != id_ICAP_ICAP)
+        return t;
+    const std::string &s = port.str(this);
+    size_t n = s.size();
+    while (n > 0 && s[n - 1] >= '0' && s[n - 1] <= '9')
+        --n;
+    std::string base = s.substr(0, n);
+    t.clock = id_CLK;
+    if (s == "CLK") {
+        t.kind = SYNC_PIN_CLOCK;
+    } else if (base == "O" && n < s.size()) {
+        t.kind = SYNC_PIN_OUTPUT;
+        t.clk_to_q_max = 5.200;
+        t.clk_to_q_min = 3.616;
+    } else if (base == "I" && n < s.size()) {
+        t.kind = SYNC_PIN_INPUT;
+        t.setup = 2.574;
+    } else if (s == "CSIB") {
+        t.kind = SYNC_PIN_INPUT;
+        t.setup = 3.900;
+    } else if (s == "RDWRB") {
+        t.kind = SYNC_PIN_INPUT;
+        t.setup = 6.427;
+    }
+    return t;
+}
+
+Arch::Dsp48e1Config Arch::dsp48e1Config(const CellInfo *cell) const
+{
+    auto it = dsp48e1_cache.find(cell->name);
+    if (it != dsp48e1_cache.end())
+        return it->second.config;
+    return dsp48e1ComputeConfig(cell);
+}
+
+Arch::Dsp48e1Config Arch::dsp48e1ComputeConfig(const CellInfo *cell) const
+{
+    auto str_param = [&](const char *name, const char *def) -> std::string {
+        auto it = cell->params.find(id(name));
+        return it == cell->params.end() ? std::string(def) : it->second.str;
+    };
+    Dsp48e1Config c;
+    c.areg = int_or_default(cell->params, id("AREG"), 1) != 0;
+    c.breg = int_or_default(cell->params, id("BREG"), 1) != 0;
+    c.creg = bool_or_default(cell->params, id("CREG"), true);
+    c.dreg = bool_or_default(cell->params, id("DREG"), true);
+    c.adreg = bool_or_default(cell->params, id("ADREG"), true);
+    c.mreg = bool_or_default(cell->params, id("MREG"));
+    c.preg = bool_or_default(cell->params, id("PREG"));
+    c.opmodereg = bool_or_default(cell->params, id("OPMODEREG"));
+    c.alumodereg = bool_or_default(cell->params, id("ALUMODEREG"));
+    c.carryinreg = bool_or_default(cell->params, id("CARRYINREG"));
+    c.carryinselreg = bool_or_default(cell->params, id("CARRYINSELREG"));
+    c.inmodereg = bool_or_default(cell->params, id("INMODEREG"));
+    c.use_mult = str_param("USE_MULT", "MULTIPLY") != "NONE";
+    std::string dport = str_param("USE_DPORT", "FALSE");
+    c.use_dport = dport == "TRUE" || dport == "1";
+    return c;
+}
+
+Arch::Dsp48e1Stage Arch::dsp48e1InputStage(const Dsp48e1Config &c, const std::string &b) const
+{
+    struct Reg
+    {
+        bool on;
+        double setup, hold, launch_p;
+    };
+    bool m = c.use_mult, ad = c.use_mult && c.use_dport;
+    Reg path[4];
+    int len = 0;
+    auto add = [&](bool on, double setup, double hold, double launch_p) { path[len++] = {on, setup, hold, launch_p}; };
+    if (b == "A" || b == "ACIN") {
+        add(c.areg, b == "A" ? 0.30 : 0.27, 0.13, m ? 4.51 : 2.215);
+        add(ad && c.adreg, 1.48, -0.02, 3.10);
+        add(m && c.mreg, 2.76, -0.01, 1.93);
+        add(c.preg, m ? 4.60 : 1.98, -0.28, 0);
+    } else if (b == "B" || b == "BCIN") {
+        add(c.breg, b == "B" ? 0.38 : 0.29, 0.16, m ? 3.813 : 1.87);
+        add(m && c.mreg, 2.76, -0.01, 1.93);
+        add(c.preg, m ? 4.60 : 1.98, -0.28, 0);
+    } else if (b == "D") {
+        if (!ad)
+            return Dsp48e1Stage();
+        add(c.dreg, 0.32, 0.27, 4.48);
+        add(c.adreg, 1.48, -0.02, 3.10);
+        add(c.mreg, 3.158, -0.249, 1.93);
+        add(c.preg, 4.50, -0.73, 0);
+    } else if (b == "INMODE") {
+        add(c.inmodereg, 0.449, 0.186, c.use_dport ? 5.47 : 4.111);
+        add(ad && c.adreg, 2.089, -0.036, 3.10);
+        add(m && c.mreg, c.use_dport ? 3.372 : 2.012, c.use_dport ? -0.236 : -0.245, 1.93);
+        add(c.preg, c.use_dport ? 5.557 : 4.196, c.use_dport ? -0.98 : -0.991, 0);
+    } else if (b == "C") {
+        add(c.creg, 0.20, 0.19, 1.93);
+        add(c.preg, 1.76, -0.26, 0);
+    } else if (b == "PCIN") {
+        add(c.preg, 1.51, -0.15, 0);
+    } else if (b == "CARRYCASCIN") {
+        add(c.preg, 1.42, -0.256, 0);
+    } else if (b == "MULTSIGNIN") {
+        add(c.preg, 1.792, -0.215, 0);
+    } else if (b == "OPMODE") {
+        add(c.opmodereg, 0.449, 0.223, 2.231);
+        add(c.preg, 2.6, -0.64, 0);
+    } else if (b == "ALUMODE") {
+        add(c.alumodereg, 0.246, 0.208, 2.054);
+        add(c.preg, 2.369, -0.566, 0);
+    } else if (b == "CARRYIN") {
+        add(c.carryinreg, 0.299, 0.151, 1.764);
+        add(c.preg, 1.69, -0.48, 0);
+    } else if (b == "CARRYINSEL") {
+        add(c.carryinselreg, 0.208, 0.174, 1.927);
+        add(c.preg, 2.184, -0.506, 0);
+    } else {
+        return Dsp48e1Stage();
+    }
+    Dsp48e1Stage st;
+    st.data = true;
+    for (int i = 0; i < len; i++) {
+        const Reg &r = path[i];
+        if (!r.on)
+            continue;
+        if (!st.registered) {
+            st.registered = true;
+            st.setup = r.setup;
+            st.hold = r.hold;
+        }
+        if (r.launch_p > 0)
+            st.launch_p = r.launch_p;
+    }
+    return st;
+}
+
+Arch::Dsp48e1Drive Arch::dsp48e1ComputeDrive(const CellInfo *cell, const Dsp48e1Config &c) const
+{
+    Dsp48e1Drive d;
+    for (const auto &p : cell->ports) {
+        if (p.second.type != PORT_IN)
+            continue;
+        const NetInfo *ni = p.second.net;
+        if (ni == nullptr || ni->driver.cell == nullptr || ni->driver.cell->type == id_PSEUDO_VCC ||
+            ni->driver.cell->type == id_PSEUDO_GND)
+            continue;
+        const std::string &s = p.first.str(this);
+        size_t n = s.size();
+        while (n > 0 && s[n - 1] >= '0' && s[n - 1] <= '9')
+            --n;
+        Dsp48e1Stage in = dsp48e1InputStage(c, s.substr(0, n));
+        if (!in.data)
+            continue;
+        if (in.registered) {
+            d.live_reg = true;
+            d.launch_p = std::max(d.launch_p, in.launch_p);
+        } else {
+            d.live_comb = true;
+        }
+    }
+    return d;
+}
+
+Arch::Dsp48e1Cached Arch::dsp48e1Get(const CellInfo *cell) const
+{
+    auto it = dsp48e1_cache.find(cell->name);
+    if (it != dsp48e1_cache.end())
+        return it->second;
+    Dsp48e1Cached e;
+    e.config = dsp48e1ComputeConfig(cell);
+    e.drive = dsp48e1ComputeDrive(cell, e.config);
+    return e;
+}
+
+void Arch::dsp48e1CacheDrive()
+{
+    dsp48e1_cache.clear();
+    for (auto &cell : cells) {
+        const CellInfo *ci = cell.second.get();
+        if (ci->type != id_DSP48E1_DSP48E1)
+            continue;
+        Dsp48e1Cached e;
+        e.config = dsp48e1ComputeConfig(ci);
+        e.drive = dsp48e1ComputeDrive(ci, e.config);
+        dsp48e1_cache[ci->name] = e;
+    }
+}
+
+Arch::SyncPinTiming Arch::dsp48e1PinTiming(const CellInfo *cell, IdString port) const
+{
+    SyncPinTiming t;
+    if (cell->type != id_DSP48E1_DSP48E1)
+        return t;
+    auto strip = [](const std::string &s) {
+        size_t n = s.size();
+        while (n > 0 && s[n - 1] >= '0' && s[n - 1] <= '9')
+            --n;
+        return s.substr(0, n);
+    };
+    Dsp48e1Cached cached = dsp48e1Get(cell);
+    const Dsp48e1Config &c = cached.config;
+    std::string b = strip(port.str(this));
+    t.clock = id_CLK;
+    if (b == "CLK") {
+        t.kind = SYNC_PIN_CLOCK;
+        return t;
+    }
+
+    Dsp48e1Stage st = dsp48e1InputStage(c, b);
+    if (st.data) {
+        t.kind = st.registered ? SYNC_PIN_INPUT : SYNC_PIN_COMB_INPUT;
+        t.setup = st.setup;
+        t.hold = st.hold;
+        return t;
+    }
+
+    bool m = c.use_mult, ad = c.use_mult && c.use_dport;
+    struct CtrlPin
+    {
+        const char *base;
+        bool on;
+        double setup, hold;
+    };
+    const CtrlPin ctrl[] = {
+            {"CEA", c.areg, 0.42, 0.08},
+            {"CEB", c.breg, 0.42, 0.08},
+            {"CEC", c.creg, 0.34, 0.11},
+            {"CED", ad && c.dreg, 0.43, -0.03},
+            {"CEM", m && c.mreg, 0.21, 0.20},
+            {"CEP", c.preg, 0.43, 0.01},
+            {"CEAD", ad && c.adreg, 0.426, -0.038},
+            {"CECTRL", c.opmodereg || c.carryinselreg, 0.421, 0.123},
+            {"CEALUMODE", c.alumodereg, 0.411, 0.121},
+            {"CEINMODE", c.inmodereg, 0.603, 0.205},
+            {"CECARRYIN", c.carryinreg, 0.665, -0.049},
+            {"RSTA", c.areg, 0.46, 0.13},
+            {"RSTB", c.breg, 0.46, 0.13},
+            {"RSTC", c.creg, 0.08, 0.11},
+            {"RSTD", ad && (c.dreg || c.adreg), 0.50, 0.08},
+            {"RSTM", m && c.mreg, 0.23, 0.24},
+            {"RSTP", c.preg, 0.30, 0.01},
+            {"RSTCTRL", c.opmodereg || c.carryinselreg, 0.469, 0.076},
+            {"RSTALUMODE", c.alumodereg, 0.411, 0.074},
+            {"RSTINMODE", c.inmodereg, 0.686, 0.074},
+            {"RSTALLCARRYIN", c.carryinreg || (m && c.mreg), 0.287, 0.123},
+    };
+    for (const auto &cp : ctrl) {
+        if (b != cp.base)
+            continue;
+        if (cp.on) {
+            t.kind = SYNC_PIN_INPUT;
+            t.setup = cp.setup;
+            t.hold = cp.hold;
+        }
+        return t;
+    }
+
+    if (b == "ACOUT" || b == "BCOUT") {
+        if (b == "ACOUT" ? c.areg : c.breg) {
+            t.kind = SYNC_PIN_OUTPUT;
+            t.clk_to_q_max = 0.73;
+            t.clk_to_q_min = b == "ACOUT" ? 0.493 : 0.505;
+        } else {
+            t.kind = SYNC_PIN_COMB_OUTPUT;
+        }
+        return t;
+    }
+
+    struct OutPin
+    {
+        const char *base;
+        double preg_max, preg_min, launch_offset;
+        bool needs_preg;
+    };
+    static const OutPin outs[] = {
+            {"P", 0.37, 0.126, 0.0, false},
+            {"CARRYCASCOUT", 0.59, 0.383, 0.33, false},
+            {"PCOUT", 0.478, 0.400, 0.20, false},
+            {"CARRYOUT", 0.415, 0.126, 0.0, false},
+            {"MULTSIGNOUT", 0.478, 0.356, 0.0, false},
+            {"PATTERNDETECT", 0.662, 0.132, 0.57, false},
+            {"PATTERNBDETECT", 0.662, 0.132, 0.57, false},
+            {"OVERFLOW", 0.700, 0.144, 0.0, true},
+            {"UNDERFLOW", 0.525, 0.136, 0.0, true},
+    };
+    for (const auto &o : outs) {
+        if (b != o.base)
+            continue;
+        if (c.preg) {
+            t.kind = SYNC_PIN_OUTPUT;
+            t.clk_to_q_max = o.preg_max;
+            t.clk_to_q_min = o.preg_min;
+            return t;
+        }
+        if (o.needs_preg)
+            return t;
+        const Dsp48e1Drive &drive = cached.drive;
+        if (drive.live_comb) {
+            t.kind = SYNC_PIN_COMB_OUTPUT;
+        } else if (drive.live_reg) {
+            t.kind = SYNC_PIN_OUTPUT;
+            t.clk_to_q_max = drive.launch_p + o.launch_offset;
+            t.clk_to_q_min = 0.44;
+        }
+        return t;
+    }
+    return t;
+}
+
+TimingPortClass Arch::syncPinClass(const CellInfo *cell, const SyncPinTiming &t, int &clockInfoCount) const
+{
+    if (t.kind == SYNC_PIN_NONE)
+        return TMG_IGNORE;
+    if (t.kind == SYNC_PIN_COMB_INPUT)
+        return TMG_COMB_INPUT;
+    if (t.kind == SYNC_PIN_COMB_OUTPUT)
+        return TMG_COMB_OUTPUT;
+    const NetInfo *clk = get_net_or_empty(cell, t.clock);
+    if (clk == nullptr || clk->driver.cell == nullptr || clk->driver.cell->type == id_PSEUDO_VCC ||
+        clk->driver.cell->type == id_PSEUDO_GND)
+        return TMG_IGNORE;
+    if (t.kind == SYNC_PIN_CLOCK)
+        return TMG_CLOCK_INPUT;
+    clockInfoCount = 1;
+    return t.kind == SYNC_PIN_OUTPUT ? TMG_REGISTER_OUTPUT : TMG_REGISTER_INPUT;
 }
 
 bool Arch::getCellDelay(const CellInfo *cell, IdString fromPort, IdString toPort, DelayInfo &delay) const
@@ -3509,14 +3827,29 @@ bool Arch::getCellDelay(const CellInfo *cell, IdString fromPort, IdString toPort
                 return true;
             }
     } else if (cell->type == id("DSP48E1_DSP48E1")) {
-        // Combinational DSP48E1 (Phase 1). getPortTimingClass leaves any
-        // registered config as TMG_IGNORE, so this is only reached when the
-        // DSP is fully combinational. Conservative per-input delay; the
-        // accurate per-variant chipdb model is Phase 2. Upstream PR material.
-        if (!dsp48e1IsCombinational(cell))
+        if (dsp48e1IsCombinational(cell)) {
+            double d = dsp48e1CombInputDelayNS(dspStripBusIndex(fromPort));
+            if (d <= 0.0 || !dsp48e1IsTimedOutput(dspStripBusIndex(toPort)))
+                return false;
+            delay = getDelayFromNS(d);
+            return true;
+        }
+        IdString from_base = dspStripBusIndex(fromPort), to_base = dspStripBusIndex(toPort);
+        if (to_base == id("ACOUT") || to_base == id("BCOUT")) {
+            bool a = to_base == id("ACOUT");
+            if (from_base != id(a ? "A" : "B") && from_base != id(a ? "ACIN" : "BCIN"))
+                return false;
+            if (dsp48e1PinTiming(cell, toPort).kind != SYNC_PIN_COMB_OUTPUT)
+                return false;
+            delay = getDelayFromNS(from_base == id("ACIN") ? 0.44 : 0.63);
+            return true;
+        }
+        if (dsp48e1PinTiming(cell, fromPort).kind != SYNC_PIN_COMB_INPUT)
             return false;
-        double d = dsp48e1CombInputDelayNS(dspStripBusIndex(fromPort));
-        if (d <= 0.0 || !dsp48e1IsTimedOutput(dspStripBusIndex(toPort)))
+        if (dsp48e1PinTiming(cell, toPort).kind != SYNC_PIN_COMB_OUTPUT)
+            return false;
+        double d = dsp48e1CombInputDelayNS(from_base);
+        if (d <= 0.0)
             return false;
         delay = getDelayFromNS(d);
         return true;
@@ -3563,28 +3896,19 @@ TimingPortClass Arch::getPortTimingClass(const CellInfo *cell, IdString port, in
         if (port == id("O"))
             return TMG_COMB_OUTPUT;
     } else if (cell->type == id("DSP48E1_DSP48E1")) {
-        // Phase 1: only the fully-combinational DSP48E1. Registered configs
-        // stay transparent (TMG_IGNORE) exactly as before -> no regression.
-        if (!dsp48e1IsCombinational(cell))
+        if (dsp48e1IsCombinational(cell)) {
+            IdString base = dspStripBusIndex(port);
+            if (dsp48e1IsTimedOutput(base))
+                return TMG_COMB_OUTPUT;
+            if (dsp48e1CombInputDelayNS(base) > 0.0)
+                return TMG_COMB_INPUT;
             return TMG_IGNORE;
-        IdString base = dspStripBusIndex(port);
-        if (dsp48e1IsTimedOutput(base))
-            return TMG_COMB_OUTPUT;
-        if (dsp48e1CombInputDelayNS(base) > 0.0)
-            return TMG_COMB_INPUT;
-        return TMG_IGNORE; // CLK / CE* / RST* / config pins
+        }
+        return syncPinClass(cell, dsp48e1PinTiming(cell, port), clockInfoCount);
     } else if (cell->type == id_RAMB18E1_RAMB18E1 || cell->type == id_RAMB36E1_RAMB36E1) {
-        BramPinTiming t = bramPinTiming(cell, port);
-        if (t.kind == BRAM_PIN_NONE)
-            return TMG_IGNORE;
-        const NetInfo *clk = get_net_or_empty(cell, t.clock);
-        if (clk == nullptr || clk->driver.cell == nullptr || clk->driver.cell->type == id_PSEUDO_VCC ||
-            clk->driver.cell->type == id_PSEUDO_GND)
-            return TMG_IGNORE;
-        if (t.kind == BRAM_PIN_CLOCK)
-            return TMG_CLOCK_INPUT;
-        clockInfoCount = 1;
-        return t.kind == BRAM_PIN_OUTPUT ? TMG_REGISTER_OUTPUT : TMG_REGISTER_INPUT;
+        return syncPinClass(cell, bramPinTiming(cell, port), clockInfoCount);
+    } else if (cell->type == id_ICAP_ICAP) {
+        return syncPinClass(cell, icapPinTiming(cell, port), clockInfoCount);
     }
     return TMG_IGNORE;
 }
@@ -3592,8 +3916,18 @@ TimingPortClass Arch::getPortTimingClass(const CellInfo *cell, IdString port, in
 TimingClockingInfo Arch::getPortClockingInfo(const CellInfo *cell, IdString port, int index) const
 {
     TimingClockingInfo info;
+    if (cell->type == id_ICAP_ICAP || cell->type == id_DSP48E1_DSP48E1) {
+        SyncPinTiming t = cell->type == id_ICAP_ICAP ? icapPinTiming(cell, port) : dsp48e1PinTiming(cell, port);
+        info.setup = getDelayFromNS(t.setup);
+        info.hold = getDelayFromNS(t.hold);
+        info.clockToQ = getDelayFromNS(t.clk_to_q_max);
+        info.clockToQ.min = getDelayFromNS(t.clk_to_q_min).delay;
+        info.clock_port = t.clock;
+        info.edge = bool_or_default(cell->params, id_IS_CLK_INVERTED, false) ? FALLING_EDGE : RISING_EDGE;
+        return info;
+    }
     if (cell->type == id_RAMB18E1_RAMB18E1 || cell->type == id_RAMB36E1_RAMB36E1) {
-        BramPinTiming t = bramPinTiming(cell, port);
+        SyncPinTiming t = bramPinTiming(cell, port);
         info.setup = getDelayFromNS(t.setup);
         info.hold = getDelayFromNS(t.hold);
         info.clockToQ = getDelayFromNS(t.clk_to_q_max);

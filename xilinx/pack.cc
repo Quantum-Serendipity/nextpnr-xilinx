@@ -1590,6 +1590,7 @@ void Arch::assignArchInfo()
     for (auto cell : sorted(cells)) {
         assignCellInfo(cell.second);
     }
+    dsp48e1CacheDrive();
 }
 
 NEXTPNR_NAMESPACE_END
