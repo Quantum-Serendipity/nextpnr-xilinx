@@ -49,6 +49,7 @@ po::options_description UspCommandHandler::getArchOptions()
     po::options_description specific("Architecture specific options");
     specific.add_options()("chipdb", po::value<std::string>(), "name of chip database binary");
     specific.add_options()("xdc", po::value<std::vector<std::string>>(), "XDC-style constraints file");
+    specific.add_options()("xdc-strict", "treat an XDC target that matches nothing as an error, not a warning");
     specific.add_options()("fasm", po::value<std::string>(), "fasm bitstream file to write");
     specific.add_options()("fixed-routes", po::value<std::string>(),
                            "frozen hard-macro routing to LOCK before routing (net + src->dst pips)");
@@ -110,13 +111,22 @@ void UspCommandHandler::setupArchContext(Context *ctx)
 
 void UspCommandHandler::customAfterLoad(Context *ctx)
 {
+    ctx->xdc_strict = vm.count("xdc-strict") != 0;
     if (vm.count("xdc")) {
         std::vector<std::string> files = vm["xdc"].as<std::vector<std::string>>();
         for (const auto &filename : files) {
             std::ifstream in(filename);
             if (!in)
                 log_error("failed to open XDC file '%s'\n", filename.c_str());
+            ctx->xdc_file = filename;
             ctx->parseXdc(in);
+        }
+        if (!ctx->xdc_dropped.empty()) {
+            for (const auto &d : ctx->xdc_dropped)
+                log_info("XDC target dropped: %s\n", d.c_str());
+            log_error("%d XDC constraint target(s) reference ports or nets that are not in this design, listed "
+                      "above [--xdc-strict]\n",
+                      int(ctx->xdc_dropped.size()));
         }
     }
     // Snapshot the reconfigurable-module cell set. This has to happen here and

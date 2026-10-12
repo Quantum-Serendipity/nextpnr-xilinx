@@ -126,7 +126,10 @@ void Arch::parseXdc(std::istream &in)
             // practice), so these are not reportable events: stay silent
             // like the ice40 flow does, and itemise only in verbose mode.
             missing_targets++;
-            if (getCtx()->verbose)
+            if (xdc_strict)
+                xdc_dropped.push_back(stringf("%s line %d: %s: no cell named '%s'", xdc_file.c_str(), lineno,
+                                              split.front().c_str(), cellname.c_str(this)));
+            else if (getCtx()->verbose)
                 log_info("%s: no cell named '%s' (on line %d) - this target is ignored\n", split.front().c_str(),
                          cellname.c_str(this), lineno);
         }
@@ -157,7 +160,10 @@ void Arch::parseXdc(std::istream &in)
             tgt_nets.push_back(maybe_net);
         else {
             missing_targets++;
-            if (getCtx()->verbose)
+            if (xdc_strict)
+                xdc_dropped.push_back(stringf("%s line %d: %s: no net or port named '%s'", xdc_file.c_str(), lineno,
+                                              split.front().c_str(), netname.c_str(this)));
+            else if (getCtx()->verbose)
                 log_info("%s: no net or port named '%s' (on line %d) - this target is ignored\n",
                          split.front().c_str(), netname.c_str(this), lineno);
         }
@@ -249,7 +255,9 @@ void Arch::parseXdc(std::istream &in)
                 continue;
             }
             std::vector<NetInfo *> dest = get_nets(arguments.at(cursor));
-            if (dest.empty())
+            if (dest.empty() && xdc_strict)
+                xdc_dropped.back() += " (create_clock target; the clock constraint is not applied)";
+            else if (dest.empty())
                 log_warning("create_clock target '%s' matched no net, constraint dropped (on line %d)\n",
                             arguments.at(cursor).c_str(), lineno);
             for (auto n : dest) {
@@ -316,10 +324,11 @@ void Arch::parseXdc(std::istream &in)
     }
     if (!isempty(linebuf))
         log_error("unexpected end of XDC file\n");
-    if (missing_targets > 0)
+    if (missing_targets > 0 && !xdc_strict)
         log_warning("%d XDC constraint target(s) reference ports or nets that are not in this design and were "
                     "ignored, counting any create_clock target warned about above (a board-level XDC normally "
-                    "constrains more pins than a design uses; --verbose itemises them)\n",
+                    "constrains more pins than a design uses; --verbose itemises them, --xdc-strict makes this "
+                    "an error)\n",
                     missing_targets);
 }
 

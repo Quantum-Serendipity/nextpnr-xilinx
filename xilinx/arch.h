@@ -2070,6 +2070,9 @@ struct Arch : BaseCtx
     bool const_fill_deferred = false;
     std::vector<ConstFillLine> const_fill_lines;
     bool allow_const_holdouts = false;
+    bool xdc_strict = false;
+    std::string xdc_file;
+    std::vector<std::string> xdc_dropped;
     void routeConstants(std::function<void()> reroute);
     int insertConstDrivers(const std::vector<ConstHoldout> &holdouts, std::vector<ConstHoldout> &unplaced);
     void ripupConstNets();
