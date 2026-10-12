@@ -259,6 +259,8 @@ enum TimingCheckType : int32_t
     TIMING_CHECK_SETUP = 0,
     TIMING_CHECK_HOLD = 1,
     TIMING_CHECK_WIDTH = 2,
+    TIMING_CHECK_RECOVERY = 3,
+    TIMING_CHECK_REMOVAL = 4,
 };
 
 NPNR_PACKED_STRUCT(struct CellTimingCheckPOD {

@@ -1,4 +1,6 @@
 from enum import *
+from collections import Counter
+import sys
 import constid
 import bels
 import parse_sdf
@@ -138,29 +140,41 @@ class NextpnrPropDelay:
 		)
 
 class NextpnrTmgChkType(Enum):
-	TIMING_CHECK_SETUP = 0
-	TIMING_CHECK_HOLD  = 1
-	TIMING_CHECK_WIDTH = 2
+	TIMING_CHECK_SETUP    = 0
+	TIMING_CHECK_HOLD     = 1
+	TIMING_CHECK_WIDTH    = 2
+	TIMING_CHECK_RECOVERY = 3
+	TIMING_CHECK_REMOVAL  = 4
+
+SDF_CHECK_KIND_TO_CHKTYPE = {
+	"SETUP":    NextpnrTmgChkType.TIMING_CHECK_SETUP,
+	"HOLD":     NextpnrTmgChkType.TIMING_CHECK_HOLD,
+	"WIDTH":    NextpnrTmgChkType.TIMING_CHECK_WIDTH,
+	"RECOVERY": NextpnrTmgChkType.TIMING_CHECK_RECOVERY,
+	"REMOVAL":  NextpnrTmgChkType.TIMING_CHECK_REMOVAL,
+}
+
+SDF_CHECK_EDGES = (None, "posedge")
 
 class NextpnrTimingCheck:
 	def __init__(self, chktype, sig_port, clock_port, min_value, max_value):
 		self.chktype = chktype
 		self.sig_port = constid.make(sig_port)
 		self.clock_port = constid.make(clock_port)
-		self.min_value = int(min_value * del_scale)
-		self.max_value = int(max_value * del_scale)
+		self.min_value = int(round(min_value * del_scale))
+		self.max_value = int(round(max_value * del_scale))
 	@staticmethod
-	def from_sdf_setuphold(sh):
-		return [
-			NextpnrTimingCheck(NextpnrTmgChkType.TIMING_CHECK_SETUP, sh.pin, sh.clock,
-				sh.setup.minv, sh.setup.maxv),
-			NextpnrTimingCheck(NextpnrTmgChkType.TIMING_CHECK_HOLD, sh.pin, sh.clock,
-				sh.hold.minv, sh.hold.maxv),
-		]
-	@staticmethod
-	def from_sdf_width(w):
-		NextpnrTimingCheck(NextpnrTmgChkType.TIMING_CHECK_WIDTH, sh.clock, sh.clock,
-				w.width.minv, w.width.maxv)
+	def from_sdf_check(chk):
+		chktype = SDF_CHECK_KIND_TO_CHKTYPE.get(chk.kind)
+		if chktype is None:
+			return None, chk.kind
+		if chk.clock_edge not in SDF_CHECK_EDGES or chk.pin_edge not in SDF_CHECK_EDGES:
+			return None, "{}/{}-{}".format(chk.kind, chk.pin_edge, chk.clock_edge)
+		minv = chk.value.minv if chk.value.minv is not None else chk.value.maxv
+		maxv = chk.value.maxv if chk.value.maxv is not None else chk.value.minv
+		if minv is None:
+			return None, chk.kind + "/novalue"
+		return NextpnrTimingCheck(chktype, chk.pin, chk.clock, minv, maxv), None
 
 class NextpnrCellTiming:
 	def __init__(self, variant_name):
@@ -171,17 +185,19 @@ class NextpnrCellTiming:
 		# Sort delays and checks by pin constid; so we can do a binary search in nextpnr
 		# to save time
 		self.delays.sort(key=lambda d: (d.to_port, d.from_port))
-		self.checks.sort(key=lambda c: (c.sig_port, c.clock_port))
+		self.checks.sort(key=lambda c: (c.sig_port, c.clock_port, c.chktype.value))
 	@staticmethod
-	def from_sdf_cell(sdfc):
+	def from_sdf_cell(sdfc, unrepresented):
 		cell = NextpnrCellTiming(sdfc.type)
 		for entry in sdfc.entries:
 			if isinstance(entry, parse_sdf.IOPath):
 				cell.delays.append(NextpnrPropDelay.from_sdf_iopath(entry))
-			elif isinstance(entry, parse_sdf.SetupHoldCheck):
-				cell.checks.append(NextpnrTimingCheck.from_sdf_setuphold(entry))
-			elif isinstance(entry, parse_sdf.WidthCheck):
-				cell.checks.append(NextpnrTimingCheck.from_sdf_width(entry))
+			elif isinstance(entry, parse_sdf.TimingCheck):
+				chk, why = NextpnrTimingCheck.from_sdf_check(entry)
+				if chk is None:
+					unrepresented[why] += 1
+				else:
+					cell.checks.append(chk)
 			else:
 				assert False, "unknown SDF entry type"
 		for interconn in sorted(sdfc.interconnect.values(), key=lambda ic: (ic.to_net, ic.from_net)):
@@ -213,13 +229,13 @@ class NextpnrTileCellTiming:
 			instance.sort()
 
 	@staticmethod
-	def from_sdf(tile_type, sdf):
+	def from_sdf(tile_type, sdf, unrepresented):
 		tmg = NextpnrTileCellTiming(tile_type)
 		instances = {}
 		for cell in sorted(sdf.cells.values(), key=lambda c: (c.inst, c.type)):
 			if cell.inst not in instances:
 				instances[cell.inst] = NextpnrInstanceTiming(cell.inst)
-			instances[cell.inst].variants.append(NextpnrCellTiming.from_sdf_cell(cell))
+			instances[cell.inst].variants.append(NextpnrCellTiming.from_sdf_cell(cell, unrepresented))
 		tmg.instances = list(instances.values())
 		tmg.sort()
 		return tmg
@@ -230,6 +246,7 @@ class NextpnrTimingData:
 		self.wire_classes = {}
 		self.tiles = []
 		self.tile_type_to_tile_index = {}
+		self.unrepresented_checks = Counter()
 	def get_pip_class(self, is_buffered, min_delay, max_delay, r, c):
 		tc = NextpnrPipTimingClass(is_buffered, min_delay, max_delay, r, c)
 		if tc not in self.pip_classes:
@@ -248,6 +265,10 @@ class NextpnrTimingData:
 			return self.wire_classes[tc]
 	def add_tile(self, tile_data):
 		self.tiles.append(tile_data)
+	def report_unrepresented_checks(self):
+		if self.unrepresented_checks:
+			print("nextpnr_structs: SDF timing checks with no chipdb representation: {}".format(
+				", ".join("{} x{}".format(k, v) for k, v in sorted(self.unrepresented_checks.items()))), file=sys.stderr)
 	def sort_tiles(self):
 		self.tiles.sort(key=lambda t: t.tile_type)
 		self.tile_type_to_tile_index = {}
@@ -274,7 +295,8 @@ class NextpnrTileType:
 		self.index = -1
 		self.timing = timing
 		if tile.cell_timing() is not None:
-			self.cell_timing = NextpnrTileCellTiming.from_sdf(tile.tile_type(), tile.cell_timing())
+			self.cell_timing = NextpnrTileCellTiming.from_sdf(tile.tile_type(), tile.cell_timing(),
+				timing.unrepresented_checks)
 		else:
 			self.cell_timing = None
 		self.bels = []

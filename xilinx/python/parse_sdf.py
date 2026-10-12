@@ -2,11 +2,13 @@
 Utilities for SDF file parsing to determine cell timings
 """
 import sys
+from collections import Counter
 
 
 class SDFData:
     def __init__(self):
         self.cells = {}
+        self.unhandled = Counter()
 
 class Delay:
     def __init__(self, minv, typv, maxv):
@@ -23,18 +25,14 @@ class IOPath:
         self.falling = falling
 
 
-class SetupHoldCheck:
-    def __init__(self, pin, clock, setup, hold):
+class TimingCheck:
+    def __init__(self, kind, pin, clock, value, pin_edge=None, clock_edge=None):
+        self.kind = kind
         self.pin = pin
         self.clock = clock
-        self.setup = setup
-        self.hold = hold
-
-
-class WidthCheck:
-    def __init__(self, clock, width):
-        self.clock = clock
-        self.width = width
+        self.value = value
+        self.pin_edge = pin_edge
+        self.clock_edge = clock_edge
 
 
 class Interconnect:
@@ -93,8 +91,60 @@ def parse_sexpr_file(filename):
 
 def parse_delay(delay):
     sp = [float(x) if x != '' else None for x in delay.split(":")]
+    if len(sp) == 1:
+        return Delay(sp[0], sp[0], sp[0])
     assert len(sp) == 3
     return Delay(sp[0], sp[1], sp[2])
+
+
+EDGE_IDENTIFIERS = ("posedge", "negedge", "01", "10", "0z", "z1", "1z", "z0")
+
+
+def parse_port_spec(spec):
+    if isinstance(spec, str):
+        return spec, None
+    if len(spec) == 2 and spec[0] in EDGE_IDENTIFIERS:
+        return spec[1], spec[0]
+    return None, None
+
+
+PAIRED_CHECKS = {
+    "SETUPHOLD": ("SETUP", "HOLD"),
+    "RECREM": ("RECOVERY", "REMOVAL"),
+}
+
+SIGNAL_CHECKS = ("SETUP", "HOLD", "RECOVERY", "REMOVAL")
+
+PORT_CHECKS = ("WIDTH", "PERIOD")
+
+
+def parse_timing_check(check, cell, unhandled):
+    kw = check[0]
+    if kw in PAIRED_CHECKS or kw in SIGNAL_CHECKS:
+        pin, pin_edge = parse_port_spec(check[1])
+        clock, clock_edge = parse_port_spec(check[2])
+        if pin is None or clock is None:
+            unhandled[kw + "/conditioned"] += 1
+            return
+        kinds = PAIRED_CHECKS.get(kw, (kw, ))
+        if len(check) != 3 + len(kinds):
+            unhandled[kw + "/arity"] += 1
+            return
+        for i, kind in enumerate(kinds):
+            if len(check[3 + i]) == 0:
+                continue
+            cell.entries.append(TimingCheck(kind, pin, clock, parse_delay(check[3 + i][0]), pin_edge, clock_edge))
+    elif kw in PORT_CHECKS:
+        pin, pin_edge = parse_port_spec(check[1])
+        if pin is None:
+            unhandled[kw + "/conditioned"] += 1
+            return
+        if len(check) != 3:
+            unhandled[kw + "/arity"] += 1
+            return
+        cell.entries.append(TimingCheck(kw, pin, pin, parse_delay(check[2][0]), pin_edge, pin_edge))
+    else:
+        unhandled[kw] += 1
 
 
 def parse_sdf_file(filename):
@@ -125,10 +175,9 @@ def parse_sdf_file(filename):
                                                                                parse_delay(delay[4][0]))
             elif subentry[0] == "TIMINGCHECK":
                 for check in subentry[1:]:
-                    if check[0] == "SETUPHOLD":
-                        cell.entries.append(
-                            SetupHoldCheck(check[1], check[2], parse_delay(check[3][0]), parse_delay(check[4][0])))
-                    elif check[0] == "WIDTH":
-                        cell.entries.append(WidthCheck(check[1], parse_delay(check[2][0])))
+                    parse_timing_check(check, cell, sdf.unhandled)
         sdf.cells[(celltype, inst)] = cell
+    if sdf.unhandled:
+        print("parse_sdf: {}: SDF timing checks not represented: {}".format(
+            filename, ", ".join("{} x{}".format(k, v) for k, v in sorted(sdf.unhandled.items()))), file=sys.stderr)
     return sdf

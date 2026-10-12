@@ -135,6 +135,8 @@ public class bbaexport {
         TIMING_CHECK_SETUP,
         TIMING_CHECK_HOLD,
         TIMING_CHECK_WIDTHd,
+        TIMING_CHECK_RECOVERY,
+        TIMING_CHECK_REMOVAL,
     }
 
     static class NextpnrTimingCheck {
