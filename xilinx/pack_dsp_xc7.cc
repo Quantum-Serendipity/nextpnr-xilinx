@@ -43,7 +43,8 @@ void XC7Packer::walk_dsp(CellInfo *root, CellInfo *current_cell, int constr_z)
 
     // see if any cascade outputs are connected
     for (auto port : current_cell->ports) {
-        if (!boost::contains(port.first.str(ctx), "COUT")) continue;
+        if (!boost::contains(port.first.str(ctx), "COUT") && port.first != ctx->id("MULTSIGNOUT"))
+            continue;
         NetInfo *cout_net = port.second.net;
 
         if (cout_net == nullptr) continue;
@@ -146,7 +147,8 @@ void XC7Packer::pack_dsps()
     for (auto ci : all_dsps) {
         bool cascade_input_used = false;
         for (auto port : ci->ports) {
-            if (!boost::contains(port.first.str(ctx), "CIN")) continue;
+            if (!boost::contains(port.first.str(ctx), "CIN") && port.first != ctx->id("MULTSIGNIN"))
+                continue;
             if (port.second.net != nullptr) {
                 cascade_input_used = true;
                 break;
