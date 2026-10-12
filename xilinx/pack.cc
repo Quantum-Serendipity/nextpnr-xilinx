@@ -367,22 +367,26 @@ void XilinxPacker::pack_ffs()
     std::unordered_map<IdString, XFormRule> ff_rules;
     ff_rules[ctx->id("FDCE")].new_type = id_SLICE_FFX;
     ff_rules[ctx->id("FDCE")].port_xform[ctx->id("C")] = ctx->xc7 ? id_CK : id_CLK;
+    ff_rules[ctx->id("FDCE")].param_xform[ctx->id("IS_C_INVERTED")] = ctx->id("IS_CLK_INVERTED");
     ff_rules[ctx->id("FDCE")].port_xform[ctx->id("CLR")] = id_SR;
     // ff_rules[ctx->id("FDCE")].param_xform[ctx->id("IS_CLR_INVERTED")] = ctx->id("IS_SR_INVERTED");
 
     ff_rules[ctx->id("FDPE")].new_type = id_SLICE_FFX;
     ff_rules[ctx->id("FDPE")].port_xform[ctx->id("C")] = ctx->xc7 ? id_CK : id_CLK;
+    ff_rules[ctx->id("FDPE")].param_xform[ctx->id("IS_C_INVERTED")] = ctx->id("IS_CLK_INVERTED");
     ff_rules[ctx->id("FDPE")].port_xform[ctx->id("PRE")] = id_SR;
     // ff_rules[ctx->id("FDPE")].param_xform[ctx->id("IS_PRE_INVERTED")] = ctx->id("IS_SR_INVERTED");
 
     ff_rules[ctx->id("FDRE")].new_type = id_SLICE_FFX;
     ff_rules[ctx->id("FDRE")].port_xform[ctx->id("C")] = ctx->xc7 ? id_CK : id_CLK;
+    ff_rules[ctx->id("FDRE")].param_xform[ctx->id("IS_C_INVERTED")] = ctx->id("IS_CLK_INVERTED");
     ff_rules[ctx->id("FDRE")].port_xform[ctx->id("R")] = id_SR;
     ff_rules[ctx->id("FDRE")].set_attrs.emplace_back(ctx->id("X_FFSYNC"), "1");
     // ff_rules[ctx->id("FDRE")].param_xform[ctx->id("IS_R_INVERTED")] = ctx->id("IS_SR_INVERTED");
 
     ff_rules[ctx->id("FDSE")].new_type = id_SLICE_FFX;
     ff_rules[ctx->id("FDSE")].port_xform[ctx->id("C")] = ctx->xc7 ? id_CK : id_CLK;
+    ff_rules[ctx->id("FDSE")].param_xform[ctx->id("IS_C_INVERTED")] = ctx->id("IS_CLK_INVERTED");
     ff_rules[ctx->id("FDSE")].port_xform[ctx->id("S")] = id_SR;
     ff_rules[ctx->id("FDSE")].set_attrs.emplace_back(ctx->id("X_FFSYNC"), "1");
     // ff_rules[ctx->id("FDSE")].param_xform[ctx->id("IS_S_INVERTED")] = ctx->id("IS_SR_INVERTED");
