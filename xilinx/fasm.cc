@@ -2886,7 +2886,6 @@ struct FasmBackend
         push(get_tile_name(ci->bel.tile));
         push("PLLE2_ADV");
         write_bit("IN_USE");
-        // FIXME: should be INV not ZINV (XRay error?)
         write_bit("ZINV_PWRDWN", bool_or_default(ci->params, ctx->id("IS_PWRDWN_INVERTED"), false));
         write_bit("ZINV_RST", bool_or_default(ci->params, ctx->id("IS_RST_INVERTED"), false));
         write_bit("INV_CLKINSEL", bool_or_default(ci->params, ctx->id("IS_CLKINSEL_INVERTED"), false));
@@ -3082,7 +3081,6 @@ struct FasmBackend
         push(get_tile_name(ci->bel.tile));
         push("MMCME2_ADV");
         write_bit("IN_USE");
-        // FIXME: should be INV not ZINV (XRay error?)
         write_bit("ZINV_PWRDWN", bool_or_default(ci->params, id_IS_PWRDWN_INVERTED, false));
         write_bit("ZINV_RST", bool_or_default(ci->params, id_IS_RST_INVERTED, false));
         write_bit("ZINV_PSEN", bool_or_default(ci->params, id_IS_PSEN_INVERTED, false));
