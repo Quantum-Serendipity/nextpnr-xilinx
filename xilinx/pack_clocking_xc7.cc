@@ -239,7 +239,8 @@ void XC7Packer::pack_plls()
                     // shouldn't also flip that intent.
                     bool pwrdwn_wanted_off = p == "PWRDWN" && nn->name == gnd;
                     if (pwrdwn_wanted_off)
-                        ci->params[ctx->id("IS_PWRDWN_INVERTED")] = Property(1);
+                        ci->params[ctx->id("IS_PWRDWN_INVERTED")] =
+                            Property(bool_or_default(ci->params, ctx->id("IS_PWRDWN_INVERTED"), false) ? 0 : 1);
                 }
             }
             if (is_mmcm) {
@@ -255,7 +256,8 @@ void XC7Packer::pack_plls()
                         // bitstream (nextpnr-xilinx#177).
                         bool rst_wanted_off = p == "RST" && nn->name == gnd;
                         if (rst_wanted_off)
-                            ci->params[ctx->id("IS_RST_INVERTED")] = Property(1);
+                            ci->params[ctx->id("IS_RST_INVERTED")] =
+                                Property(bool_or_default(ci->params, ctx->id("IS_RST_INVERTED"), false) ? 0 : 1);
                     }
                 }
             }
