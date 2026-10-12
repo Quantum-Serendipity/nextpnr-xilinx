@@ -1375,7 +1375,7 @@ void Arch::routeBufhcePassthroughCE()
 //   cascade up Y78/Y130/Y182 -> CK_MUXED<L> -> BUFGCTRL<L/2>_I0 (tile Y204),
 // with lane L in {2,6,12}.  The sink BUFGCTRL is moved to the lane's site.
 // Hardcoded for xc7vx485t bottom-right; enable with NEXTPNR_GT_CLK_BODGE=1.
-bool Arch::gtClockTemplateRoute(NetInfo *clk_net, PortRef &usr)
+bool Arch::gtClockTemplateRoute(NetInfo *clk_net, PortRef &usr, int &conflicts)
 {
     if (!getenv("NEXTPNR_GT_CLK_BODGE"))
         return false;
@@ -1458,9 +1458,24 @@ bool Arch::gtClockTemplateRoute(NetInfo *clk_net, PortRef &usr)
             continue;
         }
         WireId src = getPipSrcWire(pip), dst = getPipDstWire(pip);
-        if (getBoundWireNet(src) == nullptr)
+        NetInfo *pn = getBoundPipNet(pip), *sn = getBoundWireNet(src), *dn = getBoundWireNet(dst);
+        NetInfo *holder = pn != nullptr && pn != clk_net   ? pn
+                          : sn != nullptr && sn != clk_net ? sn
+                          : dn != nullptr && dn != clk_net ? dn
+                                                           : nullptr;
+        if (holder != nullptr) {
+            conflicts++;
+            log_warning("GT clock bodge: pip %s for net %s is held by '%s'\n", getPipName(pip).str(this).c_str(),
+                        nameOf(clk_net), nameOf(holder));
+            continue;
+        }
+        if (pn == clk_net) {
+            bound++;
+            continue;
+        }
+        if (sn == nullptr)
             bindWire(src, clk_net, STRENGTH_LOCKED);
-        if (getBoundWireNet(dst) == nullptr)
+        if (dn == nullptr)
             bindWire(dst, clk_net, STRENGTH_LOCKED);
         bindPip(pip, clk_net, STRENGTH_LOCKED);
         bound++;
@@ -1905,15 +1920,6 @@ void Arch::applyFixedRoutes(const std::string &filename, std::function<void()> r
                                 getPipName(pip).str(this).c_str(), nameOf(sn != nullptr && sn != net ? sn : dn));
                 continue;
             }
-            // A wire has exactly ONE driver.  If dst already belongs to this net it
-            // may already be DRIVEN -- routeClock() runs before us and routes the
-            // dedicated clock backbone, so a whole-design import (which carries the
-            // clock nets too, they are TYPE == SIGNAL in Vivado) can offer a second,
-            // fabric-side source for a BUFGCTRL input the backbone already feeds.
-            // The check above only rejects a different NET, so the second pip was
-            // bound and the FASM selected two sources for one mux -- fasm2frames
-            // then aborts with FasmInconsistentBits (measured: 3 BUFGCTRL I0 muxes,
-            // each CK_MUXED* from routeClock plus IMUX* from the import).
             if (dn == net) {
                 bool already_driven = false;
                 for (auto up : getPipsUphill(dst))
@@ -2656,8 +2662,68 @@ std::unordered_set<IdString> Arch::fixedRouteClocks(const std::string &filename)
 void Arch::routeClock()
 {
     log_info("Routing global clocks...\n");
-    const std::unordered_set<IdString> fixed_clocks =
-            fixedRouteClocks(str_or_default(settings, id("fixed-routes"), ""));
+    const std::string fixed = str_or_default(settings, id("fixed-routes"), "");
+    const std::unordered_set<IdString> fixed_clocks = fixedRouteClocks(fixed);
+    int denied = 0, moved = 0;
+    auto path_intents = [&](WireId w, const std::unordered_map<WireId, PipId> &backtrace) {
+        std::vector<int> seq{wireIntent(w)};
+        for (auto it = backtrace.find(w); it != backtrace.end(); it = backtrace.find(w)) {
+            w = getPipDstWire(it->second);
+            seq.push_back(wireIntent(w));
+        }
+        return seq;
+    };
+    auto deny = [&](NetInfo *clk_net, const PortRef &usr, const std::string &what, NetInfo *holder) {
+        denied++;
+        log_warning("routeClock: clock '%s' arc to %s.%s denied its dedicated route: %s is held by '%s'\n",
+                    nameOf(clk_net), nameOf(usr.cell), usr.port.c_str(this), what.c_str(), nameOf(holder));
+    };
+    auto dedicated_search = [&](NetInfo *clk_net, WireId sink_wire, bool through_locked,
+                                std::unordered_map<WireId, PipId> &backtrace) -> WireId {
+        auto passable = [&](NetInfo *holder) {
+            return through_locked && holder != nullptr && holder != clk_net && fixed_clocks.count(holder->name);
+        };
+        std::queue<WireId> visit;
+        visit.push(sink_wire);
+        while (!visit.empty()) {
+            WireId curr = visit.front();
+            visit.pop();
+            if (getBoundWireNet(curr) == clk_net)
+                return curr;
+            for (auto uh : getPipsUphill(curr)) {
+                if (!checkPipAvail(uh) && !passable(getBoundPipNet(uh))) {
+                    if (getCtx()->debug) log_info("            skipping unavailable pip %s\n", getPipName(uh).c_str(this));
+                    continue;
+                }
+                WireId src = getPipSrcWire(uh);
+                auto srcname = getWireName(src).str(this);
+                if (backtrace.count(src)) {
+                    continue;
+                }
+                int intent = wireIntent(src);
+                if (intent == ID_NODE_DOUBLE || intent == ID_NODE_HLONG || intent == ID_NODE_HQUAD ||
+                    intent == ID_NODE_VLONG || intent == ID_NODE_VQUAD || intent == ID_NODE_SINGLE ||
+                    intent == ID_NODE_CLE_OUTPUT || intent == ID_NODE_OPTDELAY || intent == ID_BENTQUAD ||
+                    intent == ID_DOUBLE || intent == ID_HLONG || intent == ID_HQUAD || intent == ID_OPTDELAY ||
+                    intent == ID_SINGLE || intent == ID_VLONG || intent == ID_VLONG12 || intent == ID_VQUAD ||
+                    intent == ID_PINBOUNCE)
+                    {
+                        continue;
+                    }
+                auto avail     = checkWireAvail(src);
+                auto bound_net = getBoundWireNet(src);
+                if (!avail && bound_net != clk_net && !passable(bound_net))
+                    {
+                        if (getCtx()->debug)
+                            log_info("            skipping unavailable wire %s used by net %s\n", srcname.c_str(), bound_net->name.c_str(this));
+                        continue;
+                    }
+                backtrace[src] = uh;
+                visit.push(src);
+            }
+        }
+        return WireId();
+    };
     for (auto net : sorted(nets)) {
         NetInfo *clk_net = net.second;
         bool lenient = false;
@@ -2678,6 +2744,11 @@ void Arch::routeClock()
         }
         if (getBoundWireNet(clk_src) == nullptr)
             bindWire(clk_src, clk_net, STRENGTH_LOCKED);
+        if (getBoundWireNet(clk_src) != clk_net) {
+            for (auto &usr : clk_net->users)
+                deny(clk_net, usr, "source wire " + std::string(nameOfWire(clk_src)), getBoundWireNet(clk_src));
+            continue;
+        }
 
         for (auto &usr : clk_net->users) {
             std::queue<WireId> visit;
@@ -2690,8 +2761,13 @@ void Arch::routeClock()
                             clk_net->name.c_str(this), usr.cell->name.c_str(this), usr.port.c_str(this));
                 continue;
             }
-            if (getBoundWireNet(sink_wire) == clk_net)
+            NetInfo *sink_holder = getBoundWireNet(sink_wire);
+            if (sink_holder == clk_net)
                 continue; // already routed by fixed-routes
+            if (sink_holder != nullptr) {
+                deny(clk_net, usr, "sink wire " + std::string(nameOfWire(sink_wire)), sink_holder);
+                continue;
+            }
             if (getCtx()->debug) {
                 auto sink_wire_name = "(uninitialized)";
                 if (sink_wire != WireId())
@@ -2699,45 +2775,29 @@ void Arch::routeClock()
                 log_info("        routing arc to %s.%s (wire %s):\n", usr.cell->name.c_str(this), usr.port.c_str(this), sink_wire_name);
             }
 
-            visit.push(sink_wire);
-            while (!visit.empty()) {
-                WireId curr = visit.front();
-                visit.pop();
-                if (getBoundWireNet(curr) == clk_net) {
-                    dest = curr;
+            std::unordered_map<WireId, PipId> probe;
+            WireId probe_dest = fixed_clocks.empty() ? WireId() : dedicated_search(clk_net, sink_wire, true, probe);
+            NetInfo *probe_holder = nullptr;
+            std::string probe_pip;
+            for (WireId w = probe_dest; w != WireId() && probe.count(w);) {
+                PipId uh = probe.at(w);
+                w = getPipDstWire(uh);
+                NetInfo *holder = getBoundPipNet(uh);
+                if (holder == nullptr || holder == clk_net)
+                    holder = getBoundWireNet(w);
+                if (holder != nullptr && holder != clk_net) {
+                    probe_holder = holder;
+                    probe_pip = "pip " + std::string(nameOfPip(uh));
                     break;
                 }
-                for (auto uh : getPipsUphill(curr)) {
-                    if (!checkPipAvail(uh)) {
-                        if (getCtx()->debug) log_info("            skipping unavailable pip %s\n", getPipName(uh).c_str(this));
-                        continue;
-                    }
-                    WireId src = getPipSrcWire(uh);
-                    auto srcname = getWireName(src).str(this);
-                    if (backtrace.count(src)) {
-                        continue;
-                    }
-                    int intent = wireIntent(src);
-                    if (intent == ID_NODE_DOUBLE || intent == ID_NODE_HLONG || intent == ID_NODE_HQUAD ||
-                        intent == ID_NODE_VLONG || intent == ID_NODE_VQUAD || intent == ID_NODE_SINGLE ||
-                        intent == ID_NODE_CLE_OUTPUT || intent == ID_NODE_OPTDELAY || intent == ID_BENTQUAD ||
-                        intent == ID_DOUBLE || intent == ID_HLONG || intent == ID_HQUAD || intent == ID_OPTDELAY ||
-                        intent == ID_SINGLE || intent == ID_VLONG || intent == ID_VLONG12 || intent == ID_VQUAD ||
-                        intent == ID_PINBOUNCE)
-                        {
-                            continue;
-                        }
-                    auto avail     = checkWireAvail(src);
-                    auto bound_net = getBoundWireNet(src);
-                    if (!avail && bound_net != clk_net)
-                        {
-                            if (getCtx()->debug)
-                                log_info("            skipping unavailable wire %s used by net %s\n", srcname.c_str(), bound_net->name.c_str(this));
-                            continue;
-                        }
-                    backtrace[src] = uh;
-                    visit.push(src);
-                }
+            }
+
+            dest = dedicated_search(clk_net, sink_wire, false, backtrace);
+            if (probe_holder != nullptr) {
+                if (dest == WireId() || path_intents(dest, backtrace) != path_intents(probe_dest, probe))
+                    deny(clk_net, usr, probe_pip, probe_holder);
+                else
+                    moved++;
             }
             if (dest == WireId()) {
                 log_info("            failed to find a route using dedicated resources.\n");
@@ -2767,8 +2827,9 @@ void Arch::routeClock()
                         }
                     }
                     if (dest == WireId()) {
-                        if (gtClockTemplateRoute(clk_net, usr))
-                            continue;
+                        int gt_conflicts = 0;
+                        gtClockTemplateRoute(clk_net, usr, gt_conflicts);
+                        denied += gt_conflicts;
                         continue;
                     }
                 } else {
@@ -2785,6 +2846,14 @@ void Arch::routeClock()
             }
         }
     }
+    if (!fixed.empty() || denied > 0)
+        log_info("    routeClock: %d global-clock arc(s) denied their dedicated route, %d moved to a parallel route\n",
+                 denied, moved);
+    if (denied > 0 && roi_active())
+        log_error("routeClock: %d global-clock arc(s) were denied their dedicated route by a wire or pip another net "
+                  "already holds (listed above); a partition build may not hand a clock to the lenient or general "
+                  "router\n",
+                  denied);
 #if 0
     for (auto net : sorted(nets)) {
         NetInfo *ni = net.second;

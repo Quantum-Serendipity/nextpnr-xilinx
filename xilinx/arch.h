@@ -2081,7 +2081,7 @@ struct Arch : BaseCtx
     void applyFixedRoutes(const std::string &filename, std::function<void()> route_unlocked_clocks);
     // region_only restricts the dump to the NEXTPNR_PARTITION_ROI rectangle.
     void writeFixedRoutes(const std::string &filename, bool region_only = false) const;
-    bool gtClockTemplateRoute(NetInfo *clk_net, PortRef &usr);
+    bool gtClockTemplateRoute(NetInfo *clk_net, PortRef &usr, int &conflicts);
     void findSourceSinkLocations();
     std::unordered_map<WireId, Loc> sink_locs, source_locs;
     // -------------------------------------------------
