@@ -5589,11 +5589,10 @@ void write_gtx_channel(CellInfo *ci)
             for (auto pin : pins) {
                 if (boost::empty(pin)) continue;
                 // These pins have no interconnect path into the site, so the
-                // tile bit IS the pin: it bypasses the site's optional input
-                // inverter, and the ZIS_*_INVERTED bits fasm.cc writes apply
-                // only to the routed pins.  The bit therefore has to carry the
-                // LOGICAL value -- flip the constant when the netlist asked
-                // for an inversion.
+                // tile bit is their only source.  It sits ahead of the site's
+                // input inverter, which write_bus_zinv() holds off for every
+                // tile-tied pin, so the bit has to carry the LOGICAL value --
+                // flip the constant when the netlist asked for an inversion.
                 //
                 // Splitting the trailing index off matters: erase_all() of
                 // "0123456789" turned "INMODE1" into "INMODE" and then looked

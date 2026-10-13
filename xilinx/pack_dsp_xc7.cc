@@ -127,9 +127,8 @@ void XC7Packer::pack_dsps()
                 // <PIN>.DSP_GND_* / <PIN>.DSP_VCC_* and in no ppips/pips
                 // list, so a tile-local constant bit is the ONLY way to give
                 // them a value.  Leaving one out does not fail routing -- it
-                // silently emits no bit, the pin sits at the tile default 0,
-                // and the site's ZIS_*_INVERTED bit (written independently by
-                // fasm.cc's write_bus_zinv) flips it to 1.
+                // silently emits no bit, and the pin takes whatever the tile
+                // default and the site's ZIS_*_INVERTED bit give it.
                 //
                 // INMODE, ALUMODE2/3 and OPMODE6 were missing.  For a plain
                 // inferred multiplier that turns INMODE 00000 into 11111 --
@@ -140,9 +139,10 @@ void XC7Packer::pack_dsps()
                 // junk, with a correct netlist and clean timing.
                 //
                 // The earlier "these seem to be inverted for unknown reasons"
-                // is that ZIS_*_INVERTED: the pin must be driven with the
-                // UNINVERTED value (VCC for a wanted 0 when the site inverts),
-                // which is what connecting it to its actual constant net does.
+                // is that ZIS_*_INVERTED.  The tile bit drives the pin ahead of
+                // the site's input inverter, so fasm.cc holds that inverter off
+                // for every pin in this list and writes the logical constant,
+                // folding any requested inversion into the GND/VCC choice.
                 if (boost::starts_with(n, "D") ||
                     boost::starts_with(n, "RSTD") ||
                     boost::starts_with(n, "INMODE") ||
