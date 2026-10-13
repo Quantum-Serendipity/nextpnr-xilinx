@@ -5564,7 +5564,8 @@ void write_gtx_channel(CellInfo *ci)
         if (sel_mask == "ROUNDING_MODE1") write_bit("SEL_MASK_ROUNDING_MODE1");
         if (sel_mask == "ROUNDING_MODE2") write_bit("SEL_MASK_ROUNDING_MODE2");
 
-        write_bit("ZADREG[0]", !bool_or_default(ci->params, ctx->id("ADREG"), true));
+        const bool dport_used = use_dport == "TRUE" || use_dport == "1";
+        write_bit("ZADREG[0]", !dport_used || !bool_or_default(ci->params, ctx->id("ADREG"), true));
         write_bit("ZALUMODEREG[0]", !bool_or_default(ci->params, ctx->id("ALUMODEREG"), true));
         auto acascreg = int_or_default(ci->params, ctx->id("ACASCREG"), 1);
         auto bcascreg = int_or_default(ci->params, ctx->id("BCASCREG"), 1);
@@ -5573,7 +5574,7 @@ void write_gtx_channel(CellInfo *ci)
         write_bit("ZCARRYINREG[0]", !bool_or_default(ci->params, ctx->id("CARRYINREG"), true));
         write_bit("ZCARRYINSELREG[0]", !bool_or_default(ci->params, ctx->id("CARRYINSELREG"), true));
         write_bit("ZCREG[0]", !bool_or_default(ci->params, ctx->id("CREG"), true));
-        write_bit("ZDREG[0]", !bool_or_default(ci->params, ctx->id("DREG"), true));
+        write_bit("ZDREG[0]", !dport_used || !bool_or_default(ci->params, ctx->id("DREG"), true));
         write_bit("ZINMODEREG[0]", !bool_or_default(ci->params, ctx->id("INMODEREG"), true));
         write_bus_zinv("ALUMODE", 4);
         write_bus_zinv("INMODE", 5);
