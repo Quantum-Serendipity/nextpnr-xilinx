@@ -1384,7 +1384,9 @@ void XC7Packer::pack_bram()
             for (auto &a15 : {std::make_pair(ctx->id("ADDRARDADDRL15"), "RAM_EXTENSION_A"),
                               std::make_pair(ctx->id("ADDRBWRADDRL15"), "RAM_EXTENSION_B")}) {
                 IdString p = a15.first;
-                const std::string extension = str_or_default(ci->params, ctx->id(a15.second), "NONE");
+                const bool extension_is_named = ctx->idstring_str_to_idx->count(a15.second) != 0;
+                const std::string extension =
+                        extension_is_named ? str_or_default(ci->params, ctx->id(a15.second), "NONE") : "NONE";
                 const bool port_is_cascaded = extension == "LOWER" || extension == "UPPER";
                 const bool a15_has_a_net = get_net_or_empty(ci, p) != nullptr;
                 if (port_is_cascaded && a15_has_a_net)
