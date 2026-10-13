@@ -80,9 +80,11 @@ def main():
 
     everything = sorted(set(base) | set(var))
     if name == "base":
-        for g in ("dst_slow", "dst_fast", "dst_mid", "dst_b"):
+        for g in ("dst_slow", "dst_fast", "dst_mid", "dst_b", "dst_ce"):
             if not count(base, g):
                 fails.append("base analysis has no %s rows" % g)
+        if {r[1] for r in base.get("dst_ce", [])} != {"D", "CE"}:
+            fails.append("base dst_ce rows are not both D and CE, so fp_pins_ce cannot tell a pin from its cell")
         if not any(r[2] < 0 for r in base.get("dst_slow", [])):
             fails.append("base dst_slow has no negative slack, so the design does not exercise exclusion")
         if not any(r[2] < 0 for r in base.get("dst_b", [])):
@@ -92,7 +94,16 @@ def main():
     elif name in ("groups", "groups_single", "fp_clocks"):
         gone("dst_b")
         same(*[g for g in everything if g != "dst_b"])
-    elif name in ("fp_clocks_reversed", "fp_nomatch"):
+    elif name == "fp_pins_ce":
+        b = [r for r in base.get("dst_ce", []) if r[1] != "CE"]
+        v = var.get("dst_ce", [])
+        if any(r[1] == "CE" for r in v):
+            fails.append("dst_ce still has CE rows")
+        if b != v:
+            fails.append("dst_ce non-CE rows differ from the base (%d -> %d)" % (len(b), len(v)))
+        same(*[g for g in everything if g != "dst_ce"])
+    elif name in ("fp_clocks_reversed", "fp_nomatch", "fp_pins_bogus", "fp_pins_q", "fp_clock_typo",
+                  "groups_typo", "fp_from_comb"):
         same(*everything)
     elif name == "fp_from_to":
         relaxed("dst_slow")

@@ -147,7 +147,8 @@ struct Timing
     IdString texc_from_attr, texc_to_attr, ignore_attr;
     std::vector<std::vector<int>> tag_sets{{}};
     std::unordered_map<std::string, int> tag_index;
-    std::unordered_map<const CellInfo *, std::vector<int>> to_ids;
+    std::unordered_map<const CellInfo *, std::vector<std::pair<int, IdString>>> to_ids;
+    std::unordered_map<ClockEvent, delay_t> domain_raw_max;
     std::unordered_map<IdString, std::vector<std::string>> clock_names, clock_names_gen;
     int exc_setup_skipped = 0, exc_hold_skipped = 0, exc_max_delay = 0;
 
@@ -216,16 +217,42 @@ struct Timing
         return tag;
     }
 
-    const std::vector<int> &end_ids(const CellInfo *ci)
+    const std::vector<std::pair<int, IdString>> &end_ids(const CellInfo *ci)
     {
         auto fnd = to_ids.find(ci);
         if (fnd != to_ids.end())
             return fnd->second;
         auto &ids = to_ids[ci];
         auto attr = ci->attrs.find(texc_to_attr);
-        if (attr != ci->attrs.end())
-            ids = parse_ids(attr->second.as_string());
+        if (attr == ci->attrs.end())
+            return ids;
+        std::istringstream iss(attr->second.as_string());
+        std::string tok;
+        while (std::getline(iss, tok, ',')) {
+            size_t colon = tok.find(':');
+            std::string num = tok.substr(0, colon);
+            if (num.empty() || !std::all_of(num.begin(), num.end(), ::isdigit))
+                continue;
+            int v = std::atoi(num.c_str());
+            if (v < 0 || v >= int(ctx->timing_exceptions.size()))
+                continue;
+            IdString port;
+            if (colon != std::string::npos) {
+                if (colon + 1 == tok.size())
+                    continue;
+                port = ctx->id(tok.substr(colon + 1));
+            }
+            ids.emplace_back(v, port);
+        }
         return ids;
+    }
+
+    static bool ends_at(const std::vector<std::pair<int, IdString>> &ids, int idx, IdString port)
+    {
+        for (auto &e : ids)
+            if (e.first == idx && (e.second == IdString() || e.second == port))
+                return true;
+        return false;
     }
 
     void add_clock_names(const NetInfo *net, std::vector<std::string> &names) const
@@ -310,7 +337,8 @@ struct Timing
         return false;
     }
 
-    ExceptionResult match_exceptions(const ClockEvent &start, IdString capture, const CellInfo *endcell)
+    ExceptionResult match_exceptions(const ClockEvent &start, IdString capture, const CellInfo *endcell,
+                                     IdString endport)
     {
         ExceptionResult res;
         if (!have_exceptions)
@@ -320,7 +348,7 @@ struct Timing
             return res;
         }
         const std::vector<int> &start_ids = tag_sets.at(start.tag);
-        const std::vector<int> &stop_ids = end_ids(endcell);
+        const std::vector<std::pair<int, IdString>> &stop_ids = end_ids(endcell);
         for (int i = 0; i < int(ctx->timing_exceptions.size()); i++) {
             const TimingException &e = ctx->timing_exceptions.at(i);
             bool from_any = !e.from_cells && e.from_clocks.empty();
@@ -330,7 +358,7 @@ struct Timing
                            clock_matches(start.clock, e.from_clocks, false);
             if (!from_ok)
                 continue;
-            bool to_ok = to_any || (e.to_cells && std::binary_search(stop_ids.begin(), stop_ids.end(), i)) ||
+            bool to_ok = to_any || (e.to_cells && ends_at(stop_ids, i, endport)) ||
                          clock_matches(capture, e.to_clocks, false);
             if (!to_ok)
                 continue;
@@ -766,6 +794,14 @@ struct Timing
                             nd.arrival_time[dest_ev] = std::max(nd.arrival_time[dest_ev], endpoint_arrival);
 
                             if (crit_path) {
+                                if (startdomain.first.clock == clksig && startdomain.first.edge == edge) {
+                                    ClockEvent domain{clksig, edge};
+                                    auto raw = domain_raw_max.find(domain);
+                                    if (raw == domain_raw_max.end())
+                                        domain_raw_max.emplace(domain, endpoint_arrival);
+                                    else if (raw->second < endpoint_arrival)
+                                        raw->second = endpoint_arrival;
+                                }
                                 double norm_arrival = double(endpoint_arrival) / this_mcp;
                                 if (!crit_nets.count(clockPair) || crit_nets.at(clockPair).first < norm_arrival) {
                                     crit_nets[clockPair] = std::make_pair(norm_arrival, net);
@@ -782,7 +818,7 @@ struct Timing
                                 TimingClockingInfo clkInfo = ctx->getPortClockingInfo(usr.cell, usr.port, i);
                                 const NetInfo *clknet = get_net_or_empty(usr.cell, clkInfo.clock_port);
                                 IdString clksig = clknet ? clknet->name : async_clock;
-                                ExceptionResult exc = match_exceptions(startdomain.first, clksig, usr.cell);
+                                ExceptionResult exc = match_exceptions(startdomain.first, clksig, usr.cell, usr.port);
                                 process_endpoint(clksig, clknet ? clkInfo.edge : RISING_EDGE, clkInfo.setup.maxDelay(),
                                                  exc);
                                 if (exc.skip_hold && crit_path && !update)
@@ -800,7 +836,7 @@ struct Timing
                             }
                         } else {
                             process_endpoint(async_clock, RISING_EDGE, 0,
-                                             match_exceptions(startdomain.first, async_clock, usr.cell));
+                                             match_exceptions(startdomain.first, async_clock, usr.cell, usr.port));
                         }
 
                     } else if (update) {
@@ -929,7 +965,7 @@ struct Timing
                         TimingPortClass portClass = ctx->getPortTimingClass(usr.cell, usr.port, port_clocks);
                         if (portClass == TMG_REGISTER_INPUT || portClass == TMG_ENDPOINT) {
                             auto process_endpoint = [&](IdString clksig, ClockEdge edge, delay_t setup) {
-                                ExceptionResult exc = match_exceptions(startdomain.first, clksig, usr.cell);
+                                ExceptionResult exc = match_exceptions(startdomain.first, clksig, usr.cell, usr.port);
                                 if (exc.skip_setup)
                                     return;
                                 delay_t period;
@@ -1064,15 +1100,7 @@ struct Timing
                             nc.slack.at(i) = ds.second.at(i);
                 }
             }
-            std::unordered_map<ClockEvent, delay_t> domain_dmax;
-            for (auto &path : *crit_path) {
-                const ClockEvent &a = path.first.start, &b = path.first.end;
-                if (a.clock != b.clock || a.edge != b.edge)
-                    continue;
-                ClockEvent domain{a.clock, a.edge};
-                if (!domain_dmax.count(domain) || domain_dmax.at(domain) < path.second.path_delay)
-                    domain_dmax[domain] = path.second.path_delay;
-            }
+            const std::unordered_map<ClockEvent, delay_t> &domain_dmax = domain_raw_max;
             // Assign criticality values
             for (auto &net_entry : net_data) {
                 const NetInfo *net = net_entry.first;
@@ -1416,7 +1444,7 @@ void timing_analysis(Context *ctx, bool print_histogram, bool print_fmax, bool p
             empty_clocks.erase(a.clock);
             // A set_multicycle_path -setup N endpoint may take N clock cycles, so its
             // constraining frequency is N/delay (it drops out as the bottleneck).
-            double mcp = path.second.mcp > 1 ? double(path.second.mcp) : 1.0;
+            double mcp = path.second.mcp;
             if (a.edge == b.edge)
                 Fmax = mcp * 1000 / ctx->getDelayNS(path.second.path_delay);
             else

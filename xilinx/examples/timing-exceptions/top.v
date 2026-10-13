@@ -46,9 +46,14 @@ module top (
         dst_mid <= mid;
     end
 
+    (* keep *) reg [7:0] dst_ce = 0;
+    always @(posedge clk_a)
+        if (src_fast[4] ^ src_fast[3])
+            dst_ce <= src_fast[7:0] + src_fast[15:8];
+
     (* keep *) reg [15:0] dst_b = 0;
     always @(posedge clk_b)
         dst_b <= slow_c;
 
-    assign led = dst_slow[7:0] ^ dst_slow[15:8] ^ dst_fast[7:0] ^ dst_fast[15:8] ^ dst_b[7:0] ^ dst_b[15:8] ^ {7'b0, dst_mid};
+    assign led = dst_slow[7:0] ^ dst_slow[15:8] ^ dst_fast[7:0] ^ dst_fast[15:8] ^ dst_b[7:0] ^ dst_b[15:8] ^ dst_ce ^ {7'b0, dst_mid};
 endmodule

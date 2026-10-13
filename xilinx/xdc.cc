@@ -190,7 +190,54 @@ void Arch::parseXdc(std::istream &in)
         std::vector<CellInfo *> cells;
         std::vector<NetInfo *> nets;
         std::vector<std::string> clocks;
+        std::vector<std::pair<CellInfo *, std::string>> pins;
         bool has_cells = false, has_nets = false, has_clocks = false;
+    };
+
+    auto is_ff = [&](const CellInfo *ci) {
+        static const std::vector<std::string> ff_types{"FDRE",   "FDSE",   "FDCE",   "FDPE",     "FDRE_1",
+                                                       "FDSE_1", "FDCE_1", "FDPE_1", "SLICE_FFX"};
+        const std::string &t = ci->type.str(this);
+        return std::find(ff_types.begin(), ff_types.end(), t) != ff_types.end();
+    };
+
+    auto ff_pin = [&](const CellInfo *ci, const std::string &port) -> std::string {
+        if (ci->type.str(this) == "SLICE_FFX")
+            return port;
+        if (port == "C")
+            return xc7 ? "CK" : "CLK";
+        if (port == "R" || port == "S" || port == "CLR" || port == "PRE")
+            return "SR";
+        return port;
+    };
+
+    auto is_combinational = [&](const CellInfo *ci) {
+        static const std::vector<std::string> prefixes{"LUT", "SLICE_LUTX", "CARRY4", "MUXF", "F7MUX", "F8MUX",
+                                                       "F9MUX", "SELMUX2_1", "INV", "VCC", "GND", "PSEUDO_"};
+        const std::string &t = ci->type.str(this);
+        for (auto &pre : prefixes)
+            if (t.compare(0, pre.size(), pre) == 0)
+                return true;
+        return false;
+    };
+
+    auto clock_known = [&](const std::string &pat) {
+        for (auto &n : nets) {
+            const NetInfo *ni = n.second.get();
+            bool clocky = ni->clkconstr != nullptr;
+            if (!clocky && ni->driver.cell != nullptr) {
+                const std::string &dt = ni->driver.cell->type.str(this);
+                clocky = dt.find("BUF") != std::string::npos || dt.find("PLL") != std::string::npos ||
+                         dt.find("MMCM") != std::string::npos;
+            }
+            if (!clocky)
+                continue;
+            if (glob_match(n.first.str(this), pat))
+                return true;
+            if (ni->clkconstr != nullptr && !ni->clkconstr->name.empty() && glob_match(ni->clkconstr->name, pat))
+                return true;
+        }
+        return false;
     };
 
     auto expand_list = [&](const std::string &tok) {
@@ -305,18 +352,45 @@ void Arch::parseXdc(std::istream &in)
             sel.has_clocks = true;
             for (auto &p : pats)
                 sel.clocks.push_back(p);
-        } else if (qcmd == "get_cells" || qcmd == "get_pins") {
+        } else if (qcmd == "get_pins") {
             sel.has_cells = true;
-            for (auto p : pats) {
-                if (qcmd == "get_pins") {
-                    size_t slash = p.find_last_of('/');
-                    if (slash == std::string::npos || slash == 0) {
-                        sel.ok = false;
-                        sel.error = "get_pins pattern '" + p + "' has no <cell>/<pin> separator";
-                        return;
-                    }
-                    p = p.substr(0, slash);
+            for (auto &p : pats) {
+                size_t slash = p.find_last_of('/');
+                if (slash == std::string::npos || slash == 0 || slash + 1 == p.size()) {
+                    sel.ok = false;
+                    sel.error = "get_pins pattern '" + p + "' has no <cell>/<pin> separator";
+                    return;
                 }
+                std::string cpat = p.substr(0, slash), ppat = p.substr(slash + 1);
+                for (auto &c : cells) {
+                    CellInfo *ci = c.second.get();
+                    bool named = false;
+                    for (auto &n : cell_names(ci))
+                        if (name_matches(n, cpat, hier)) {
+                            named = true;
+                            break;
+                        }
+                    if (!named)
+                        continue;
+                    for (auto &port : ci->ports) {
+                        std::string pn = port.first.str(this);
+                        if (!glob_match(pn, ppat))
+                            continue;
+                        if (!is_ff(ci)) {
+                            sel.ok = false;
+                            sel.error = "get_pins is read only on flip-flop pins, and '" + ci->name.str(this) + "/" +
+                                        pn + "' is a pin of a " + ci->type.str(this);
+                            return;
+                        }
+                        std::pair<CellInfo *, std::string> entry{ci, pn};
+                        if (std::find(sel.pins.begin(), sel.pins.end(), entry) == sel.pins.end())
+                            sel.pins.push_back(entry);
+                    }
+                }
+            }
+        } else if (qcmd == "get_cells") {
+            sel.has_cells = true;
+            for (auto &p : pats) {
                 for (auto &c : cells)
                     for (auto &n : cell_names(c.second.get()))
                         if (name_matches(n, p, hier)) {
@@ -372,10 +446,10 @@ void Arch::parseXdc(std::istream &in)
             log_warning("%s: %s, constraint not applied (on line %d)\n", what.c_str(), why.c_str(), lineno);
     };
 
-    auto stamp = [&](CellInfo *ci, const char *attr, int idx) {
+    auto stamp = [&](CellInfo *ci, const char *attr, const std::string &entry) {
         IdString a = id(attr);
         std::string v = ci->attrs.count(a) ? ci->attrs.at(a).as_string() : std::string();
-        v += (v.empty() ? "" : ",") + std::to_string(idx);
+        v += (v.empty() ? "" : ",") + entry;
         ci->attrs[a] = v;
     };
 
@@ -446,24 +520,50 @@ void Arch::parseXdc(std::istream &in)
         for (Selection *s : {&from, &to})
             if (s->has_nets)
                 return refuse(what, "-from/-to take get_cells, get_pins, get_ports or get_clocks, not get_nets");
+        for (Selection *s : {&from, &to})
+            for (auto &clk : s->clocks)
+                if (!clock_known(clk))
+                    return refuse(what, std::string(s == &from ? "-from" : "-to") + " clock '" + clk +
+                                                "' matched no clock");
+        bool from_had_cells = !from.cells.empty(), to_had_cells = !to.cells.empty();
+        for (Selection *s : {&from, &to})
+            s->cells.erase(std::remove_if(s->cells.begin(), s->cells.end(), is_combinational), s->cells.end());
+        std::vector<CellInfo *> from_pin_cells;
+        for (auto &pin : from.pins) {
+            std::string pn = ff_pin(pin.first, pin.second);
+            if (pn != "Q" && pn != "CK" && pn != "CLK")
+                return refuse(what, "-from pin '" + pin.first->name.str(this) + "/" + pin.second +
+                                            "' is not a startpoint (only the clock or Q pin of a flip-flop)");
+            add_cell(from_pin_cells, pin.first);
+        }
+        for (auto &pin : to.pins) {
+            std::string pn = ff_pin(pin.first, pin.second);
+            if (pn != "D" && pn != "CE" && pn != "SR")
+                return refuse(what, "-to pin '" + pin.first->name.str(this) + "/" + pin.second +
+                                            "' is not a timed data pin (only D, CE or R/S/CLR/PRE of a flip-flop)");
+        }
+        for (auto ci : from_pin_cells)
+            add_cell(from.cells, ci);
         if (got_from && from.cells.empty() && from.clocks.empty())
-            return refuse(what, "-from matched nothing");
-        if (got_to && to.cells.empty() && to.clocks.empty())
-            return refuse(what, "-to matched nothing");
+            return refuse(what, from_had_cells ? "-from matched no timing startpoint" : "-from matched nothing");
+        if (got_to && to.cells.empty() && to.pins.empty() && to.clocks.empty())
+            return refuse(what, to_had_cells ? "-to matched no timing endpoint" : "-to matched nothing");
         exc.from_cells = !from.cells.empty();
-        exc.to_cells = !to.cells.empty();
+        exc.to_cells = !to.cells.empty() || !to.pins.empty();
         exc.from_clocks = from.clocks;
         exc.to_clocks = to.clocks;
         int idx = int(timing_exceptions.size());
         for (auto ci : from.cells)
-            stamp(ci, "NEXTPNR_TEXC_FROM", idx);
+            stamp(ci, "NEXTPNR_TEXC_FROM", std::to_string(idx));
         for (auto ci : to.cells)
-            stamp(ci, "NEXTPNR_TEXC_TO", idx);
+            stamp(ci, "NEXTPNR_TEXC_TO", std::to_string(idx));
+        for (auto &pin : to.pins)
+            stamp(pin.first, "NEXTPNR_TEXC_TO", std::to_string(idx) + ":" + ff_pin(pin.first, pin.second));
         timing_exceptions.push_back(exc);
-        log_info("%s: exception #%d, from %d cell(s) %d clock pattern(s), to %d cell(s) %d clock pattern(s)%s (on "
-                 "line %d)\n",
+        log_info("%s: exception #%d, from %d cell(s) %d clock pattern(s), to %d cell(s) %d pin(s) %d clock "
+                 "pattern(s)%s (on line %d)\n",
                  what.c_str(), idx, int(from.cells.size()), int(from.clocks.size()), int(to.cells.size()),
-                 int(to.clocks.size()),
+                 int(to.pins.size()), int(to.clocks.size()),
                  is_max ? stringf(", max %.3f ns", getDelayNS(exc.value)).c_str() : "", lineno);
     };
 
@@ -480,6 +580,9 @@ void Arch::parseXdc(std::istream &in)
                     return refuse(what, "-group: " + s.error);
                 if (s.has_cells || s.has_nets || s.clocks.empty())
                     return refuse(what, "-group takes clocks");
+                for (auto &clk : s.clocks)
+                    if (!clock_known(clk))
+                        return refuse(what, "-group clock '" + clk + "' matched no clock");
                 grp.groups.push_back(s.clocks);
             } else if (a == "-name" && i + 1 < args.size())
                 ++i;

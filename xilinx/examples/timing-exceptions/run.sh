@@ -27,6 +27,7 @@ cd "$HERE" || exit 1
 VARIANTS=(
     groups groups_single fp_clocks fp_clocks_reversed fp_from_to fp_from fp_to fp_pins
     fp_setup_only fp_through fp_nomatch maxdelay_cdc maxdelay_tight precedence
+    fp_pins_ce fp_pins_bogus fp_pins_q fp_clock_typo groups_typo fp_from_comb
 )
 
 rc_total=0
@@ -42,8 +43,8 @@ if ! "$YOSYS" -q -l "$OUT/yosys.log" \
     exit 1
 fi
 
-if ! "$NEXTPNR" --chipdb "$CHIPDB" --xdc "$HERE/base.xdc" --json "$OUT/top.json" --write "$OUT/routed.json" \
-        --fasm "$OUT/base.fasm" --log "$OUT/pnr.log" -q --seed 1 >/dev/null 2>&1; then
+if ! NEXTPNR_CRIT_EXPORT="$OUT/base_crit.tsv" "$NEXTPNR" --chipdb "$CHIPDB" --xdc "$HERE/base.xdc" \
+        --json "$OUT/top.json" --write "$OUT/routed.json" --fasm "$OUT/base.fasm" --log "$OUT/pnr.log" -q --seed 1 >/dev/null 2>&1; then
     echo "FAIL nextpnr place and route"
     exit 1
 fi
@@ -70,17 +71,25 @@ for v in "${VARIANTS[@]}"; do
     report "$("$PYTHON" "$HERE/grade.py" "$OUT/routed.json" "$OUT/base.tsv" "$OUT/$v.tsv" "$OUT/$v.log" "$v")"
 done
 
-if replay strict_nomatch --xdc "$HERE/xdc/fp_nomatch.xdc" --xdc-strict; then
-    report "FAIL strict_nomatch: --xdc-strict accepted an exception that matched nothing"
-else
-    if grep -q 'matched nothing' "$OUT/strict_nomatch.log"; then
-        report "PASS strict_nomatch: refused under --xdc-strict"
+strict_arm() {
+    local name=$1 xdc=$2 why=$3
+    if replay "$name" --xdc "$HERE/xdc/$xdc.xdc" --xdc-strict; then
+        report "FAIL $name: --xdc-strict accepted $xdc.xdc"
+    elif grep -q -- "$why" "$OUT/$name.log"; then
+        report "PASS $name: refused under --xdc-strict ($why)"
     else
-        report "FAIL strict_nomatch: refused, but not for the unmatched -from"
+        report "FAIL $name: refused, but the log does not say '$why'"
     fi
-fi
+}
 
-if ! NEXTPNR_SETUP_EXPORT="$OUT/pnr_groups.tsv" "$NEXTPNR" --chipdb "$CHIPDB" --xdc "$HERE/base.xdc" \
+strict_arm strict_nomatch fp_nomatch 'matched nothing'
+strict_arm strict_pins_bogus fp_pins_bogus '-to matched nothing'
+strict_arm strict_pins_q fp_pins_q 'is not a timed data pin'
+strict_arm strict_clock_typo fp_clock_typo "clock 'no_such_clk' matched no clock"
+strict_arm strict_groups_typo groups_typo "clock 'clkb_typo' matched no clock"
+strict_arm strict_from_comb fp_from_comb 'matched no timing startpoint'
+
+if ! NEXTPNR_SETUP_EXPORT="$OUT/pnr_groups.tsv" NEXTPNR_CRIT_EXPORT="$OUT/pnr_groups_crit.tsv" "$NEXTPNR" --chipdb "$CHIPDB" --xdc "$HERE/base.xdc" \
         --xdc "$HERE/xdc/groups.xdc" --xdc "$HERE/xdc/fp_from_to.xdc" --json "$OUT/top.json" \
         --write "$OUT/routed_groups.json" --log "$OUT/pnr_groups.log" -q --seed 1 >/dev/null 2>&1; then
     report "FAIL pnr_groups: place and route with exceptions exited non-zero"
@@ -95,6 +104,25 @@ print(len(r.get("dst_b", [])), len(r.get("dst_slow", [])))
     case $n in
         "0 "[1-9]*) report "PASS pnr_groups: placed and routed under exceptions; dst_b rows, dst_slow rows: $n" ;;
         *) report "FAIL pnr_groups: dst_b rows, dst_slow rows: $n" ;;
+    esac
+    c=$(cd "$HERE" && "$PYTHON" -B -c '
+import sys
+import grade
+def crit(routed, tsv):
+    g = grade.groups_of(routed)
+    out = {}
+    with open(tsv) as f:
+        for line in f:
+            cell, value = line.rstrip("\n").split("\t")
+            out.setdefault(g.get(cell, "?"), []).append(float(value))
+    return out
+b = crit(sys.argv[1], sys.argv[2])
+v = crit(sys.argv[3], sys.argv[4])
+print(len(b.get("src_slow", [])), len(v.get("src_slow", [])), sum(len(x) for x in v.values()))
+' "$OUT/routed.json" "$OUT/base_crit.tsv" "$OUT/routed_groups.json" "$OUT/pnr_groups_crit.tsv")
+    case $c in
+        [1-9]*" 0 "[1-9]*) report "PASS pnr_crit: src_slow critical in the base, not under exceptions; base src_slow, excepted src_slow, excepted total: $c" ;;
+        *) report "FAIL pnr_crit: base src_slow, excepted src_slow, excepted total: $c" ;;
     esac
 fi
 
