@@ -31,6 +31,7 @@ FAMILIES=(
     "bram_rstreg   ZINV_RSTREGARSTREG         0 1 yes"
     "bufgctrl_ce1  ZINV_CE1                   0 1 yes"
     "dsp_alumode0  ZIS_ALUMODE_INVERTED[0]    0 1 yes"
+    "dsp_inmode1   _INMODE1.DSP_VCC_          0 1 yes"
     "oddr_d1       IS_D1_INVERTED             1 0 no"
 )
 
@@ -109,6 +110,20 @@ if build bufgmux_undrv; then
     s1=$(count bufgmux_undrv ZINV_S1)
     [ "$s0" = 2 ] && [ "$s1" = 0 ] && v=PASS || v=FAIL
     report "$v" "bufgmux_undrv: ZINV_S0 count $s0 want 2, ZINV_S1 count $s1 want 0 (I0 selected)"
+else
+    rc_total=1
+fi
+
+if build dsp_inmode1_tie0 && build dsp_inmode1_tie1; then
+    for c in tie0 tie1; do
+        gg=$(count "dsp_inmode1_$c" _INMODE1.DSP_GND_)
+        gv=$(count "dsp_inmode1_$c" _INMODE1.DSP_VCC_)
+        gz=$(count "dsp_inmode1_$c" "ZIS_INMODE_INVERTED[1]")
+        want="1 0 1"
+        [ "$c" = tie1 ] && want="0 1 1"
+        [ "$gg $gv $gz" = "$want" ] && v=PASS || v=FAIL
+        report "$v" "dsp_inmode1_$c: INMODE1 GND VCC ZIS count $gg $gv $gz, want $want"
+    done
 else
     rc_total=1
 fi
