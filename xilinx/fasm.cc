@@ -1943,7 +1943,15 @@ struct FasmBackend
             write_bit("ZINV_T2");
 
             const bool output_is_an_oddr = site_bel_is_bound("OUTFF");
-            if (!output_is_an_oddr) {
+            if (output_is_an_oddr) {
+                CellInfo *oq = ctx->getBoundBelCell(ctx->getBelByName(ctx->id(site + "/OUTFF")));
+                const bool clock_inversion_differs = bool_or_default(oq->params, ctx->id("IS_CLK_INVERTED")) !=
+                                                     bool_or_default(ci->params, ctx->id("IS_CLK_INVERTED"));
+                if (clock_inversion_differs)
+                    log_error("%s '%s' (tristate) and '%s' (data) share the OLOGIC site %s, which has one clock "
+                              "inverter; they disagree on IS_C_INVERTED\n",
+                              ci->type.c_str(ctx), ctx->nameOf(ci), ctx->nameOf(oq), site.c_str());
+            } else {
                 write_bit("ODDR_TDDR.IN_USE");
                 write_bit("ODDR.DDR_CLK_EDGE.SAME_EDGE");
                 auto clk_inv = bool_or_default(ci->params, ctx->id("IS_CLK_INVERTED"));
