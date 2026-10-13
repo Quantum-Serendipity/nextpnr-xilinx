@@ -122,8 +122,6 @@ void XC7Packer::pack_dsps()
                 // prjxray has extra bits for these ports to hardwire them to VCC/GND
                 // as these seem to be internal to the tile,
                 // this saves us from having to route those externally.
-                // INMODE, ALUMODE2/3 and OPMODE6 have no other way in: the db has
-                // them only as these tile bits and in no pip list.
                 // fasm.cc chooses each tieoff from the pin's logical value.
                 const bool tied_in_tile = boost::starts_with(n, "D") || boost::starts_with(n, "RSTD") ||
                                           boost::starts_with(n, "INMODE") || boost::starts_with(n, "ALUMODE2") ||
