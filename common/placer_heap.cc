@@ -982,21 +982,27 @@ class HeAPPlacer
                     log_error("Unable to find legal placement for cell '%s', check constraints and utilisation.\n",
                               ctx->nameOf(ci));
 
-                int rx = radius, ry = radius;
+                int x0 = std::max(cell_locs.at(ci->name).x - radius, 0);
+                int y0 = std::max(cell_locs.at(ci->name).y - radius, 0);
+                int x1 = x0 + 2 * radius;
+                int y1 = y0 + 2 * radius;
 
                 if (ci->region != nullptr) {
-                    rx = std::min(radius, (constraint_region_bounds[ci->region->name].x1 -
-                                           constraint_region_bounds[ci->region->name].x0) /
-                                                          2 +
-                                                  1);
-                    ry = std::min(radius, (constraint_region_bounds[ci->region->name].y1 -
-                                           constraint_region_bounds[ci->region->name].y0) /
-                                                          2 +
-                                                  1);
+                    auto &r = constraint_region_bounds[ci->region->name];
+                    x1 = cell_locs.at(ci->name).x + radius;
+                    y1 = cell_locs.at(ci->name).y + radius;
+                    x0 = std::max(x0, r.x0);
+                    y0 = std::max(y0, r.y0);
+                    x1 = std::min(x1, r.x1);
+                    y1 = std::min(y1, r.y1);
+                    if (x0 > x1)
+                        std::swap(x0, x1);
+                    if (y0 > y1)
+                        std::swap(y0, y1);
                 }
 
-                int nx = ctx->rng(2 * rx + 1) + std::max(cell_locs.at(ci->name).x - rx, 0);
-                int ny = ctx->rng(2 * ry + 1) + std::max(cell_locs.at(ci->name).y - ry, 0);
+                int nx = ctx->rng(x1 - x0 + 1) + x0;
+                int ny = ctx->rng(y1 - y0 + 1) + y0;
 
                 iter++;
                 iter_at_radius++;
