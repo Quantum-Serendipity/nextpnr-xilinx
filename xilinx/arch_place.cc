@@ -2114,6 +2114,7 @@ void Arch::fixupRouting()
     int perm_label_no_net = 0; // X_ORIG_PORT suppressed because connect_port() had a null net
     int perm_dropped_nets = 0; // input connections this pass removed and did not put back
     std::string perm_dropped_first;
+    int permuted_pins = 0;
 
     for (auto net : sorted(nets)) {
         NetInfo *ni = net.second;
@@ -2211,6 +2212,9 @@ void Arch::fixupRouting()
                     }
                     NetInfo *newnet = orig_nets[new_connections.at(p).front()];
                     connect_port(getCtx(), newnet, lut6, p);
+                    lut6->pins[p] = new_connections.at(p).front();
+                    if (lut6->pins[p] != p)
+                        permuted_pins++;
                     // connect_port() RETURNS SILENTLY on a null net
                     // (common/design_utils.cc), so writing the label
                     // unconditionally manufactured an X_ORIG_PORT on a pin with
@@ -2247,6 +2251,9 @@ void Arch::fixupRouting()
                     }
                     NetInfo *newnet = orig_nets[new_connections.at(p).front()];
                     connect_port(getCtx(), newnet, lut5, p);
+                    lut5->pins[p] = new_connections.at(p).front();
+                    if (lut5->pins[p] != p)
+                        permuted_pins++;
                     if (newnet == nullptr) {
                         // Same suppression as the LUT6 block above.
                         perm_label_no_net++;
@@ -2295,6 +2302,7 @@ void Arch::fixupRouting()
             }
         }
     }
+    log_info("LUT permutation rewrite: recorded %d permuted LUT input pin(s) as routed sink wires\n", permuted_pins);
     if (perm_label_no_net > 0)
         log_info("LUT permutation rewrite: %d X_ORIG_PORT label(s) suppressed on pins left with no net\n",
                  perm_label_no_net);
