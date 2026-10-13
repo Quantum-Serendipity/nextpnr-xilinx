@@ -1651,10 +1651,16 @@ void Arch::assignCellInfo(CellInfo *cell)
         cell->lutInfo.di1_net = get_net_or_empty(cell, id_DI1);
         cell->lutInfo.di2_net = get_net_or_empty(cell, id_DI2);
         cell->lutInfo.wclk = get_net_or_empty(cell, id_CLK);
-        cell->lutInfo.wclk_inv = bool_or_default(cell->params, id("IS_WCLK_INVERTED"), false);
         cell->lutInfo.we = get_net_or_empty(cell, id_WE);
         cell->lutInfo.memory_group = 0; // fixme
         cell->lutInfo.is_srl = cell->attrs.count(id("X_LUT_AS_SRL"));
+        const bool srl_has_only_clk_param = cell->lutInfo.is_srl && !cell->params.count(id("IS_WCLK_INVERTED")) &&
+                                            cell->params.count(id("IS_CLK_INVERTED"));
+        if (srl_has_only_clk_param) {
+            cell->params[id("IS_WCLK_INVERTED")] = cell->params.at(id("IS_CLK_INVERTED"));
+            cell->params.erase(id("IS_CLK_INVERTED"));
+        }
+        cell->lutInfo.wclk_inv = bool_or_default(cell->params, id("IS_WCLK_INVERTED"), false);
         cell->lutInfo.is_memory = cell->attrs.count(id("X_LUT_AS_DRAM"));
         cell->lutInfo.only_drives_carry = false;
         // Connectivity is sufficient: a LUT whose only user is the carry
