@@ -923,6 +923,20 @@ void XilinxPacker::pack_constants()
     if (invertible_pins.empty())
         get_invertible_pins(ctx, invertible_pins);
     if (!ctx->cells.count(ctx->id("$PACKER_GND_DRV"))) {
+        // "ctx->nets[name] = std::move(...)" below overwrites an existing
+        // entry rather than asserting, so a design that already carries a net
+        // with one of these names would have that NetInfo freed while its
+        // users still point at it. Move any such net aside; its driver is a
+        // GND/VCC cell, so the loop further down reties its users to the
+        // packer's own constants and erases it.
+        for (const char *cn : {"$PACKER_GND_NET", "$PACKER_VCC_NET"}) {
+            IdString id = ctx->id(cn);
+            if (ctx->nets.count(id)) {
+                log_info("    adopting imported constant net %s (%d user(s))\n", cn,
+                         int(ctx->nets.at(id)->users.size()));
+                rename_net(id, ctx->id(std::string(cn) + "$imported"));
+            }
+        }
         std::unique_ptr<CellInfo> gnd_cell{new CellInfo};
         gnd_cell->name = ctx->id("$PACKER_GND_DRV");
         gnd_cell->type = id_PSEUDO_GND;
