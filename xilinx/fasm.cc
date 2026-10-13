@@ -21,7 +21,9 @@
 #include <boost/algorithm/string.hpp>
 #include <boost/algorithm/string/predicate.hpp>
 #include <boost/range/adaptor/reversed.hpp>
+#include <filesystem>
 #include <fstream>
+#include <system_error>
 #include "log.h"
 #include "nextpnr.h"
 #include "pins.h"
@@ -5720,25 +5722,57 @@ void write_gtx_channel(CellInfo *ci)
 
 void Arch::writeFasm(const std::string &filename, bool region_only)
 {
-    std::ofstream out(filename);
-    if (!out)
-        log_error("failed to open file %s for writing (%s)\n", filename.c_str(), strerror(errno));
+    std::error_code status_ec;
+    const auto dest_status = std::filesystem::symlink_status(filename, status_ec);
+    const bool dest_is_special =
+            std::filesystem::exists(dest_status) && !std::filesystem::is_regular_file(dest_status);
+    const std::string write_path = dest_is_special ? filename : filename + ".nextpnr-tmp";
+    struct PendingFasm
+    {
+        std::string path;
+        bool commit = false;
+        ~PendingFasm()
+        {
+            if (!commit) {
+                std::error_code remove_ec;
+                std::filesystem::remove(path, remove_ec);
+            }
+        }
+    } pending{write_path, dest_is_special};
 
-    FasmBackend be(getCtx(), out);
-    if (region_only) {
-        // One rectangle from one source.  --region-only carries no coordinates
-        // of its own precisely so that emission cannot drift away from the
-        // rectangle placement and routing were held to.
-        if (!roi_active())
-            log_error("--region-only needs a partition rectangle; set NEXTPNR_PARTITION_ROI\n");
-        be.region_filter = true;
-        be.rx0 = roi_x0;
-        be.ry0 = roi_y0;
-        be.rx1 = roi_x1;
-        be.ry1 = roi_y1;
-        be.governed = partition_nets();
+    {
+        std::ofstream out(write_path);
+        if (!out)
+            log_error("failed to open file %s for writing (%s)\n", write_path.c_str(), strerror(errno));
+
+        FasmBackend be(getCtx(), out);
+        if (region_only) {
+            // One rectangle from one source.  --region-only carries no coordinates
+            // of its own precisely so that emission cannot drift away from the
+            // rectangle placement and routing were held to.
+            if (!roi_active())
+                log_error("--region-only needs a partition rectangle; set NEXTPNR_PARTITION_ROI\n");
+            be.region_filter = true;
+            be.rx0 = roi_x0;
+            be.ry0 = roi_y0;
+            be.rx1 = roi_x1;
+            be.ry1 = roi_y1;
+            be.governed = partition_nets();
+        }
+        be.write_fasm();
+        out.flush();
+        if (!out.good())
+            log_error("failed to write FASM file %s\n", write_path.c_str());
     }
-    be.write_fasm();
+
+    if (dest_is_special)
+        return;
+    std::error_code rename_ec;
+    std::filesystem::rename(write_path, filename, rename_ec);
+    if (rename_ec)
+        log_error("failed to rename FASM file %s to %s (%s)\n", write_path.c_str(), filename.c_str(),
+                  rename_ec.message().c_str());
+    pending.commit = true;
 }
 
 NEXTPNR_NAMESPACE_END
