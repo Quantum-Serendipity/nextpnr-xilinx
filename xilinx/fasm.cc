@@ -21,9 +21,11 @@
 #include <boost/algorithm/string.hpp>
 #include <boost/algorithm/string/predicate.hpp>
 #include <boost/range/adaptor/reversed.hpp>
+#include <cctype>
 #include <filesystem>
 #include <fstream>
 #include <random>
+#include <set>
 #include <system_error>
 #include "log.h"
 #include "nextpnr.h"
@@ -5512,11 +5514,31 @@ void write_gtx_channel(CellInfo *ci)
         auto dsp = "DSP_" + std::to_string(xy.y);
         push(dsp);
 
+        // Pins the packer tied inside the tile (DSP_GND_PINS / DSP_VCC_PINS) carry their
+        // logical value in the tile bit itself, and the site inverter stays out of the way:
+        // write_const_pins() below already folds a requested inversion into the constant it
+        // emits, so leaving IS_<pin>_INVERTED to reach the bitstream inverts such a pin a
+        // second time.  Vivado encodes them the same way -- bit-diffed on xc7k70tfbg676-2
+        // (Vivado 2025.2, one LOC'd DSP48E1 per bitstream, prjxray-db kintex7): a constant 0
+        // is DSP_<n>_<PIN>.DSP_GND_<side> and a constant 1 is DSP_<n>_<PIN>.DSP_VCC_<side>,
+        // with ZIS_<PIN>_INVERTED set (not inverted) in both cases, and no routing bit
+        // anywhere on the device differing between the two.
+        std::set<std::string> tile_tied;
+        for (auto attr : {"DSP_GND_PINS", "DSP_VCC_PINS"}) {
+            std::vector<std::string> pins;
+            boost::split(pins, str_or_default(ci->attrs, ctx->id(attr), ""), boost::is_any_of(" "));
+            for (auto &pin : pins)
+                if (!pin.empty())
+                    tile_tied.insert(pin);
+        }
+
         auto write_bus_zinv = [&](std::string name, int width) {
             for (int i = 0; i < width; i++) {
                 std::string b = stringf("[%d]", i);
                 bool inv = (int_or_default(ci->params, ctx->id("IS_" + name + "_INVERTED"), 0) >> i) & 0x1;
                 inv |= bool_or_default(ci->params, ctx->id("IS_" + name + b + "_INVERTED"), false);
+                if (tile_tied.count(name + std::to_string(i)))
+                    inv = false;
                 write_bit("ZIS_" + name + "_INVERTED" + b, !inv);
             }
         };
@@ -5535,20 +5557,14 @@ void write_gtx_channel(CellInfo *ci)
             return it->second.str;
         };
 
-        // value 1 is equivalent to 2, according to UG479
-        // but in real life, Vivado sets AREG_0 is 0,
-        // no bit is 1, and AREG_2 is 2
         auto areg = int_or_default(ci->params, ctx->id("AREG"), 1);
-        if (areg == 0 || areg == 2) write_bit("AREG_" + std::to_string(areg));
+        if (areg >= 0 && areg <= 2) write_bit("AREG_" + std::to_string(areg));
 
         auto ainput = dsp_str("A_INPUT", "DIRECT");
         if (ainput == "CASCADE") write_bit("A_INPUT[0]");
 
-        // value 1 is equivalent to 2, according to UG479
-        // but in real life, Vivado sets AREG_0 is 0,
-        // no bit is 1, and AREG_2 is 2
         auto breg = int_or_default(ci->params, ctx->id("BREG"), 1);
-        if (breg == 0 || breg == 2) write_bit("BREG_" + std::to_string(breg));
+        if (breg >= 0 && breg <= 2) write_bit("BREG_" + std::to_string(breg));
 
         auto binput = dsp_str("B_INPUT", "DIRECT");
         if (binput == "CASCADE") write_bit("B_INPUT[0]");
@@ -5595,14 +5611,18 @@ void write_gtx_channel(CellInfo *ci)
         if (sel_mask == "ROUNDING_MODE1") write_bit("SEL_MASK_ROUNDING_MODE1");
         if (sel_mask == "ROUNDING_MODE2") write_bit("SEL_MASK_ROUNDING_MODE2");
 
-        write_bit("ZADREG[0]", !bool_or_default(ci->params, ctx->id("ADREG"), true));
+        const bool dport_used =
+                (use_dport == "TRUE" || use_dport == "1") && dsp_str("USE_MULT", "MULTIPLY") != "NONE";
+        write_bit("ZADREG[0]", !dport_used || !bool_or_default(ci->params, ctx->id("ADREG"), true));
         write_bit("ZALUMODEREG[0]", !bool_or_default(ci->params, ctx->id("ALUMODEREG"), true));
-        write_bit("ZAREG_2_ACASCREG_1", !bool_or_default(ci->params, ctx->id("ACASCREG"), true));
-        write_bit("ZBREG_2_BCASCREG_1", !bool_or_default(ci->params, ctx->id("BCASCREG"), true));
+        auto acascreg = int_or_default(ci->params, ctx->id("ACASCREG"), 1);
+        auto bcascreg = int_or_default(ci->params, ctx->id("BCASCREG"), 1);
+        write_bit("ZAREG_2_ACASCREG_1", !(areg == 2 && acascreg == 1));
+        write_bit("ZBREG_2_BCASCREG_1", !(breg == 2 && bcascreg == 1));
         write_bit("ZCARRYINREG[0]", !bool_or_default(ci->params, ctx->id("CARRYINREG"), true));
         write_bit("ZCARRYINSELREG[0]", !bool_or_default(ci->params, ctx->id("CARRYINSELREG"), true));
         write_bit("ZCREG[0]", !bool_or_default(ci->params, ctx->id("CREG"), true));
-        write_bit("ZDREG[0]", !bool_or_default(ci->params, ctx->id("DREG"), true));
+        write_bit("ZDREG[0]", !dport_used || !bool_or_default(ci->params, ctx->id("DREG"), true));
         write_bit("ZINMODEREG[0]", !bool_or_default(ci->params, ctx->id("INMODEREG"), true));
         write_bus_zinv("ALUMODE", 4);
         write_bus_zinv("INMODE", 5);
@@ -5622,9 +5642,38 @@ void write_gtx_channel(CellInfo *ci)
             boost::split(pins, attr_value, boost::is_any_of(" "));
             for (auto pin : pins) {
                 if (boost::empty(pin)) continue;
+                // These pins have no interconnect path into the site, so the
+                // tile bit is their only source.  It sits ahead of the site's
+                // input inverter, which write_bus_zinv() holds off for every
+                // tile-tied pin, so the bit has to carry the LOGICAL value --
+                // flip the constant when the netlist asked for an inversion.
+                //
+                // Splitting the trailing index off matters: erase_all() of
+                // "0123456789" turned "INMODE1" into "INMODE" and then looked
+                // up IS_INMODE_INVERTED, which yosys never emits (it writes
+                // the per-bit IS_INMODE[1]_INVERTED), so `inv` was always
+                // false and every bussed pin got the un-flipped constant.
+                // That is the "seems to be inverted for unknown reasons" that
+                // kept INMODE/ALUMODE2/ALUMODE3 commented out of the packer's
+                // const-pin list in pack_dsp_xc7.cc.
                 auto pin_basename = pin;
-                boost::erase_all(pin_basename, "0123456789");
-                auto inv = bool_or_default(ci->params, ctx->id("IS_" + pin_basename + "_INVERTED"), 0);
+                std::string idx;
+                while (!pin_basename.empty() && std::isdigit((unsigned char)pin_basename.back())) {
+                    idx.insert(idx.begin(), pin_basename.back());
+                    pin_basename.pop_back();
+                }
+                bool inv = bool_or_default(ci->params, ctx->id("IS_" + pin + "_INVERTED"), false);
+                if (!idx.empty()) {
+                    inv |= bool_or_default(
+                            ci->params,
+                            ctx->id("IS_" + pin_basename + "[" + idx + "]_INVERTED"), false);
+                    inv |= ((int_or_default(ci->params,
+                                            ctx->id("IS_" + pin_basename + "_INVERTED"), 0)
+                             >> std::stoi(idx)) & 0x1) != 0;
+                } else {
+                    inv |= bool_or_default(ci->params, ctx->id("IS_" + pin_basename + "_INVERTED"),
+                                           false);
+                }
                 auto net_name = inv ? (const_net_name == "GND" ? "VCC" : "GND") : const_net_name;
                 write_bit(dsp + "_" + pin + ".DSP_" + net_name + "_" + tile_side);
             }

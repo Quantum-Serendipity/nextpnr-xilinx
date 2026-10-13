@@ -122,12 +122,33 @@ void XC7Packer::pack_dsps()
                 // prjxray has extra bits for these ports to hardwire them to VCC/GND
                 // as these seem to be internal to the tile,
                 // this saves us from having to route those externally
+                // The pins below have NO routing path into the site at all:
+                // they appear in prjxray's segbits_dsp_{l,r}.db only as
+                // <PIN>.DSP_GND_* / <PIN>.DSP_VCC_* and in no ppips/pips
+                // list, so a tile-local constant bit is the ONLY way to give
+                // them a value.  Leaving one out does not fail routing -- it
+                // silently emits no bit, and the pin takes whatever the tile
+                // default and the site's ZIS_*_INVERTED bit give it.
+                //
+                // INMODE, ALUMODE2/3 and OPMODE6 were missing.  For a plain
+                // inferred multiplier that turns INMODE 00000 into 11111 --
+                // and INMODE[1]=1 gates the multiplier's A input to zero
+                // (UG479 Table 1-11) -- OPMODE[6:4] 000 into 100 (P feedback
+                // instead of zero) and ALUMODE[3:2] 00 into 11.  The DSP then
+                // ignores its A operand entirely and returns near-constant
+                // junk, with a correct netlist and clean timing.
+                //
+                // The earlier "these seem to be inverted for unknown reasons"
+                // is that ZIS_*_INVERTED.  The tile bit drives the pin ahead of
+                // the site's input inverter, so fasm.cc holds that inverter off
+                // for every pin in this list and writes the logical constant,
+                // folding any requested inversion into the GND/VCC choice.
                 if (boost::starts_with(n, "D") ||
                     boost::starts_with(n, "RSTD") ||
-                    // TODO: these seem to be inverted for unknown reasons
-                    // boost::starts_with(n, "INMODE") ||
-                    // boost::starts_with(n, "ALUMODE2") ||
-                    // boost::starts_with(n, "ALUMODE3") ||
+                    boost::starts_with(n, "INMODE") ||
+                    boost::starts_with(n, "ALUMODE2") ||
+                    boost::starts_with(n, "ALUMODE3") ||
+                    boost::starts_with(n, "OPMODE6") ||
                     boost::starts_with(n, "CARRYINSEL2") ||
                     boost::starts_with(n, "CED") ||
                     boost::starts_with(n, "CEAD") ||
