@@ -2058,6 +2058,7 @@ struct Arch : BaseCtx
 
     void fixupPlacement();
     void fixupRouting();
+    int recordLutPermutationPins();
 
     // Find the bel the chipdb wires a RAMB36E1 cascade output pin to.
     BelId cascadePartnerBel(BelId drv, IdString out_pin, IdString in_pin) const;
