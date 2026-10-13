@@ -5558,7 +5558,8 @@ void write_gtx_channel(CellInfo *ci)
         if (sel_mask == "ROUNDING_MODE1") write_bit("SEL_MASK_ROUNDING_MODE1");
         if (sel_mask == "ROUNDING_MODE2") write_bit("SEL_MASK_ROUNDING_MODE2");
 
-        const bool dport_used = use_dport == "TRUE" || use_dport == "1";
+        const bool dport_used =
+                (use_dport == "TRUE" || use_dport == "1") && dsp_str("USE_MULT", "MULTIPLY") != "NONE";
         write_bit("ZADREG[0]", !dport_used || !bool_or_default(ci->params, ctx->id("ADREG"), true));
         write_bit("ZALUMODEREG[0]", !bool_or_default(ci->params, ctx->id("ALUMODEREG"), true));
         auto acascreg = int_or_default(ci->params, ctx->id("ACASCREG"), 1);
