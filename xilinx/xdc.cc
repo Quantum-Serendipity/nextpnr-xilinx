@@ -17,6 +17,7 @@
  *
  */
 
+#include <functional>
 #include "log.h"
 #include "nextpnr.h"
 NEXTPNR_NAMESPACE_BEGIN
@@ -170,6 +171,332 @@ void Arch::parseXdc(std::istream &in)
         return tgt_nets;
     };
 
+    auto glob_match = [](const std::string &name, const std::string &pat) {
+        size_t n = 0, p = 0, star = std::string::npos, mark = 0;
+        while (n < name.size()) {
+            if (p < pat.size() && (pat[p] == name[n] || pat[p] == '?')) { ++n; ++p; }
+            else if (p < pat.size() && pat[p] == '*') { star = p++; mark = n; }
+            else if (star != std::string::npos) { p = star + 1; n = ++mark; }
+            else return false;
+        }
+        while (p < pat.size() && pat[p] == '*') ++p;
+        return p == pat.size();
+    };
+
+    struct Selection
+    {
+        bool ok = true;
+        std::string error;
+        std::vector<CellInfo *> cells;
+        std::vector<NetInfo *> nets;
+        std::vector<std::string> clocks;
+        bool has_cells = false, has_nets = false, has_clocks = false;
+    };
+
+    auto expand_list = [&](const std::string &tok) {
+        std::vector<std::string> out;
+        if (!tok.empty() && (tok.front() == '{' || tok.front() == '"'))
+            for (auto &t : split_to_args(strip_quotes(tok), false))
+                out.push_back(strip_quotes(t));
+        else
+            out.push_back(tok);
+        for (auto &o : out)
+            o.erase(std::remove(o.begin(), o.end(), '\\'), o.end());
+        return out;
+    };
+
+    auto cell_names = [&](CellInfo *ci) {
+        std::vector<std::string> names{ci->name.str(this)};
+        if (!names.front().empty() && names.front().front() == '$') {
+            auto q = ci->ports.find(id("Q"));
+            if (q != ci->ports.end() && q->second.net != nullptr && q->second.type == PORT_OUT) {
+                names.push_back(q->second.net->name.str(this));
+                for (auto alias : q->second.net->aliases)
+                    if (alias != q->second.net->name)
+                        names.push_back(alias.str(this));
+            }
+        }
+        return names;
+    };
+
+    auto name_matches = [&](const std::string &name, const std::string &pat, bool hier) {
+        std::string dotted = pat;
+        std::replace(dotted.begin(), dotted.end(), '/', '.');
+        auto one = [&](const std::string &n) { return glob_match(n, pat) || (dotted != pat && glob_match(n, dotted)); };
+        if (one(name))
+            return true;
+        if (hier)
+            for (size_t i = 0; i < name.size(); i++)
+                if ((name[i] == '.' || name[i] == '/') && one(name.substr(i + 1)))
+                    return true;
+        return false;
+    };
+
+    auto parse_filter = [&](const std::string &expr, std::string &pat) {
+        std::string e = strip_quotes(expr);
+        size_t op = e.find("=~");
+        if (op == std::string::npos)
+            op = e.find("==");
+        if (op == std::string::npos)
+            return false;
+        std::string lhs = trim_all(e.substr(0, op));
+        if (lhs != "NAME" && lhs != "name")
+            return false;
+        pat = strip_quotes(trim_all(e.substr(op + 2)));
+        pat.erase(std::remove(pat.begin(), pat.end(), '\\'), pat.end());
+        return !pat.empty();
+    };
+
+    auto add_cell = [](std::vector<CellInfo *> &v, CellInfo *ci) {
+        if (ci != nullptr && std::find(v.begin(), v.end(), ci) == v.end())
+            v.push_back(ci);
+    };
+
+    std::function<void(const std::string &, Selection &)> select;
+    select = [&](const std::string &arg, Selection &sel) {
+        if (arg.size() < 2 || arg.front() != '[' || arg.back() != ']') {
+            sel.has_clocks = true;
+            for (auto &t : expand_list(arg))
+                sel.clocks.push_back(t);
+            return;
+        }
+        std::vector<std::string> toks = split_to_args(arg.substr(1, arg.size() - 2), true);
+        if (toks.empty()) {
+            sel.ok = false;
+            sel.error = "empty object query";
+            return;
+        }
+        const std::string qcmd = toks.front();
+        if (qcmd == "list" || qcmd == "concat") {
+            for (size_t i = 1; i < toks.size(); i++)
+                select(toks.at(i), sel);
+            return;
+        }
+        bool hier = false;
+        std::vector<std::string> pats;
+        for (size_t i = 1; i < toks.size(); i++) {
+            const std::string &t = toks.at(i);
+            if (t == "-hier" || t == "-hierarchical")
+                hier = true;
+            else if (t == "-quiet" || t == "-nocase")
+                ;
+            else if (t == "-filter" && i + 1 < toks.size()) {
+                std::string fp;
+                if (!parse_filter(toks.at(++i), fp)) {
+                    sel.ok = false;
+                    sel.error = "unsupported -filter '" + toks.at(i) + "' (only NAME =~ <glob> is read)";
+                    return;
+                }
+                pats.push_back(fp);
+            } else if (!t.empty() && t.front() == '-') {
+                sel.ok = false;
+                sel.error = "unsupported option '" + t + "' to " + qcmd;
+                return;
+            } else
+                for (auto &p : expand_list(t))
+                    pats.push_back(p);
+        }
+        if (pats.empty()) {
+            sel.ok = false;
+            sel.error = qcmd + " with no pattern";
+            return;
+        }
+        if (qcmd == "get_clocks") {
+            sel.has_clocks = true;
+            for (auto &p : pats)
+                sel.clocks.push_back(p);
+        } else if (qcmd == "get_cells" || qcmd == "get_pins") {
+            sel.has_cells = true;
+            for (auto p : pats) {
+                if (qcmd == "get_pins") {
+                    size_t slash = p.find_last_of('/');
+                    if (slash == std::string::npos || slash == 0) {
+                        sel.ok = false;
+                        sel.error = "get_pins pattern '" + p + "' has no <cell>/<pin> separator";
+                        return;
+                    }
+                    p = p.substr(0, slash);
+                }
+                for (auto &c : cells)
+                    for (auto &n : cell_names(c.second.get()))
+                        if (name_matches(n, p, hier)) {
+                            add_cell(sel.cells, c.second.get());
+                            break;
+                        }
+            }
+        } else if (qcmd == "get_ports") {
+            sel.has_cells = true;
+            for (auto &p : pats)
+                for (auto &port : ports) {
+                    std::string pn = port.first.str(this);
+                    if (!glob_match(pn, p) && !(debus_zero(p) != "" && glob_match(pn, debus_zero(p))))
+                        continue;
+                    auto pad = cells.find(port.first);
+                    if (pad == cells.end())
+                        continue;
+                    add_cell(sel.cells, pad->second.get());
+                    for (auto &pp : pad->second->ports) {
+                        NetInfo *pnet = pp.second.net;
+                        if (pnet == nullptr)
+                            continue;
+                        add_cell(sel.cells, pnet->driver.cell);
+                        for (auto &u : pnet->users)
+                            add_cell(sel.cells, u.cell);
+                    }
+                }
+        } else if (qcmd == "get_nets") {
+            sel.has_nets = true;
+            for (auto &p : pats) {
+                NetInfo *exact = getNetByAlias(id(p));
+                if (exact != nullptr) {
+                    if (std::find(sel.nets.begin(), sel.nets.end(), exact) == sel.nets.end())
+                        sel.nets.push_back(exact);
+                    continue;
+                }
+                for (auto &n : nets)
+                    if (name_matches(n.first.str(this), p, hier) &&
+                        std::find(sel.nets.begin(), sel.nets.end(), n.second.get()) == sel.nets.end())
+                        sel.nets.push_back(n.second.get());
+            }
+        } else {
+            sel.ok = false;
+            sel.error = "unsupported object query '" + qcmd + "'";
+        }
+    };
+
+    auto refuse = [&](const std::string &what, const std::string &why) {
+        if (xdc_strict)
+            xdc_dropped.push_back(stringf("%s line %d: %s: %s (constraint not applied)", xdc_file.c_str(), lineno,
+                                          what.c_str(), why.c_str()));
+        else
+            log_warning("%s: %s, constraint not applied (on line %d)\n", what.c_str(), why.c_str(), lineno);
+    };
+
+    auto stamp = [&](CellInfo *ci, const char *attr, int idx) {
+        IdString a = id(attr);
+        std::string v = ci->attrs.count(a) ? ci->attrs.at(a).as_string() : std::string();
+        v += (v.empty() ? "" : ",") + std::to_string(idx);
+        ci->attrs[a] = v;
+    };
+
+    auto parse_exception = [&](const std::vector<std::string> &args, bool is_max) {
+        const std::string &what = args.front();
+        TimingException exc;
+        exc.kind = is_max ? TimingException::MAX_DELAY : TimingException::FALSE_PATH;
+        exc.source = stringf("%s line %d", xdc_file.c_str(), lineno);
+        Selection from, to, through;
+        bool got_from = false, got_to = false, got_through = false, got_value = false;
+        bool setup_only = false, hold_only = false;
+        for (size_t i = 1; i < args.size(); i++) {
+            const std::string &a = args.at(i);
+            if ((a == "-from" || a == "-to" || a == "-through") && i + 1 < args.size()) {
+                Selection &s = a == "-from" ? from : a == "-to" ? to : through;
+                (a == "-from" ? got_from : a == "-to" ? got_to : got_through) = true;
+                select(args.at(++i), s);
+                if (!s.ok)
+                    return refuse(what, a + ": " + s.error);
+            } else if (a == "-setup")
+                setup_only = true;
+            else if (a == "-hold")
+                hold_only = true;
+            else if (a == "-datapath_only")
+                exc.datapath_only = true;
+            else if (a == "-quiet" || a == "-reset_path")
+                ;
+            else if (is_max && !got_value && !a.empty() && a.front() != '-') {
+                try {
+                    size_t used = 0;
+                    double ns = std::stod(a, &used);
+                    if (used != a.size())
+                        throw std::invalid_argument(a);
+                    exc.value = getDelayFromNS(ns).maxDelay();
+                    got_value = true;
+                } catch (std::exception &) {
+                    return refuse(what, "cannot read delay value '" + a + "'");
+                }
+            } else
+                return refuse(what, "unsupported argument '" + a + "'");
+        }
+        if (is_max && !got_value)
+            return refuse(what, "no delay value");
+        if (is_max && (setup_only || hold_only))
+            return refuse(what, "-setup/-hold are not read for set_max_delay");
+        if (setup_only != hold_only) {
+            exc.setup = setup_only;
+            exc.hold = hold_only;
+        }
+        if (is_max)
+            exc.hold = !exc.datapath_only;
+        if (got_through) {
+            if (got_from || got_to || is_max || !exc.setup || !exc.hold)
+                return refuse(what, "-through is read only as a bare 'set_false_path -through [get_nets ...]'");
+            if (through.has_cells || through.has_clocks || !through.has_nets)
+                return refuse(what, "-through takes get_nets only");
+            if (through.nets.empty())
+                return refuse(what, "-through matched no net");
+            for (auto n : through.nets)
+                n->attrs[id("NEXTPNR_TIMING_IGNORE")] = std::string("1");
+            timing_ignore_nets = true;
+            log_info("%s: timing ignored on %d net(s) (on line %d)\n", what.c_str(), int(through.nets.size()),
+                     lineno);
+            return;
+        }
+        if (!got_from && !got_to)
+            return refuse(what, "neither -from nor -to given");
+        for (Selection *s : {&from, &to})
+            if (s->has_nets)
+                return refuse(what, "-from/-to take get_cells, get_pins, get_ports or get_clocks, not get_nets");
+        if (got_from && from.cells.empty() && from.clocks.empty())
+            return refuse(what, "-from matched nothing");
+        if (got_to && to.cells.empty() && to.clocks.empty())
+            return refuse(what, "-to matched nothing");
+        exc.from_cells = !from.cells.empty();
+        exc.to_cells = !to.cells.empty();
+        exc.from_clocks = from.clocks;
+        exc.to_clocks = to.clocks;
+        int idx = int(timing_exceptions.size());
+        for (auto ci : from.cells)
+            stamp(ci, "NEXTPNR_TEXC_FROM", idx);
+        for (auto ci : to.cells)
+            stamp(ci, "NEXTPNR_TEXC_TO", idx);
+        timing_exceptions.push_back(exc);
+        log_info("%s: exception #%d, from %d cell(s) %d clock pattern(s), to %d cell(s) %d clock pattern(s)%s (on "
+                 "line %d)\n",
+                 what.c_str(), idx, int(from.cells.size()), int(from.clocks.size()), int(to.cells.size()),
+                 int(to.clocks.size()),
+                 is_max ? stringf(", max %.3f ns", getDelayNS(exc.value)).c_str() : "", lineno);
+    };
+
+    auto parse_clock_groups = [&](const std::vector<std::string> &args) {
+        const std::string &what = args.front();
+        TimingClockGroups grp;
+        grp.source = stringf("%s line %d", xdc_file.c_str(), lineno);
+        for (size_t i = 1; i < args.size(); i++) {
+            const std::string &a = args.at(i);
+            if (a == "-group" && i + 1 < args.size()) {
+                Selection s;
+                select(args.at(++i), s);
+                if (!s.ok)
+                    return refuse(what, "-group: " + s.error);
+                if (s.has_cells || s.has_nets || s.clocks.empty())
+                    return refuse(what, "-group takes clocks");
+                grp.groups.push_back(s.clocks);
+            } else if (a == "-name" && i + 1 < args.size())
+                ++i;
+            else if (a == "-asynchronous" || a == "-physically_exclusive" || a == "-logically_exclusive" ||
+                     a == "-quiet")
+                ;
+            else if (a == "-include_generated_clocks")
+                grp.include_generated = true;
+            else
+                return refuse(what, "unsupported argument '" + a + "'");
+        }
+        if (grp.groups.empty())
+            return refuse(what, "no -group given");
+        log_info("%s: %d clock group(s) (on line %d)\n", what.c_str(), int(grp.groups.size()), lineno);
+        timing_clock_groups.push_back(grp);
+    };
+
     while (std::getline(in, line)) {
         ++lineno;
         // Trim comments, from # until end of the line
@@ -232,12 +559,17 @@ void Arch::parseXdc(std::istream &in)
         } else if (cmd == "create_clock") {
             double period = 0;
             bool got_period = false;
+            std::string clock_name;
             int cursor = 1;
             for (cursor = 1; cursor < int(arguments.size()); cursor++) {
                 std::string opt = arguments.at(cursor);
                 if (opt == "-add")
                     ;
-                else if (opt == "-name" || opt == "-waveform")
+                else if (opt == "-name") {
+                    cursor++;
+                    if (cursor < int(arguments.size()))
+                        clock_name = strip_quotes(arguments.at(cursor));
+                } else if (opt == "-waveform")
                     cursor++;
                 else if (opt == "-period") {
                     cursor++;
@@ -265,6 +597,7 @@ void Arch::parseXdc(std::istream &in)
                 n->clkconstr->period = getDelayFromNS(period);
                 n->clkconstr->high.delay = n->clkconstr->period.delay / 2;
                 n->clkconstr->low.delay = n->clkconstr->period.delay / 2;
+                n->clkconstr->name = clock_name;
             }
         } else if (cmd == "set_multicycle_path") {
             // set_multicycle_path <N> [-setup|-hold] -from [<sel>] -to [<sel>]
@@ -272,18 +605,6 @@ void Arch::parseXdc(std::istream &in)
             // timing engine can relax the setup requirement on those endpoints.
             // Previously this command was silently ignored. Supports a NAME glob in the
             // -to selector, e.g. -to [get_cells -hier -filter {NAME =~ *rf_reg*}]
-            auto glob_match = [](const std::string &name, const std::string &pat) {
-                // simple '*' wildcard match
-                size_t n = 0, p = 0, star = std::string::npos, mark = 0;
-                while (n < name.size()) {
-                    if (p < pat.size() && (pat[p] == name[n] || pat[p] == '?')) { ++n; ++p; }
-                    else if (p < pat.size() && pat[p] == '*') { star = p++; mark = n; }
-                    else if (star != std::string::npos) { p = star + 1; n = ++mark; }
-                    else return false;
-                }
-                while (p < pat.size() && pat[p] == '*') ++p;
-                return p == pat.size();
-            };
             // group_brackets=true keeps a whole "[get_cells ... {NAME =~ *pat*}]" as ONE argument.
             int mcp = 1; bool is_hold = false;
             std::string to_sel;
@@ -318,6 +639,10 @@ void Arch::parseXdc(std::istream &in)
             } else {
                 log_info("set_multicycle_path: parsed (hold or no -to glob) — no setup tag (on line %d)\n", lineno);
             }
+        } else if (cmd == "set_false_path" || cmd == "set_max_delay") {
+            parse_exception(arguments, cmd == "set_max_delay");
+        } else if (cmd == "set_clock_groups") {
+            parse_clock_groups(arguments);
         } else {
             log_info("ignoring unsupported XDC command '%s' (on line %d)\n", cmd.c_str(), lineno);
         }

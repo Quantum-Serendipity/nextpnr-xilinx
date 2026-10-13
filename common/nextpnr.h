@@ -516,7 +516,37 @@ struct ClockConstraint
     DelayInfo low;
     DelayInfo period;
 
+    std::string name;
+
     TimingConstrObjectId domain_tmg_id;
+};
+
+struct TimingException
+{
+    enum Kind
+    {
+        FALSE_PATH,
+        MAX_DELAY,
+    } kind = FALSE_PATH;
+
+    delay_t value = 0;
+    bool datapath_only = false;
+    bool setup = true;
+    bool hold = true;
+
+    bool from_cells = false;
+    bool to_cells = false;
+    std::vector<std::string> from_clocks;
+    std::vector<std::string> to_clocks;
+
+    std::string source;
+};
+
+struct TimingClockGroups
+{
+    std::vector<std::vector<std::string>> groups;
+    bool include_generated = false;
+    std::string source;
 };
 
 struct TimingConstraintObject
@@ -802,6 +832,10 @@ struct BaseCtx
     // object ID -> constraint
     std::unordered_multimap<TimingConstrObjectId, TimingConstraint *> constrsFrom;
     std::unordered_multimap<TimingConstrObjectId, TimingConstraint *> constrsTo;
+
+    std::vector<TimingException> timing_exceptions;
+    std::vector<TimingClockGroups> timing_clock_groups;
+    bool timing_ignore_nets = false;
 
     TimingConstrObjectId timingWildcardObject();
     TimingConstrObjectId timingClockDomainObject(NetInfo *clockDomain);
