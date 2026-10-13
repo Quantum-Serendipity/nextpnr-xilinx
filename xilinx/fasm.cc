@@ -2819,10 +2819,8 @@ struct FasmBackend
 
     int duty_half_cycles(int d, double duty)
     {
-        double x = 2.0 * duty * d;
-        if (x < d)
-            return int(floor(x + 0.5 + 1e-9));
-        return int(ceil(x - 0.5 - 1e-9));
+        const long long duty_fixed = llround(duty * 100000);
+        return int((2LL * d * duty_fixed + 50000) / 100000);
     }
 
     void split_counter(double divide, double duty, int &high, int &low, bool &edge)
@@ -2832,6 +2830,31 @@ struct FasmBackend
         high = half_cycles / 2;
         low = d - high;
         edge = (half_cycles % 2) != 0;
+    }
+
+    // A PLL/MMCM output phase in degrees.  Vivado takes -360..360 (both ends included); outside
+    // that range it drops the value with a critical warning (Netlist 29-72) and programs a phase
+    // of 0, so the clock is not the one the design asks for.  Stop instead.
+    double clkout_phase(CellInfo *ci, const std::string &name)
+    {
+        const double phase = float_or_default(ci, name + "_PHASE", 0);
+        const bool phase_in_range = phase >= -360 && phase <= 360;
+        if (!phase_in_range)
+            log_error("%s: %s_PHASE must be in the range -360..360 (got %.10g)\n", ctx->nameOf(ci), name.c_str(),
+                      phase);
+        return phase;
+    }
+
+    // The phase in eighths of a VCO period, split into PHASE_MUX and DELAY_TIME.  A negative phase
+    // is taken modulo 360; the MMCM rounds to the nearest eighth, the PLL truncates and saturates
+    // at 511.
+    void split_phase(double phase, double divide, bool is_mmcm, int &phasemux, int &delaytime)
+    {
+        const double phase_normalized = phase < 0 ? phase + 360 : phase;
+        const double eighths = phase_normalized / 360 * divide * 8;
+        const int phase_eighths = is_mmcm ? int(floor(eighths + 0.5)) : std::min(int(floor(eighths)), 511);
+        phasemux = phase_eighths % 8;
+        delaytime = phase_eighths / 8;
     }
 
     void write_pll_clkout(const std::string &name, CellInfo *ci)
@@ -2846,7 +2869,7 @@ struct FasmBackend
         // doesn't set explicitly (e.g. CLKFBOUT, when only CLKOUT0 has an
         // explicit PHASE), found via a raw-bit diff against a real Vivado
         // MMCM bitstream (nextpnr-xilinx#177 MMCM-lock investigation).
-        double phase = float_or_default(ci, name + "_PHASE", 0);
+        double phase = clkout_phase(ci, name);
         double duty = boost::starts_with(name, "CLKOUT") ? float_or_default(ci, name + "_DUTY_CYCLE", 0.5) : 0.5;
         bool used = false;
         if (name == "DIVCLK" || name == "CLKFBOUT") {
@@ -2860,9 +2883,7 @@ struct FasmBackend
             if (name == "CLKOUT1" || name == "CLKFBOUT")
                 frac = floor(divide * 8) - floor(divide) * 8;
             split_counter(divide, duty, high, low, edge);
-            int phase_eights = floor((phase / 360) * divide * 8);
-            phasemux = phase_eights % 8;
-            delaytime = phase_eights / 8;
+            split_phase(phase, divide, false, phasemux, delaytime);
         }
         if (used)
             check_divider_grid(ci, "PLLE2_ADV", divide_attr, false);
@@ -3053,7 +3074,7 @@ struct FasmBackend
         // doesn't set explicitly (e.g. CLKFBOUT, when only CLKOUT0 has an
         // explicit PHASE), found via a raw-bit diff against a real Vivado
         // MMCM bitstream (nextpnr-xilinx#177 MMCM-lock investigation).
-        double phase = float_or_default(ci, name + "_PHASE", 0);
+        double phase = clkout_phase(ci, name);
         double duty = boost::starts_with(name, "CLKOUT") ? float_or_default(ci, name + "_DUTY_CYCLE", 0.5) : 0.5;
         bool used = false;
         if (name == "DIVCLK" || name == "CLKFBOUT") {
@@ -3067,9 +3088,7 @@ struct FasmBackend
             if (name == "CLKOUT0" || name == "CLKFBOUT")
                 frac = floor(divide * 8) - floor(divide) * 8;
             split_counter(divide, duty, high, low, edge);
-            int phase_eights = floor((phase / 360) * divide * 8);
-            phasemux = phase_eights % 8;
-            delaytime = phase_eights / 8;
+            split_phase(phase, divide, true, phasemux, delaytime);
         }
         if (used)
             check_divider_grid(ci, "MMCME2_ADV", divide_attr, fractional_counter);
@@ -3084,18 +3103,30 @@ struct FasmBackend
             auto is_clkout0 = name == "CLKOUT0";
             auto is_clkfbout = name == "CLKFBOUT";
 
-            if ((is_clkout0 || is_clkfbout) && frac != 0) {
-                --high;
-                --low;
-
-                auto frac_shifted = frac >> 1;
+            // Fractional divide, as Vivado programs it: the integer counter splits on the parity
+            // of the integer part, and the fall of the fractional output goes to the CLKOUT5
+            // (CLKOUT0) or CLKOUT6 (CLKFBOUT) fractional registers, moved by the phase.  EDGE stays
+            // what the duty cycle gives for the integer part.
+            const bool is_fractional_counter = (is_clkout0 || is_clkfbout) && frac != 0;
+            bool frac_wf_r = false;
+            if (is_fractional_counter) {
+                const int integer_part = int(floor(divide));
+                const bool integer_part_odd = integer_part & 1;
+                const bool one_eighth = frac == 1;
+                const bool integer_part_above_three = integer_part >= 4;
+                if (integer_part_odd) {
+                    high = (integer_part - 1) / 2;
+                    low = one_eighth ? high - 1 : high;
+                } else {
+                    high = low = integer_part / 2 - 1;
+                }
+                frac_wf_r = !integer_part_odd;
+                const bool frac_wf_f = integer_part_odd ? one_eighth : !(one_eighth && integer_part_above_three);
+                const int frac_phase_mux_f = (4 * integer_part_odd + (frac >> 1) + phasemux) & 7;
                 // CLKOUT0 controls CLKOUT5_CLKOUT2, CLKFBOUT controls CLKOUT6_CLKOUT2
                 std::string frac_conf_name = is_clkout0 ? "CLKOUT5_CLKOUT2_" : "CLKOUT6_CLKOUT2_";
-
-                if (1 <= frac_shifted) {
-                    write_bit(frac_conf_name + "FRACTIONAL_FRAC_WF_F[0]");
-                    write_int_vector(frac_conf_name + "FRACTIONAL_PHASE_MUX_F[1:0]", frac_shifted, 2);
-                }
+                write_bit(frac_conf_name + "FRACTIONAL_FRAC_WF_F[0]", frac_wf_f);
+                write_int_vector(frac_conf_name + "FRACTIONAL_PHASE_MUX_F[2:0]", frac_phase_mux_f, 3);
             }
 
             write_bit(name + "_CLKOUT1_OUTPUT_ENABLE[0]");
@@ -3116,7 +3147,7 @@ struct FasmBackend
 
             if (!is_clkout_5_or_6 && frac != 0) {
                 write_bit(name + "_CLKOUT2_FRAC_EN[0]", 1);
-                write_bit(name + "_CLKOUT2_FRAC_WF_R[0]", 1);
+                write_bit(name + "_CLKOUT2_FRAC_WF_R[0]", frac_wf_r);
                 write_int_vector(name + "_CLKOUT2_FRAC[2:0]", frac, 3);
             }
         } else {
@@ -3537,10 +3568,24 @@ struct FasmBackend
         // which wants FILTREG1=0x8 and TABLE=filter_lookup[mult-1].)
         write_int_vector("FILTREG1_RESERVED[11:0]", 0x8, 12);
 
-        // Vivado uses 0x100 (integer counters) for non-fractional configs;
-        // golden bitstreams confirm.  0xffff (the old value) is the XAPP888
-        // "enable everything" setting and does not match Vivado output.
-        write_int_vector("POWER_REG_POWER_REG_POWER_REG[15:0]", 0x100, 16);
+        // POWER_REG is 0x9900 when a fractional counter is in use or an output is
+        // shifted by something other than half a VCO period (PHASE_MUX not a
+        // multiple of 4), 0x0100 otherwise.
+        bool needs_fractional_power = false;
+        for (const char *name : {"CLKFBOUT", "CLKOUT0", "CLKOUT1", "CLKOUT2", "CLKOUT3", "CLKOUT4", "CLKOUT5", "CLKOUT6"}) {
+            const std::string n = name;
+            const bool is_used = n == "CLKFBOUT" || get_net_or_empty(ci, ctx->id(n)) != nullptr;
+            const double divide = float_or_default(
+                    ci, n + ((n == "CLKFBOUT") ? "_MULT_F" : (n == "CLKOUT0" ? "_DIVIDE_F" : "_DIVIDE")), 1);
+            int phasemux = 0, delaytime = 0;
+            if (divide > 1)
+                split_phase(clkout_phase(ci, n), divide, true, phasemux, delaytime);
+            const bool is_fractional_divide = divide != floor(divide);
+            const bool is_phase_off_half_cycle = phasemux % 4 != 0;
+            if (is_used && (is_fractional_divide || is_phase_off_half_cycle))
+                needs_fractional_power = true;
+        }
+        write_int_vector("POWER_REG_POWER_REG_POWER_REG[15:0]", needs_fractional_power ? 0x9900 : 0x0100, 16);
         write_bit("LOCKREG3_RESERVED[0]");
         write_int_vector("TABLE[9:0]", filter_lookup[clkfbout_mult - 1], 10);
         pop(2);
