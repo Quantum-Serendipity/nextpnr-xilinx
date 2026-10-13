@@ -21,7 +21,10 @@
 #include <boost/algorithm/string.hpp>
 #include <boost/algorithm/string/predicate.hpp>
 #include <boost/range/adaptor/reversed.hpp>
+#include <filesystem>
 #include <fstream>
+#include <random>
+#include <system_error>
 #include "log.h"
 #include "nextpnr.h"
 #include "pins.h"
@@ -2571,6 +2574,53 @@ struct FasmBackend
         }
     }
 
+    int bram_output_word_bit(bool is_36, int half, int port_width, int k)
+    {
+        const int top_down_bit = 17 - k;
+        const bool is_18_nine_wide = !is_36 && port_width == 9;
+        if (is_18_nine_wide) {
+            if (k == 1)
+                return 8;
+            if (k == 9)
+                return 16;
+            return top_down_bit;
+        }
+        const bool is_36_eighteen_wide = is_36 && port_width == 18;
+        const bool is_36_nine_wide_low_half = is_36 && port_width == 9 && half == 0;
+        const int parity_bit = is_36_eighteen_wide ? 8 : (is_36_nine_wide_low_half ? 4 : -1);
+        const bool word_has_parity_to_move = parity_bit >= 0;
+        if (word_has_parity_to_move) {
+            if (k == 1)
+                return parity_bit;
+            const bool k_is_shifted_slot = k >= 2 && k <= 17 - parity_bit;
+            if (k_is_shifted_slot)
+                return 18 - k;
+        }
+        return top_down_bit;
+    }
+
+    void write_bram_output_values(CellInfo *ci, int half, bool is_36)
+    {
+        for (std::string value : {"INIT", "SRVAL"}) {
+            for (std::string port : {"A", "B"}) {
+                const int port_width = int_or_default(ci->params, ctx->id("READ_WIDTH_" + port), 0);
+                std::vector<bool> stored(18, true);
+                const IdString param = ctx->id(value + "_" + port);
+                const bool param_is_given = ci->params.count(param) && !ci->params.at(param).is_string;
+                if (param_is_given) {
+                    const std::string &bits = ci->params.at(param).str;
+                    for (int k = 0; k < 18; k++) {
+                        const int word_bit = bram_output_word_bit(is_36, half, port_width, k);
+                        const int param_bit = is_36 ? (2 * word_bit + half) : word_bit;
+                        const bool bit_is_set = param_bit < int(bits.size()) && bits[param_bit] == Property::S1;
+                        stored[k] = !bit_is_set;
+                    }
+                }
+                write_vector("Z" + value + "_" + port + "[17:0]", stored);
+            }
+        }
+    }
+
     void write_bram_half(int tile, int half, CellInfo *ci)
     {
         cur_tile = tile;
@@ -2627,10 +2677,7 @@ struct FasmBackend
                 if (mode != "WRITE_FIRST")
                     write_bit(std::string(wrmode) + "_" + mode);
             }
-            write_vector("ZINIT_A[17:0]", std::vector<bool>(18, true));
-            write_vector("ZINIT_B[17:0]", std::vector<bool>(18, true));
-            write_vector("ZSRVAL_A[17:0]", std::vector<bool>(18, true));
-            write_vector("ZSRVAL_B[17:0]", std::vector<bool>(18, true));
+            write_bram_output_values(ci, half, is_36);
 
             write_bram_init(half, ci, is_36);
         }
@@ -2648,6 +2695,12 @@ struct FasmBackend
                     int w = int_or_default(ci->params, ctx->id(pname), 0);
                     if (w == 1 || w == 9)
                         write_bit(std::string("BRAM36_") + pname + "_1");
+                }
+                for (std::string port : {"A", "B"}) {
+                    const std::string extension =
+                            str_or_default(ci->params, ctx->id("RAM_EXTENSION_" + port), "NONE");
+                    const bool lower_of_a_pair = extension == "LOWER";
+                    write_bit("RAM_EXTENSION_" + port + "_LOWER", lower_of_a_pair);
                 }
                 pop();
             }
@@ -5670,25 +5723,69 @@ void write_gtx_channel(CellInfo *ci)
 
 void Arch::writeFasm(const std::string &filename, bool region_only)
 {
-    std::ofstream out(filename);
-    if (!out)
-        log_error("failed to open file %s for writing (%s)\n", filename.c_str(), strerror(errno));
-
-    FasmBackend be(getCtx(), out);
-    if (region_only) {
-        // One rectangle from one source.  --region-only carries no coordinates
-        // of its own precisely so that emission cannot drift away from the
-        // rectangle placement and routing were held to.
-        if (!roi_active())
-            log_error("--region-only needs a partition rectangle; set NEXTPNR_PARTITION_ROI\n");
-        be.region_filter = true;
-        be.rx0 = roi_x0;
-        be.ry0 = roi_y0;
-        be.rx1 = roi_x1;
-        be.ry1 = roi_y1;
-        be.governed = partition_nets();
+    std::string dest = filename;
+    bool dest_is_special = false;
+    std::error_code status_ec;
+    if (std::filesystem::is_symlink(std::filesystem::symlink_status(filename, status_ec))) {
+        std::error_code resolve_ec;
+        const auto resolved = std::filesystem::canonical(filename, resolve_ec);
+        if (resolve_ec)
+            dest_is_special = true;
+        else
+            dest = resolved.string();
     }
-    be.write_fasm();
+    const auto dest_status = std::filesystem::status(dest, status_ec);
+    if (std::filesystem::exists(dest_status) && !std::filesystem::is_regular_file(dest_status))
+        dest_is_special = true;
+    std::random_device tmp_entropy;
+    const std::string write_path =
+            dest_is_special ? dest : stringf("%s.nextpnr-tmp.%08x", dest.c_str(), unsigned(tmp_entropy()));
+    struct PendingFasm
+    {
+        std::string path;
+        bool commit = false;
+        ~PendingFasm()
+        {
+            if (!commit) {
+                std::error_code remove_ec;
+                std::filesystem::remove(path, remove_ec);
+            }
+        }
+    } pending{write_path, dest_is_special};
+
+    {
+        std::ofstream out(write_path);
+        if (!out)
+            log_error("failed to open file %s for writing (%s)\n", filename.c_str(), strerror(errno));
+
+        FasmBackend be(getCtx(), out);
+        if (region_only) {
+            // One rectangle from one source.  --region-only carries no coordinates
+            // of its own precisely so that emission cannot drift away from the
+            // rectangle placement and routing were held to.
+            if (!roi_active())
+                log_error("--region-only needs a partition rectangle; set NEXTPNR_PARTITION_ROI\n");
+            be.region_filter = true;
+            be.rx0 = roi_x0;
+            be.ry0 = roi_y0;
+            be.rx1 = roi_x1;
+            be.ry1 = roi_y1;
+            be.governed = partition_nets();
+        }
+        be.write_fasm();
+        out.flush();
+        if (!out.good())
+            log_error("failed to write FASM file %s\n", filename.c_str());
+    }
+
+    if (dest_is_special)
+        return;
+    std::error_code rename_ec;
+    std::filesystem::rename(write_path, dest, rename_ec);
+    if (rename_ec)
+        log_error("failed to rename FASM file %s to %s (%s)\n", write_path.c_str(), dest.c_str(),
+                  rename_ec.message().c_str());
+    pending.commit = true;
 }
 
 NEXTPNR_NAMESPACE_END
