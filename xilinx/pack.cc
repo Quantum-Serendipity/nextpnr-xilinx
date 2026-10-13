@@ -526,6 +526,17 @@ void XilinxPacker::pack_lutffs()
             continue;
         if (lut->attrs.count(ctx->id("BEL")))
             continue;
+        if (ctx->xc7) {
+            NetInfo *lut_clk = get_net_or_empty(lut, id_CLK);
+            const bool lut_is_clocked = lut_clk != nullptr;
+            const bool ff_is_latch = ci->attrs.count(ctx->id("X_FF_AS_LATCH"));
+            const bool ff_clkinv = bool_or_default(ci->params, ctx->id("IS_CLK_INVERTED"), false) != ff_is_latch;
+            const bool lut_clkinv = bool_or_default(lut->params, ctx->id("IS_WCLK_INVERTED"), false);
+            const bool ff_clock_is_not_lut_clock = lut_is_clocked && get_net_or_empty(ci, id_CK) != lut_clk;
+            const bool ff_edge_is_not_lut_edge = lut_is_clocked && ff_clkinv != lut_clkinv;
+            if (ff_clock_is_not_lut_clock || ff_edge_is_not_lut_edge)
+                continue;
+        }
         lut->constr_children.push_back(ci);
         ci->constr_parent = lut;
         ci->constr_x = 0;
@@ -694,6 +705,7 @@ void XilinxPacker::pack_srls()
     srl_rules[ctx->id("SRL16E")].port_xform[ctx->id("CE")] = id_WE;
     srl_rules[ctx->id("SRL16E")].port_xform[ctx->id("D")] = id_DI2;
     srl_rules[ctx->id("SRL16E")].port_xform[ctx->id("Q")] = id_O6;
+    srl_rules[ctx->id("SRL16E")].param_xform[ctx->id("IS_CLK_INVERTED")] = ctx->id("IS_WCLK_INVERTED");
     srl_rules[ctx->id("SRL16E")].set_attrs.emplace_back(ctx->id("X_LUT_AS_SRL"), "1");
 
     srl_rules[ctx->id("SRLC32E")].new_type = id_SLICE_LUTX;
@@ -706,6 +718,7 @@ void XilinxPacker::pack_srls()
     // cascade routes through the dedicated path (kept as .Q31 by patch_netlist)
     // rather than being dropped ("FIXME: Q31 support").
     srl_rules[ctx->id("SRLC32E")].port_xform[ctx->id("Q31")] = id_MC31;
+    srl_rules[ctx->id("SRLC32E")].param_xform[ctx->id("IS_CLK_INVERTED")] = ctx->id("IS_WCLK_INVERTED");
     srl_rules[ctx->id("SRLC32E")].set_attrs.emplace_back(ctx->id("X_LUT_AS_SRL"), "1");
     // FIXME: Q31 support
     generic_xform(srl_rules, true);
@@ -1638,6 +1651,7 @@ void Arch::assignCellInfo(CellInfo *cell)
         cell->lutInfo.di1_net = get_net_or_empty(cell, id_DI1);
         cell->lutInfo.di2_net = get_net_or_empty(cell, id_DI2);
         cell->lutInfo.wclk = get_net_or_empty(cell, id_CLK);
+        cell->lutInfo.wclk_inv = bool_or_default(cell->params, id("IS_WCLK_INVERTED"), false);
         cell->lutInfo.we = get_net_or_empty(cell, id_WE);
         cell->lutInfo.memory_group = 0; // fixme
         cell->lutInfo.is_srl = cell->attrs.count(id("X_LUT_AS_SRL"));

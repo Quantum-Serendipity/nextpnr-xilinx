@@ -172,6 +172,7 @@ struct ArchCellInfo
         struct
         {
             bool is_memory, is_srl;
+            bool wclk_inv;
             int input_count, output_count;
             int memory_group;
             bool only_drives_carry;

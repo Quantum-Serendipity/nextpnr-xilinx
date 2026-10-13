@@ -1014,12 +1014,12 @@ struct FasmBackend
         for (int i = 0; i < 4; i++) {
             for (int k = 0; k < 2; k++) {
                 CellInfo *lut = lts->cells[(half << 6) | (i << 4) | (k ? BEL_5LUT : BEL_6LUT)];
-                if (lut == nullptr || !lut->lutInfo.is_memory)
+                if (lut == nullptr || !(lut->lutInfo.is_memory || lut->lutInfo.is_srl))
                     continue;
                 const bool lut_clkinv = bool_or_default(lut->params, ctx->id("IS_WCLK_INVERTED"), false);
                 const bool mem_disagrees = found_mem && (lut_clkinv != mem_clkinv);
                 if (mem_disagrees)
-                    log_error("FASM: LUT-RAM '%s' (type %s) at bel %s disagrees with its half-slice on "
+                    log_error("FASM: LUT-RAM/SRL '%s' (type %s) at bel %s disagrees with its half-slice on "
                               "'IS_WCLK_INVERTED' (tile %s) -- control-set contention in the placement\n",
                               lut->name.c_str(ctx), lut->type.c_str(ctx), ctx->getBelName(lut->bel).c_str(ctx),
                               tname.c_str());
