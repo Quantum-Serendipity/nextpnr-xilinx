@@ -943,6 +943,8 @@ void XilinxPacker::pack_constants()
         // GND/VCC cell, so the loop further down reties its users to the
         // packer's own constants and erases it.
         for (const char *cn : {"$PACKER_GND_NET", "$PACKER_VCC_NET"}) {
+            if (!ctx->idstring_str_to_idx->count(cn))
+                continue;
             IdString id = ctx->id(cn);
             if (ctx->nets.count(id)) {
                 log_info("    adopting imported constant net %s (%d user(s))\n", cn,
