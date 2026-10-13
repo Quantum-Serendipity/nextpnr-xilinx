@@ -121,18 +121,17 @@ void XC7Packer::pack_dsps()
 
                 // prjxray has extra bits for these ports to hardwire them to VCC/GND
                 // as these seem to be internal to the tile,
-                // this saves us from having to route those externally
-                if (boost::starts_with(n, "D") ||
-                    boost::starts_with(n, "RSTD") ||
-                    // TODO: these seem to be inverted for unknown reasons
-                    // boost::starts_with(n, "INMODE") ||
-                    // boost::starts_with(n, "ALUMODE2") ||
-                    // boost::starts_with(n, "ALUMODE3") ||
-                    boost::starts_with(n, "CARRYINSEL2") ||
-                    boost::starts_with(n, "CED") ||
-                    boost::starts_with(n, "CEAD") ||
-                    boost::starts_with(n, "CEINMODE") ||
-                    boost::starts_with(n, "CEALUMODE")) {
+                // this saves us from having to route those externally.
+                // INMODE, ALUMODE2/3 and OPMODE6 have no other way in: the db has
+                // them only as these tile bits and in no pip list.
+                // fasm.cc chooses each tieoff from the pin's logical value.
+                const bool tied_in_tile = boost::starts_with(n, "D") || boost::starts_with(n, "RSTD") ||
+                                          boost::starts_with(n, "INMODE") || boost::starts_with(n, "ALUMODE2") ||
+                                          boost::starts_with(n, "ALUMODE3") || boost::starts_with(n, "OPMODE6") ||
+                                          boost::starts_with(n, "CARRYINSEL2") || boost::starts_with(n, "CED") ||
+                                          boost::starts_with(n, "CEAD") || boost::starts_with(n, "CEINMODE") ||
+                                          boost::starts_with(n, "CEALUMODE");
+                if (tied_in_tile) {
                     add_const_pin(port.second, gnd_pins, n, "$PACKER_GND_NET");
                     add_const_pin(port.second, vcc_pins, n, "$PACKER_VCC_NET");
                 }

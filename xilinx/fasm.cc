@@ -5459,12 +5459,41 @@ void write_gtx_channel(CellInfo *ci)
         auto dsp = "DSP_" + std::to_string(xy.y);
         push(dsp);
 
+        // Whether the site inverts bit i of a bussed pin.  yosys gives the bus
+        // one IS_<bus>_INVERTED vector; pack_constants() adds the per-bit
+        // IS_<bus>[i]_INVERTED when it turns a constant 0 into VCC through the
+        // inverter.  That is an inversion on top of the netlist's, so the two
+        // compose by XOR.
+        auto pin_inverted = [&](const std::string &bus, int i) {
+            const bool bus_inverts = (int_or_default(ci->params, ctx->id("IS_" + bus + "_INVERTED"), 0) >> i) & 0x1;
+            const bool packer_inverts =
+                    bool_or_default(ci->params, ctx->id(stringf("IS_%s[%d]_INVERTED", bus.c_str(), i)), false);
+            return bus_inverts != packer_inverts;
+        };
+
+        // The pins pack_dsps() tied to a constant inside the tile, with the
+        // constant net each one was on.
+        std::vector<std::pair<std::string, std::string>> tile_tied_pins;
+        std::unordered_set<std::string> tile_tied_pin_names;
+        for (std::string const_net_name : {"GND", "VCC"}) {
+            const auto attr_value = str_or_default(ci->attrs, ctx->id("DSP_" + const_net_name + "_PINS"), "");
+            std::vector<std::string> pins;
+            boost::split(pins, attr_value, boost::is_any_of(" "));
+            for (auto &pin : pins) {
+                if (pin.empty())
+                    continue;
+                tile_tied_pins.emplace_back(pin, const_net_name);
+                tile_tied_pin_names.insert(pin);
+            }
+        }
+
+        // A pin tied inside the tile gets its logical value from the tieoff
+        // (see below), so its inverter stays off.  That is what Vivado writes:
+        // it refuses a tieoff behind an active inverter (DRC PDCN-6).
         auto write_bus_zinv = [&](std::string name, int width) {
             for (int i = 0; i < width; i++) {
-                std::string b = stringf("[%d]", i);
-                bool inv = (int_or_default(ci->params, ctx->id("IS_" + name + "_INVERTED"), 0) >> i) & 0x1;
-                inv |= bool_or_default(ci->params, ctx->id("IS_" + name + b + "_INVERTED"), false);
-                write_bit("ZIS_" + name + "_INVERTED" + b, !inv);
+                const bool tied_in_tile = tile_tied_pin_names.count(name + std::to_string(i));
+                write_bit(stringf("ZIS_%s_INVERTED[%d]", name.c_str(), i), tied_in_tile || !pin_inverted(name, i));
             }
         };
 
@@ -5544,8 +5573,13 @@ void write_gtx_channel(CellInfo *ci)
 
         write_bit("ZADREG[0]", !bool_or_default(ci->params, ctx->id("ADREG"), true));
         write_bit("ZALUMODEREG[0]", !bool_or_default(ci->params, ctx->id("ALUMODEREG"), true));
-        write_bit("ZAREG_2_ACASCREG_1", !bool_or_default(ci->params, ctx->id("ACASCREG"), true));
-        write_bit("ZBREG_2_BCASCREG_1", !bool_or_default(ci->params, ctx->id("BCASCREG"), true));
+        // prjxray's AREG_2_ACASCREG_1 is the conjunction AREG == 2 && ACASCREG == 1,
+        // not ACASCREG: its Z bit is set unless both hold.  UG479's default for
+        // ACASCREG/BCASCREG is 1.
+        auto acascreg = int_or_default(ci->params, ctx->id("ACASCREG"), 1);
+        auto bcascreg = int_or_default(ci->params, ctx->id("BCASCREG"), 1);
+        write_bit("ZAREG_2_ACASCREG_1", !(areg == 2 && acascreg == 1));
+        write_bit("ZBREG_2_BCASCREG_1", !(breg == 2 && bcascreg == 1));
         write_bit("ZCARRYINREG[0]", !bool_or_default(ci->params, ctx->id("CARRYINREG"), true));
         write_bit("ZCARRYINSELREG[0]", !bool_or_default(ci->params, ctx->id("CARRYINSELREG"), true));
         write_bit("ZCREG[0]", !bool_or_default(ci->params, ctx->id("CREG"), true));
@@ -5562,23 +5596,22 @@ void write_gtx_channel(CellInfo *ci)
         write_bit("ZIS_CARRYIN_INVERTED", !bool_or_default(ci->params, ctx->id("IS_CARRYIN_INVERTED")));
         pop(2);
 
-        auto write_const_pins = [&](std::string const_net_name) {
-            std::vector<std::string> pins;
-            const auto attr_name = "DSP_" + const_net_name + "_PINS";
-            const auto attr_value = str_or_default(ci->attrs, ctx->id(attr_name), "");
-            boost::split(pins, attr_value, boost::is_any_of(" "));
-            for (auto pin : pins) {
-                if (boost::empty(pin)) continue;
-                auto pin_basename = pin;
-                boost::erase_all(pin_basename, "0123456789");
-                auto inv = bool_or_default(ci->params, ctx->id("IS_" + pin_basename + "_INVERTED"), 0);
-                auto net_name = inv ? (const_net_name == "GND" ? "VCC" : "GND") : const_net_name;
-                write_bit(dsp + "_" + pin + ".DSP_" + net_name + "_" + tile_side);
-            }
-        };
-
-        write_const_pins("GND");
-        write_const_pins("VCC");
+        // The tieoff enters the site ahead of the pin's inverter, which is
+        // kept off above, so it has to carry the pin's logical value: the
+        // constant the pin was on, flipped when the netlist inverts the pin.
+        // A bussed pin's inversion is per bit -- "INMODE1" is bit 1 of
+        // IS_INMODE_INVERTED -- so the bit index is split off its name.
+        for (auto &tied : tile_tied_pins) {
+            const std::string &pin = tied.first;
+            const size_t digits_at = pin.find_last_not_of("0123456789") + 1;
+            const bool pin_is_a_bus_bit = digits_at < pin.size();
+            const bool inverted = pin_is_a_bus_bit
+                                          ? pin_inverted(pin.substr(0, digits_at), std::stoi(pin.substr(digits_at)))
+                                          : bool_or_default(ci->params, ctx->id("IS_" + pin + "_INVERTED"), false);
+            const bool tied_to_vcc = tied.second == "VCC";
+            const std::string net_name = (tied_to_vcc != inverted) ? "VCC" : "GND";
+            write_bit(dsp + "_" + pin + ".DSP_" + net_name + "_" + tile_side);
+        }
 
         pop();
     }
