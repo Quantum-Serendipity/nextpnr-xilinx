@@ -19,7 +19,9 @@
 
 #ifdef MAIN_EXECUTABLE
 
+#include <algorithm>
 #include <fstream>
+#include <initializer_list>
 #include "command.h"
 #include "design_utils.h"
 #include "jsonwrite.h"
@@ -112,6 +114,19 @@ void UspCommandHandler::setupArchContext(Context *ctx)
 void UspCommandHandler::customAfterLoad(Context *ctx)
 {
     ctx->xdc_strict = vm.count("xdc-strict") != 0;
+    auto erase_attrs = [&](std::unordered_map<IdString, Property> &attrs, std::initializer_list<const char *> names) {
+        for (auto it = attrs.begin(); it != attrs.end();) {
+            const std::string &key = it->first.str(ctx);
+            if (std::any_of(names.begin(), names.end(), [&](const char *n) { return key == n; }))
+                it = attrs.erase(it);
+            else
+                ++it;
+        }
+    };
+    for (auto &c : ctx->cells)
+        erase_attrs(c.second->attrs, {"NEXTPNR_TEXC_FROM", "NEXTPNR_TEXC_TO"});
+    for (auto &n : ctx->nets)
+        erase_attrs(n.second->attrs, {"NEXTPNR_TIMING_IGNORE"});
     if (vm.count("xdc")) {
         std::vector<std::string> files = vm["xdc"].as<std::vector<std::string>>();
         for (const auto &filename : files) {
