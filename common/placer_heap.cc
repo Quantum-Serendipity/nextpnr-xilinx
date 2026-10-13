@@ -287,7 +287,7 @@ class HeAPPlacer
         }
 
         // Apply saved solution
-        if (solution.empty())
+        if (solution.empty() && !ctx->cells.empty())
             log_error("Heap placer failed to find a complete legal placement; every candidate left cell '%s' (type "
                       "%s) unbound.\n",
                       last_unbound ? ctx->nameOf(last_unbound) : "?",
@@ -999,9 +999,23 @@ class HeAPPlacer
                 // unpinned BUFG/BUFH unplaceable (regression from
                 // 369038ed).  Budget the radius growth plus a full-grid
                 // search pass on top of the cell-count term.
-                if (attempts > std::max(10000, 3 * int(ctx->cells.size())) + 10 * max_x * max_y)
+                if (attempts > std::max(10000, 3 * int(ctx->cells.size())) + 10 * max_x * max_y) {
+                    std::queue<CellInfo *> members;
+                    for (auto child : ci->constr_children)
+                        members.push(child);
+                    while (!members.empty()) {
+                        CellInfo *mc = members.front();
+                        members.pop();
+                        if (mc->bel != BelId() && mc->belStrength > STRENGTH_STRONG)
+                            log_error("Unable to find legal placement for cell '%s': its cluster member '%s' is "
+                                      "pinned at bel '%s' and no legal position of '%s' agrees with that pin.\n",
+                                      ctx->nameOf(ci), ctx->nameOf(mc), ctx->nameOfBel(mc->bel), ctx->nameOf(ci));
+                        for (auto child : mc->constr_children)
+                            members.push(child);
+                    }
                     log_error("Unable to find legal placement for cell '%s', check constraints and utilisation.\n",
                               ctx->nameOf(ci));
+                }
 
                 int x0 = std::max(cell_locs.at(ci->name).x - radius, 0);
                 int y0 = std::max(cell_locs.at(ci->name).y - radius, 0);
