@@ -44,6 +44,8 @@ struct Router1Cfg
     // hybrid flow (router2 signals first, then router1 const) to keep the signal
     // routing/timing intact.  Env: NEXTPNR_GND_NO_RIPUP.
     bool constNoRipup;
+    int constRipupCost;
+    int constRipupMaxRounds;
     delay_t wireRipupPenalty;
     delay_t netRipupPenalty;
     delay_t reuseBonus;

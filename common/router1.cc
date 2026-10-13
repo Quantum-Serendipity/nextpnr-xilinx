@@ -17,9 +17,14 @@
  *
  */
 
+#include <boost/algorithm/string/predicate.hpp>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
+#include <functional>
 #include <queue>
+#include <set>
+#include <string>
 
 #include "log.h"
 #include "router1.h"
@@ -91,6 +96,21 @@ struct QueuedWire
     };
 };
 
+struct ConstQueued
+{
+    WireId wire;
+    int cost;
+    int seq;
+
+    struct Greater
+    {
+        bool operator()(const ConstQueued &lhs, const ConstQueued &rhs) const noexcept
+        {
+            return lhs.cost == rhs.cost ? lhs.seq > rhs.seq : lhs.cost > rhs.cost;
+        }
+    };
+};
+
 struct Router1
 {
     Context *ctx;
@@ -106,6 +126,9 @@ struct Router1
 
     std::unordered_map<WireId, int> wireScores;
     std::unordered_map<NetInfo *, int> netScores;
+
+    std::unordered_map<arc_key, int, arc_key::Hash> constRipupRounds;
+    std::unordered_map<arc_key, std::set<std::string>, arc_key::Hash> constRipupVictims;
 
     int arcs_with_ripup = 0;
     int arcs_without_ripup = 0;
@@ -503,13 +526,79 @@ struct Router1
         return ni->name == ctx->id("$PACKER_GND_NET") || ni->name == ctx->id("$PACKER_VCC_NET");
     }
 
-    // Route one sink of a constant (GND/VCC) net the way router2/Vivado do:
-    // rather than threading a single global source to every sink (which
-    // congests and collides with LUT route-throughs), source the constant
-    // from the *nearest* pseudo-constant wire.  A backward BFS from the sink
-    // terminates at the first wire whose intent is PSEUDO_GND/PSEUDO_VCC; the
-    // pseudo-network is shared, so wires/pips already used by this same net
-    // are reusable.
+    bool is_const_source(WireId w, int32_t pseudo) const
+    {
+        return ctx->wireIntent(w) == pseudo && !boost::starts_with(ctx->getWireName(w).str(ctx), "SITEWIRE");
+    }
+
+    WireId const_search(WireId dst_wire, int32_t pseudo, const NetInfo *net_info, bool allow_ripup,
+                        std::unordered_map<WireId, PipId> &reached)
+    {
+        std::unordered_map<WireId, int> cost;
+        std::priority_queue<ConstQueued, std::vector<ConstQueued>, ConstQueued::Greater> pq;
+        int seq = 0;
+        cost[dst_wire] = 0;
+        reached[dst_wire] = PipId();
+        pq.push(ConstQueued{dst_wire, 0, seq++});
+        int64_t iters = 0;
+        while (!pq.empty()) {
+            ConstQueued top = pq.top();
+            pq.pop();
+            WireId w = top.wire;
+            if (top.cost != cost.at(w))
+                continue;
+            if (++iters > int64_t(cfg.arcMaxVisitCnt))
+                break;
+            if (is_const_source(w, pseudo))
+                return w;
+            for (PipId pip : ctx->getPipsUphill(w)) {
+                WireId src = ctx->getPipSrcWire(pip);
+                NetInfo *pip_net = ctx->getBoundPipNet(pip);
+                NetInfo *wire_net = ctx->getBoundWireNet(src);
+                bool pip_taken = !ctx->checkPipAvail(pip) && pip_net != net_info;
+                bool wire_taken = !ctx->checkWireAvail(src) && wire_net != net_info;
+                if (!allow_ripup && (pip_taken || wire_taken))
+                    continue;
+                int c = top.cost + 1;
+                if (allow_ripup) {
+                    if (pip_taken) {
+                        if (ctx->getConflictingPipWire(pip) == WireId() && ctx->getConflictingPipNet(pip) == nullptr)
+                            continue;
+                        if (pip_net != nullptr && pip_net->wires.count(w) &&
+                            pip_net->wires.at(w).strength > STRENGTH_STRONG)
+                            continue;
+                    }
+                    if (wire_taken) {
+                        if (wire_net == nullptr)
+                            continue;
+                        auto bw = wire_net->wires.find(src);
+                        if (bw != wire_net->wires.end() && bw->second.strength > STRENGTH_STRONG)
+                            continue;
+                    }
+                    NetInfo *res_net = ctx->getReservedWireNet(src);
+                    if (res_net != nullptr && res_net != net_info)
+                        continue;
+                    WireId charged;
+                    if (wire_net != nullptr && wire_net != net_info)
+                        charged = src;
+                    else if (pip_net != nullptr && pip_net != net_info)
+                        charged = ctx->getConflictingPipWire(pip);
+                    if (charged != WireId()) {
+                        auto ws = wireScores.find(charged);
+                        c += cfg.constRipupCost * (1 + (ws == wireScores.end() ? 0 : ws->second));
+                    }
+                }
+                auto it = cost.find(src);
+                if (it != cost.end() && it->second <= c)
+                    continue;
+                cost[src] = c;
+                reached[src] = pip;
+                pq.push(ConstQueued{src, c, seq++});
+            }
+        }
+        return WireId();
+    }
+
     bool route_const_arc(const arc_key &arc)
     {
         NetInfo *net_info = arc.net_info;
@@ -533,49 +622,14 @@ struct Router1
                 ctx->unbindWire(wire);
         }
 
-        // backward BFS: wire -> downhill pip leading toward dst (PipId() at dst)
-        // First pass prefers wires/pips that are free (or already this net's);
-        // if no pseudo source is reachable that way, a second pass allows
-        // traversing wires used by other nets (ripped up at bind time).
         std::unordered_map<WireId, PipId> reached;
         WireId src_wire;
-        int maxiters = cfg.arcMaxVisitCnt;
         int max_ripup = cfg.constNoRipup ? 0 : 1; // no-ripup: free wires only, never tear up signals
+        bool used_ripup = false;
         for (int allow_ripup = 0; allow_ripup <= max_ripup && src_wire == WireId(); allow_ripup++) {
             reached.clear();
-            std::queue<WireId> bfs;
-            bfs.push(dst_wire);
-            reached[dst_wire] = PipId();
-            int iters = 0;
-            while (!bfs.empty() && iters++ < maxiters) {
-                WireId w = bfs.front();
-                bfs.pop();
-                if (ctx->wireIntent(w) == pseudo) {
-                    // Only fabric (tile-level) pseudo-constant wires are
-                    // valid sources: a SITEWIRE with pseudo intent inside a
-                    // site (seen in BUFGCTRL) terminates the search with a
-                    // route made purely of site pips that the FASM backend
-                    // never emits -- a phantom route that leaves the pin
-                    // electrically floating on real silicon (dead BUFG ->
-                    // dead clock).  Keep searching outward instead.
-                    const std::string &wn = ctx->getWireName(w).str(ctx);
-                    if (wn.compare(0, 8, "SITEWIRE") != 0) {
-                        src_wire = w;
-                        break;
-                    }
-                }
-                for (PipId pip : ctx->getPipsUphill(w)) {
-                    if (!allow_ripup && !ctx->checkPipAvail(pip) && ctx->getBoundPipNet(pip) != net_info)
-                        continue;
-                    WireId src = ctx->getPipSrcWire(pip);
-                    if (reached.count(src))
-                        continue;
-                    if (!allow_ripup && !ctx->checkWireAvail(src) && ctx->getBoundWireNet(src) != net_info)
-                        continue;
-                    reached[src] = pip;
-                    bfs.push(src);
-                }
-            }
+            src_wire = const_search(dst_wire, pseudo, net_info, allow_ripup != 0, reached);
+            used_ripup = allow_ripup != 0;
         }
         if (src_wire == WireId()) {
             // Always-on: a silently unrouted const sink can be a dead clock
@@ -584,6 +638,35 @@ struct Router1
                         (pseudo == ID_PSEUDO_VCC) ? "VCC" : "GND", ctx->nameOfWire(dst_wire),
                         ctx->nameOf(net_info->users[user_idx].cell), ctx->nameOf(net_info->users[user_idx].port));
             return false;
+        }
+
+        if (used_ripup && src_wire != WireId()) {
+            std::set<std::string> victims;
+            WireId c = src_wire;
+            while (true) {
+                NetInfo *bn = ctx->getBoundWireNet(c);
+                if (bn != nullptr && bn != net_info)
+                    victims.insert(bn->name.str(ctx));
+                PipId p = reached.at(c);
+                if (p == PipId())
+                    break;
+                NetInfo *pn = ctx->getBoundPipNet(p);
+                if (pn != nullptr && pn != net_info)
+                    victims.insert(pn->name.str(ctx));
+                c = ctx->getPipDstWire(p);
+            }
+            auto &all_victims = constRipupVictims[arc];
+            all_victims.insert(victims.begin(), victims.end());
+            if (!victims.empty() && ++constRipupRounds[arc] > cfg.constRipupMaxRounds) {
+                std::string names;
+                for (auto &v : all_victims)
+                    names += (names.empty() ? "" : ", ") + v;
+                log_error("router1: constant sink %s/%s (wire %s) ripped up other nets in more than %d of its routes "
+                          "(router1/constRipupMaxRounds); nets it ripped: %s\n",
+                          ctx->nameOf(net_info->users[user_idx].cell),
+                          ctx->nameOf(net_info->users[user_idx].port), ctx->nameOfWire(dst_wire),
+                          cfg.constRipupMaxRounds, names.c_str());
+            }
         }
 
         // bind the path forward from the pseudo source down to the sink
@@ -1017,6 +1100,12 @@ Router1Cfg::Router1Cfg(Context *ctx)
     if (getenv("NEXTPNR_SKIP_FAILED_ARCS"))
         skipFailedArcs = true;
     constNoRipup = getenv("NEXTPNR_GND_NO_RIPUP") != nullptr;
+    constRipupCost = ctx->setting<int>("router1/constRipupCost", 4);
+    constRipupMaxRounds = ctx->setting<int>("router1/constRipupMaxRounds", 16);
+    if (constRipupCost < 0)
+        log_error("router1/constRipupCost must be >= 0, got %d\n", constRipupCost);
+    if (constRipupMaxRounds < 0)
+        log_error("router1/constRipupMaxRounds must be >= 0, got %d\n", constRipupMaxRounds);
 
     wireRipupPenalty = ctx->getRipupDelayPenalty();
     netRipupPenalty = 10 * ctx->getRipupDelayPenalty();
