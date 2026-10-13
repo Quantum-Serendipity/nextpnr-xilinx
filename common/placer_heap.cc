@@ -173,6 +173,7 @@ class HeAPPlacer
         int iter = 0, stalled = 0;
 
         std::vector<std::tuple<CellInfo *, BelId, PlaceStrength>> solution;
+        CellInfo *last_unbound = nullptr;
 
         std::vector<std::unordered_set<IdString>> heap_runs;
         std::unordered_set<IdString> all_celltypes;
@@ -254,12 +255,25 @@ class HeAPPlacer
                 get_criticalities(ctx, &net_crit);
 
             if (legal_hpwl < best_hpwl) {
-                best_hpwl = legal_hpwl;
-                stalled = 0;
-                // Save solution
-                solution.clear();
+                std::vector<std::tuple<CellInfo *, BelId, PlaceStrength>> candidate_solution;
+                CellInfo *unbound = nullptr;
                 for (auto cell : sorted(ctx->cells)) {
-                    solution.emplace_back(cell.second, cell.second->bel, cell.second->belStrength);
+                    if (cell.second->bel == BelId()) {
+                        unbound = cell.second;
+                        break;
+                    }
+                    candidate_solution.emplace_back(cell.second, cell.second->bel, cell.second->belStrength);
+                }
+                if (unbound == nullptr) {
+                    best_hpwl = legal_hpwl;
+                    stalled = 0;
+                    solution = std::move(candidate_solution);
+                } else {
+                    last_unbound = unbound;
+                    if (ctx->debug)
+                        log_info("Ignoring incomplete heap placer solution with unbound cell %s\n",
+                                 ctx->nameOf(unbound));
+                    ++stalled;
                 }
             } else {
                 ++stalled;
@@ -273,6 +287,11 @@ class HeAPPlacer
         }
 
         // Apply saved solution
+        if (solution.empty() && !ctx->cells.empty())
+            log_error("Heap placer failed to find a complete legal placement; every candidate left cell '%s' (type "
+                      "%s) unbound.\n",
+                      last_unbound ? ctx->nameOf(last_unbound) : "?",
+                      last_unbound ? last_unbound->type.c_str(ctx) : "?");
         for (auto &sc : solution) {
             CellInfo *cell = std::get<0>(sc);
             if (cell->bel != BelId())
@@ -886,6 +905,8 @@ class HeAPPlacer
         // Unbind all cells placed in this solution
         for (auto cell : sorted(ctx->cells)) {
             CellInfo *ci = cell.second;
+            if (ci->belStrength > STRENGTH_STRONG)
+                continue;
             if (ci->bel != BelId() && (ci->udata != dont_solve ||
                                        (chain_root.count(ci->name) && chain_root.at(ci->name)->udata != dont_solve)))
                 ctx->unbindBel(ci->bel);
@@ -978,25 +999,45 @@ class HeAPPlacer
                 // unpinned BUFG/BUFH unplaceable (regression from
                 // 369038ed).  Budget the radius growth plus a full-grid
                 // search pass on top of the cell-count term.
-                if (attempts > std::max(10000, 3 * int(ctx->cells.size())) + 10 * max_x * max_y)
+                if (attempts > std::max(10000, 3 * int(ctx->cells.size())) + 10 * max_x * max_y) {
+                    std::queue<CellInfo *> members;
+                    for (auto child : ci->constr_children)
+                        members.push(child);
+                    while (!members.empty()) {
+                        CellInfo *mc = members.front();
+                        members.pop();
+                        if (mc->bel != BelId() && mc->belStrength > STRENGTH_STRONG)
+                            log_error("Unable to find legal placement for cell '%s': its cluster member '%s' is "
+                                      "pinned at bel '%s' and no legal position of '%s' agrees with that pin.\n",
+                                      ctx->nameOf(ci), ctx->nameOf(mc), ctx->nameOfBel(mc->bel), ctx->nameOf(ci));
+                        for (auto child : mc->constr_children)
+                            members.push(child);
+                    }
                     log_error("Unable to find legal placement for cell '%s', check constraints and utilisation.\n",
                               ctx->nameOf(ci));
-
-                int rx = radius, ry = radius;
-
-                if (ci->region != nullptr) {
-                    rx = std::min(radius, (constraint_region_bounds[ci->region->name].x1 -
-                                           constraint_region_bounds[ci->region->name].x0) /
-                                                          2 +
-                                                  1);
-                    ry = std::min(radius, (constraint_region_bounds[ci->region->name].y1 -
-                                           constraint_region_bounds[ci->region->name].y0) /
-                                                          2 +
-                                                  1);
                 }
 
-                int nx = ctx->rng(2 * rx + 1) + std::max(cell_locs.at(ci->name).x - rx, 0);
-                int ny = ctx->rng(2 * ry + 1) + std::max(cell_locs.at(ci->name).y - ry, 0);
+                int x0 = std::max(cell_locs.at(ci->name).x - radius, 0);
+                int y0 = std::max(cell_locs.at(ci->name).y - radius, 0);
+                int x1 = x0 + 2 * radius;
+                int y1 = y0 + 2 * radius;
+
+                if (ci->region != nullptr) {
+                    auto &r = constraint_region_bounds[ci->region->name];
+                    x1 = cell_locs.at(ci->name).x + radius;
+                    y1 = cell_locs.at(ci->name).y + radius;
+                    x0 = std::max(x0, r.x0);
+                    y0 = std::max(y0, r.y0);
+                    x1 = std::min(x1, r.x1);
+                    y1 = std::min(y1, r.y1);
+                    if (x0 > x1)
+                        std::swap(x0, x1);
+                    if (y0 > y1)
+                        std::swap(y0, y1);
+                }
+
+                int nx = ctx->rng(x1 - x0 + 1) + x0;
+                int ny = ctx->rng(y1 - y0 + 1) + y0;
 
                 iter++;
                 iter_at_radius++;
@@ -1114,7 +1155,7 @@ class HeAPPlacer
                             CellInfo *bound = ctx->getBoundBelCell(sz);
                             if (bound != nullptr) {
                                 if (bound->constr_parent != nullptr || !bound->constr_children.empty() ||
-                                    bound->constr_abs_z)
+                                    bound->constr_abs_z || bound->belStrength > STRENGTH_STRONG)
                                     continue;
                                 ctx->unbindBel(bound->bel);
                             }
@@ -1186,7 +1227,8 @@ class HeAPPlacer
                         visit.emplace(ci, loc);
                         while (!visit.empty()) {
                             CellInfo *vc = visit.front().first;
-                            if (vc->bel != BelId()) {
+                            const bool pinned = vc->bel != BelId() && vc->belStrength > STRENGTH_STRONG;
+                            if (vc->bel != BelId() && !pinned) {
                                 // A leaf cluster member can already be bound
                                 // when the general flow placed it before this
                                 // chain's BFS runs -- e.g. a LUT shared between
@@ -1202,18 +1244,24 @@ class HeAPPlacer
                             Loc ploc = visit.front().second;
                             visit.pop();
                             BelId target = ctx->getBelByLocation(ploc);
-                            if (vc->region != nullptr && vc->region->constr_bels && !vc->region->bels.count(target))
-                                goto fail;
-                            CellInfo *bound;
-                            if (target == BelId() || ctx->getBelType(target) != vc->type)
-                                goto fail;
-                            bound = ctx->getBoundBelCell(target);
-                            // Chains cannot overlap
-                            if (bound != nullptr)
-                                if (bound->constr_z != bound->UNCONSTR || bound->constr_parent != nullptr ||
-                                    !bound->constr_children.empty() || bound->belStrength > STRENGTH_WEAK)
+                            if (pinned) {
+                                if (target != vc->bel)
                                     goto fail;
-                            targets.emplace_back(vc, target);
+                            } else {
+                                if (vc->region != nullptr && vc->region->constr_bels &&
+                                    !vc->region->bels.count(target))
+                                    goto fail;
+                                CellInfo *bound;
+                                if (target == BelId() || ctx->getBelType(target) != vc->type)
+                                    goto fail;
+                                bound = ctx->getBoundBelCell(target);
+                                // Chains cannot overlap
+                                if (bound != nullptr)
+                                    if (bound->constr_z != bound->UNCONSTR || bound->constr_parent != nullptr ||
+                                        !bound->constr_children.empty() || bound->belStrength > STRENGTH_WEAK)
+                                        goto fail;
+                                targets.emplace_back(vc, target);
+                            }
                             for (auto child : vc->constr_children) {
                                 Loc cloc = ploc;
                                 if (child->constr_x != child->UNCONSTR)

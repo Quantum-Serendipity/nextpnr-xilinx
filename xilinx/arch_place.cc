@@ -2097,6 +2097,39 @@ void Arch::fixupBramCascades()
         log_info("    BRAM cascade: %d link(s) already legal, %d relocated\n", n_legal, n_moved);
 }
 
+int Arch::recordLutPermutationPins()
+{
+    IdString ports[6] = {id_A1, id_A2, id_A3, id_A4, id_A5, id_A6};
+    int permuted = 0;
+    for (auto net : sorted(nets)) {
+        NetInfo *ni = net.second;
+        for (auto &wire : ni->wires) {
+            PipId pip = wire.second.pip;
+            if (pip == PipId())
+                continue;
+            auto &pd = locInfo(pip).pip_data[pip.index];
+            if (pd.flags != PIP_LUT_PERMUTATION)
+                continue;
+            LogicTileStatus *lts = tileStatus.at(pip.tile).lts;
+            if (lts == nullptr)
+                continue;
+            int eight = (pd.extra_data >> 8) & 0xF;
+            IdString from = ports[(pd.extra_data >> 4) & 0xF], to = ports[pd.extra_data & 0xF];
+            for (int belidx : {BEL_6LUT, BEL_5LUT}) {
+                CellInfo *lut = lts->cells[(eight << 4) | belidx];
+                if (lut == nullptr || get_net_or_empty(lut, from) != ni)
+                    continue;
+                if (getBelPinWire(lut->bel, to) == WireId())
+                    continue;
+                lut->pins[from] = to;
+                if (from != to)
+                    permuted++;
+            }
+        }
+    }
+    return permuted;
+}
+
 void Arch::fixupRouting()
 {
     log_info("Running post-routing legalisation...\n");
@@ -2295,6 +2328,8 @@ void Arch::fixupRouting()
             }
         }
     }
+    log_info("LUT permutation rewrite: recorded %d permuted LUT input pin(s) as routed sink wires\n",
+             recordLutPermutationPins());
     if (perm_label_no_net > 0)
         log_info("LUT permutation rewrite: %d X_ORIG_PORT label(s) suppressed on pins left with no net\n",
                  perm_label_no_net);

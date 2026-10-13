@@ -149,6 +149,9 @@ void UspCommandHandler::customAfterLoad(Context *ctx)
     // asserting "a bad rectangle is rejected" would pass for the wrong reason.
     // The mechanism must fail at configuration time, not at first use.
     (void)ctx->roi_active();
+    if (vm.count("no-route") && vm.count("no-place") && !vm.count("route-clock-only"))
+        log_info("routed import: recorded %d permuted LUT input pin(s) as routed sink wires\n",
+                 ctx->recordLutPermutationPins());
     const bool allow_const_holdouts_given = vm.count("allow-const-holdouts") != 0;
     if (allow_const_holdouts_given)
         ctx->allow_const_holdouts = true;
