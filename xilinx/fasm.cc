@@ -2693,6 +2693,12 @@ struct FasmBackend
                     if (w == 1 || w == 9)
                         write_bit(std::string("BRAM36_") + pname + "_1");
                 }
+                for (std::string port : {"A", "B"}) {
+                    const std::string extension =
+                            str_or_default(ci->params, ctx->id("RAM_EXTENSION_" + port), "NONE");
+                    const bool lower_of_a_pair = extension == "LOWER";
+                    write_bit("RAM_EXTENSION_" + port + "_LOWER", lower_of_a_pair);
+                }
                 pop();
             }
             auto used_rdaddrcasc = used_wires_starting_with(tile, "BRAM_CASCOUT_ADDRARDADDR", false);

@@ -1352,7 +1352,14 @@ void XC7Packer::pack_bram()
                 connect_port(ctx, ctx->nets[ctx->id("$PACKER_VCC_NET")].get(), ci, p);
             }
         } else if (ci->type == id_RAMB36E1_RAMB36E1) {
-            for (auto p : {ctx->id("ADDRARDADDRL15"), ctx->id("ADDRBWRADDRL15")}) {
+            for (auto &a15 : {std::make_pair(ctx->id("ADDRARDADDRL15"), "RAM_EXTENSION_A"),
+                              std::make_pair(ctx->id("ADDRBWRADDRL15"), "RAM_EXTENSION_B")}) {
+                IdString p = a15.first;
+                const std::string extension = str_or_default(ci->params, ctx->id(a15.second), "NONE");
+                const bool port_is_cascaded = extension == "LOWER" || extension == "UPPER";
+                const bool a15_has_a_net = get_net_or_empty(ci, p) != nullptr;
+                if (port_is_cascaded && a15_has_a_net)
+                    continue;
                 if (!ci->ports.count(p)) {
                     ci->ports[p].name = p;
                     ci->ports[p].type = PORT_IN;
