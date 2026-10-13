@@ -905,6 +905,8 @@ class HeAPPlacer
         // Unbind all cells placed in this solution
         for (auto cell : sorted(ctx->cells)) {
             CellInfo *ci = cell.second;
+            if (ci->belStrength > STRENGTH_STRONG)
+                continue;
             if (ci->bel != BelId() && (ci->udata != dont_solve ||
                                        (chain_root.count(ci->name) && chain_root.at(ci->name)->udata != dont_solve)))
                 ctx->unbindBel(ci->bel);
@@ -1139,7 +1141,7 @@ class HeAPPlacer
                             CellInfo *bound = ctx->getBoundBelCell(sz);
                             if (bound != nullptr) {
                                 if (bound->constr_parent != nullptr || !bound->constr_children.empty() ||
-                                    bound->constr_abs_z)
+                                    bound->constr_abs_z || bound->belStrength > STRENGTH_STRONG)
                                     continue;
                                 ctx->unbindBel(bound->bel);
                             }
@@ -1211,7 +1213,8 @@ class HeAPPlacer
                         visit.emplace(ci, loc);
                         while (!visit.empty()) {
                             CellInfo *vc = visit.front().first;
-                            if (vc->bel != BelId()) {
+                            const bool pinned = vc->bel != BelId() && vc->belStrength > STRENGTH_STRONG;
+                            if (vc->bel != BelId() && !pinned) {
                                 // A leaf cluster member can already be bound
                                 // when the general flow placed it before this
                                 // chain's BFS runs -- e.g. a LUT shared between
@@ -1227,18 +1230,24 @@ class HeAPPlacer
                             Loc ploc = visit.front().second;
                             visit.pop();
                             BelId target = ctx->getBelByLocation(ploc);
-                            if (vc->region != nullptr && vc->region->constr_bels && !vc->region->bels.count(target))
-                                goto fail;
-                            CellInfo *bound;
-                            if (target == BelId() || ctx->getBelType(target) != vc->type)
-                                goto fail;
-                            bound = ctx->getBoundBelCell(target);
-                            // Chains cannot overlap
-                            if (bound != nullptr)
-                                if (bound->constr_z != bound->UNCONSTR || bound->constr_parent != nullptr ||
-                                    !bound->constr_children.empty() || bound->belStrength > STRENGTH_WEAK)
+                            if (pinned) {
+                                if (target != vc->bel)
                                     goto fail;
-                            targets.emplace_back(vc, target);
+                            } else {
+                                if (vc->region != nullptr && vc->region->constr_bels &&
+                                    !vc->region->bels.count(target))
+                                    goto fail;
+                                CellInfo *bound;
+                                if (target == BelId() || ctx->getBelType(target) != vc->type)
+                                    goto fail;
+                                bound = ctx->getBoundBelCell(target);
+                                // Chains cannot overlap
+                                if (bound != nullptr)
+                                    if (bound->constr_z != bound->UNCONSTR || bound->constr_parent != nullptr ||
+                                        !bound->constr_children.empty() || bound->belStrength > STRENGTH_WEAK)
+                                        goto fail;
+                                targets.emplace_back(vc, target);
+                            }
                             for (auto child : vc->constr_children) {
                                 Loc cloc = ploc;
                                 if (child->constr_x != child->UNCONSTR)
