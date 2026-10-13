@@ -581,6 +581,7 @@ bool Arch::xc7_logic_tile_valid(IdString tileType, LogicTileStatus &lts) const
     if (lts.cells[(3 << 4) | BEL_5LUT] != nullptr && lts.cells[(3 << 4) | BEL_5LUT]->lutInfo.is_memory)
         small_memory = true;
     NetInfo *wclk = nullptr;
+    bool wclk_inv = false;
     // Check eight-tiles (mostly LUT-related validity)
     for (int i = 0; i < 8; i++) {
         if (lts.eights[i].dirty) {
@@ -601,11 +602,16 @@ bool Arch::xc7_logic_tile_valid(IdString tileType, LogicTileStatus &lts) const
                     return false;
                 }
                 if (lut6->lutInfo.is_memory || lut6->lutInfo.is_srl) {
-                    if (wclk == nullptr)
+                    if (wclk == nullptr) {
                         wclk = lut6->lutInfo.wclk;
-                    else if (lut6->lutInfo.wclk != wclk) {
-                        DBG();
-                        return false;
+                        wclk_inv = lut6->lutInfo.wclk_inv;
+                    } else {
+                        const bool wclk_differs = lut6->lutInfo.wclk != wclk;
+                        const bool wclk_polarity_differs = lut6->lutInfo.wclk_inv != wclk_inv;
+                        if (wclk_differs || wclk_polarity_differs) {
+                            DBG();
+                            return false;
+                        }
                     }
                 }
                 if (lut5 != nullptr) {
@@ -699,11 +705,16 @@ bool Arch::xc7_logic_tile_valid(IdString tileType, LogicTileStatus &lts) const
                     return false; // Memory and SRLs only valid in SLICEMs
                 }
                 if (lut5->lutInfo.is_srl) {
-                    if (wclk == nullptr)
+                    if (wclk == nullptr) {
                         wclk = lut5->lutInfo.wclk;
-                    else if (lut5->lutInfo.wclk != wclk) {
-                        DBG();
-                        return false;
+                        wclk_inv = lut5->lutInfo.wclk_inv;
+                    } else {
+                        const bool wclk_differs = lut5->lutInfo.wclk != wclk;
+                        const bool wclk_polarity_differs = lut5->lutInfo.wclk_inv != wclk_inv;
+                        if (wclk_differs || wclk_polarity_differs) {
+                            DBG();
+                            return false;
+                        }
                     }
                 }
                 // 5LUT can use at most 5 inputs and 1 output
@@ -996,6 +1007,7 @@ bool Arch::xc7_logic_tile_valid(IdString tileType, LogicTileStatus &lts) const
                             continue;
                         if (lut->lutInfo.wclk != nullptr) {
                             wclk = lut->lutInfo.wclk;
+                            wclk_inv = lut->lutInfo.wclk_inv;
                             break;
                         }
                     }
@@ -1087,6 +1099,14 @@ bool Arch::xc7_logic_tile_valid(IdString tileType, LogicTileStatus &lts) const
                             if (dbg_validity_runtime)
                                 log_info("  invalid-arm: wclk %s: clk %s vs wclk %s\n", nameOf(ff),
                                          clk ? nameOf(clk) : "-", wclk ? nameOf(wclk) : "-");
+                            return false;
+                        }
+                        const bool ff_half_clkinv = ff->ffInfo.is_clkinv != ff->ffInfo.is_latch;
+                        const bool ff_polarity_is_not_wclk = ff_half_clkinv != wclk_inv;
+                        if (i == 0 && wclk != nullptr && ff_polarity_is_not_wclk) {
+                            if (dbg_validity_runtime)
+                                log_info("  invalid-arm: wclk polarity %s: ff %d vs wclk %d\n", nameOf(ff),
+                                         int(ff_half_clkinv), int(wclk_inv));
                             return false;
                         }
                         sr = ff->ffInfo.sr;

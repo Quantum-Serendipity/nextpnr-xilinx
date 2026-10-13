@@ -910,6 +910,7 @@ void XC7Packer::pack_iologic()
             else
                 oddr_rules[ctx->id("ODDR")].new_type = is_tristate ? ctx->id("OLOGICE3_TFF") : ctx->id("OLOGICE3_OUTFF");
             oddr_rules[ctx->id("ODDR")].port_xform[ctx->id("C")] = ctx->id("CK");
+            oddr_rules[ctx->id("ODDR")].param_xform[ctx->id("IS_C_INVERTED")] = ctx->id("IS_CLK_INVERTED");
             NetInfo *s_net = get_net_or_empty(ci, ctx->id("S"));
             NetInfo *r_net = get_net_or_empty(ci, ctx->id("R"));
             if (s_net != nullptr && s_net->name == ctx->id("$PACKER_GND_NET"))

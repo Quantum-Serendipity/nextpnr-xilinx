@@ -536,6 +536,13 @@ struct FasmBackend
                             c.replace(y0pos, 2, "Y1");
                     }
                 }
+                if (boost::contains(c, ".DATA_RATE_TQ.BUF")) {
+                    auto dot = c.find('.');
+                    bool site_has_tristate_register =
+                            dot != std::string::npos && ologic_t_registered.count(tile_name + "/" + c.substr(0, dot));
+                    if (site_has_tristate_register)
+                        continue;
+                }
                 // Phantom-BUFGCTRL guard: this pseudo-pip's feature list
                 // includes BUFGCTRL.BUFGCTRL_X0Y<n>.* bits whenever the
                 // router crosses the matching CLK_BUFG_BUFGCTRL<n>_O→I0/I1
@@ -1019,12 +1026,12 @@ struct FasmBackend
         for (int i = 0; i < 4; i++) {
             for (int k = 0; k < 2; k++) {
                 CellInfo *lut = lts->cells[(half << 6) | (i << 4) | (k ? BEL_5LUT : BEL_6LUT)];
-                if (lut == nullptr || !lut->lutInfo.is_memory)
+                if (lut == nullptr || !(lut->lutInfo.is_memory || lut->lutInfo.is_srl))
                     continue;
                 const bool lut_clkinv = bool_or_default(lut->params, ctx->id("IS_WCLK_INVERTED"), false);
                 const bool mem_disagrees = found_mem && (lut_clkinv != mem_clkinv);
                 if (mem_disagrees)
-                    log_error("FASM: LUT-RAM '%s' (type %s) at bel %s disagrees with its half-slice on "
+                    log_error("FASM: LUT-RAM/SRL '%s' (type %s) at bel %s disagrees with its half-slice on "
                               "'IS_WCLK_INVERTED' (tile %s) -- control-set contention in the placement\n",
                               lut->name.c_str(ctx), lut->type.c_str(ctx), ctx->getBelName(lut->bel).c_str(ctx),
                               tname.c_str());
@@ -1773,6 +1780,13 @@ struct FasmBackend
         pop(); // tile
     }
 
+    // OLOGIC sites whose tristate flip-flop (TFF) holds an ODDR that drives the
+    // pad's T input, as "TILE/OLOGIC_Yn".  The pseudo-pip that crosses the site
+    // for the fabric data (D1 -> OQ) also sets DATA_RATE_TQ.BUF, the unregistered
+    // tristate; Vivado sets DATA_RATE_TQ.DDR for such a site instead, and the two
+    // are alternatives of one field.
+    std::set<std::string> ologic_t_registered;
+
     void write_iol_config(CellInfo *ci)
     {
         std::string tile = get_tile_name(ci->bel.tile);
@@ -1784,7 +1798,14 @@ struct FasmBackend
         std::string site = ctx->getBelSite(ci->bel);
         std::string sitetype = site.substr(0, site.find('_'));
         Loc siteloc = ctx->getSiteLocInTile(ci->bel);
-        push(sitetype + "_Y" + std::to_string(is_sing ? (is_top_sing ? 1 : 0) : (1 - siteloc.y)));
+        std::string site_y = sitetype + "_Y" + std::to_string(is_sing ? (is_top_sing ? 1 : 0) : (1 - siteloc.y));
+        push(site_y);
+        if (ci->type == ctx->id("OLOGICE2_TFF") || ci->type == ctx->id("OLOGICE3_TFF"))
+            ologic_t_registered.insert(tile + "/" + site_y);
+        auto site_bel_is_bound = [&](const char *bel_name) {
+            BelId bel = ctx->getBelByName(ctx->id(site + "/" + bel_name));
+            return bel != BelId() && ctx->getBoundBelCell(bel) != nullptr;
+        };
 
         if (ci->type == ctx->id("ILOGICE3_IFF")) {
             write_bit("IDDR.IN_USE");
@@ -1883,7 +1904,9 @@ struct FasmBackend
             write_bit("ODDR_TDDR.IN_USE");
             write_bit("OQUSED");
             write_bit("OSERDES.DATA_RATE_OQ.DDR");
-            write_bit("OSERDES.DATA_RATE_TQ.BUF");
+            const bool tristate_is_an_oddr = site_bel_is_bound("TFF");
+            if (!tristate_is_an_oddr)
+                write_bit("OSERDES.DATA_RATE_TQ.BUF");
 
             std::string srtype = str_or_default(ci->params, ctx->id("SRTYPE"), "SYNC");
             if (srtype == "SYNC") write_bit("OSERDES.SRTYPE.SYNC");
@@ -1892,7 +1915,7 @@ struct FasmBackend
                 write_bit("IS_" + d + "_INVERTED",
                           bool_or_default(ci->params, ctx->id("IS_" + d + "_INVERTED"), false));
 
-            auto init = int_or_default(ci->params, ctx->id("INIT"), 1);
+            auto init = int_or_default(ci->params, ctx->id("INIT"), 0);
             if (init == 0) write_bit("ZINIT_OQ");
 
             write_bit("ODDR.SRUSED", get_net_or_empty(ci, ctx->id("SR")) != nullptr);
@@ -1901,6 +1924,45 @@ struct FasmBackend
 
             auto clk_inv = bool_or_default(ci->params, ctx->id("IS_CLK_INVERTED"));
             if (!clk_inv) write_bit("ZINV_CLK");
+        } else if (ci->type == ctx->id("OLOGICE2_TFF") || ci->type == ctx->id("OLOGICE3_TFF")) {
+            // An ODDR on the pad's T input.  The tristate register runs in DDR mode,
+            // SRTYPE has its own bit, INIT is ZINIT_TQ (the library default is 0), T1 and
+            // T2 are not inverted.  The site's clock, edge and ODDR_TDDR.IN_USE bits come
+            // from the output ODDR when there is one; alone, Vivado sets SAME_EDGE
+            // whichever edge the ODDR asks for.
+            const bool is_d1_inverted = bool_or_default(ci->params, ctx->id("IS_D1_INVERTED"), false);
+            const bool is_d2_inverted = bool_or_default(ci->params, ctx->id("IS_D2_INVERTED"), false);
+            if (is_d1_inverted || is_d2_inverted)
+                log_error("%s '%s' drives a tristate input with an inverted D1 or D2, which is not supported\n",
+                          ci->type.c_str(ctx), ctx->nameOf(ci));
+
+            write_bit("OSERDES.DATA_RATE_TQ.DDR");
+            std::string srtype = str_or_default(ci->params, ctx->id("SRTYPE"), "SYNC");
+            if (srtype == "SYNC")
+                write_bit("OSERDES.TSRTYPE.SYNC");
+            write_bit("TDDR.SRUSED", get_net_or_empty(ci, ctx->id("SR")) != nullptr);
+            auto init = int_or_default(ci->params, ctx->id("INIT"), 0);
+            if (init == 0)
+                write_bit("ZINIT_TQ");
+            write_bit("ZINV_T1");
+            write_bit("ZINV_T2");
+
+            const bool output_is_an_oddr = site_bel_is_bound("OUTFF");
+            if (output_is_an_oddr) {
+                CellInfo *oq = ctx->getBoundBelCell(ctx->getBelByName(ctx->id(site + "/OUTFF")));
+                const bool clock_inversion_differs = bool_or_default(oq->params, ctx->id("IS_CLK_INVERTED")) !=
+                                                     bool_or_default(ci->params, ctx->id("IS_CLK_INVERTED"));
+                if (clock_inversion_differs)
+                    log_error("%s '%s' (tristate) and '%s' (data) share the OLOGIC site %s, which has one clock "
+                              "inverter; they disagree on IS_C_INVERTED\n",
+                              ci->type.c_str(ctx), ctx->nameOf(ci), ctx->nameOf(oq), site.c_str());
+            } else {
+                write_bit("ODDR_TDDR.IN_USE");
+                write_bit("ODDR.DDR_CLK_EDGE.SAME_EDGE");
+                auto clk_inv = bool_or_default(ci->params, ctx->id("IS_CLK_INVERTED"));
+                if (!clk_inv)
+                    write_bit("ZINV_CLK");
+            }
         } else if (ci->type == ctx->id("OSERDESE2_OSERDESE2")) {
             write_bit("ODDR.DDR_CLK_EDGE.SAME_EDGE");
             write_bit("ODDR.SRUSED");
@@ -2044,6 +2106,8 @@ struct FasmBackend
             } else if (ci->type == ctx->id("ILOGICE3_IFF") ||
                        ci->type == ctx->id("OLOGICE2_OUTFF") ||
                        ci->type == ctx->id("OLOGICE3_OUTFF") ||
+                       ci->type == ctx->id("OLOGICE2_TFF") ||
+                       ci->type == ctx->id("OLOGICE3_TFF") ||
                        ci->type == ctx->id("OSERDESE2_OSERDESE2") ||
                        ci->type == ctx->id("ISERDESE2_ISERDESE2") ||
                        ci->type == ctx->id("IDELAYE2_IDELAYE2")   ||
@@ -2818,10 +2882,17 @@ struct FasmBackend
 
     int duty_half_cycles(int d, double duty)
     {
-        double x = 2.0 * duty * d;
-        if (x < d)
-            return int(floor(x + 0.5 + 1e-9));
-        return int(ceil(x - 0.5 - 1e-9));
+        const long long duty_fixed = llround(duty * 100000);
+        const long long scaled = 2LL * d * duty_fixed;
+        const int rounded_up = int((scaled + 50000) / 100000);
+        const bool is_tie = scaled % 100000 == 50000;
+        auto encodable = [d](int half_cycles) {
+            const int high = half_cycles / 2, low = d - high;
+            return high >= 1 && high <= 64 && low >= 1 && low <= 64;
+        };
+        if (is_tie && !encodable(rounded_up) && encodable(rounded_up - 1))
+            return rounded_up - 1;
+        return rounded_up;
     }
 
     void split_counter(double divide, double duty, int &high, int &low, bool &edge)
@@ -2831,6 +2902,31 @@ struct FasmBackend
         high = half_cycles / 2;
         low = d - high;
         edge = (half_cycles % 2) != 0;
+    }
+
+    // A PLL/MMCM output phase in degrees.  Vivado takes -360..360 (both ends included); outside
+    // that range it drops the value with a critical warning (Netlist 29-72) and programs a phase
+    // of 0, so the clock is not the one the design asks for.  Stop instead.
+    double clkout_phase(CellInfo *ci, const std::string &name)
+    {
+        const double phase = float_or_default(ci, name + "_PHASE", 0);
+        const bool phase_in_range = phase >= -360 && phase <= 360;
+        if (!phase_in_range)
+            log_error("%s: %s_PHASE must be in the range -360..360 (got %.10g)\n", ctx->nameOf(ci), name.c_str(),
+                      phase);
+        return phase;
+    }
+
+    // The phase in eighths of a VCO period, split into PHASE_MUX and DELAY_TIME.  A negative phase
+    // is taken modulo 360; the MMCM rounds to the nearest eighth, the PLL truncates and saturates
+    // at 511.
+    void split_phase(double phase, double divide, bool is_mmcm, int &phasemux, int &delaytime)
+    {
+        const double phase_normalized = phase < 0 ? phase + 360 : phase;
+        const double eighths = phase_normalized / 360 * divide * 8;
+        const int phase_eighths = is_mmcm ? int(floor(eighths + 0.5)) : std::min(int(floor(eighths)), 511);
+        phasemux = phase_eighths % 8;
+        delaytime = phase_eighths / 8;
     }
 
     void write_pll_clkout(const std::string &name, CellInfo *ci)
@@ -2845,7 +2941,7 @@ struct FasmBackend
         // doesn't set explicitly (e.g. CLKFBOUT, when only CLKOUT0 has an
         // explicit PHASE), found via a raw-bit diff against a real Vivado
         // MMCM bitstream (nextpnr-xilinx#177 MMCM-lock investigation).
-        double phase = float_or_default(ci, name + "_PHASE", 0);
+        double phase = clkout_phase(ci, name);
         double duty = boost::starts_with(name, "CLKOUT") ? float_or_default(ci, name + "_DUTY_CYCLE", 0.5) : 0.5;
         bool used = false;
         if (name == "DIVCLK" || name == "CLKFBOUT") {
@@ -2859,9 +2955,7 @@ struct FasmBackend
             if (name == "CLKOUT1" || name == "CLKFBOUT")
                 frac = floor(divide * 8) - floor(divide) * 8;
             split_counter(divide, duty, high, low, edge);
-            int phase_eights = floor((phase / 360) * divide * 8);
-            phasemux = phase_eights % 8;
-            delaytime = phase_eights / 8;
+            split_phase(phase, divide, false, phasemux, delaytime);
         }
         if (used)
             check_divider_grid(ci, "PLLE2_ADV", divide_attr, false);
@@ -3052,7 +3146,7 @@ struct FasmBackend
         // doesn't set explicitly (e.g. CLKFBOUT, when only CLKOUT0 has an
         // explicit PHASE), found via a raw-bit diff against a real Vivado
         // MMCM bitstream (nextpnr-xilinx#177 MMCM-lock investigation).
-        double phase = float_or_default(ci, name + "_PHASE", 0);
+        double phase = clkout_phase(ci, name);
         double duty = boost::starts_with(name, "CLKOUT") ? float_or_default(ci, name + "_DUTY_CYCLE", 0.5) : 0.5;
         bool used = false;
         if (name == "DIVCLK" || name == "CLKFBOUT") {
@@ -3066,9 +3160,7 @@ struct FasmBackend
             if (name == "CLKOUT0" || name == "CLKFBOUT")
                 frac = floor(divide * 8) - floor(divide) * 8;
             split_counter(divide, duty, high, low, edge);
-            int phase_eights = floor((phase / 360) * divide * 8);
-            phasemux = phase_eights % 8;
-            delaytime = phase_eights / 8;
+            split_phase(phase, divide, true, phasemux, delaytime);
         }
         if (used)
             check_divider_grid(ci, "MMCME2_ADV", divide_attr, fractional_counter);
@@ -3083,18 +3175,30 @@ struct FasmBackend
             auto is_clkout0 = name == "CLKOUT0";
             auto is_clkfbout = name == "CLKFBOUT";
 
-            if ((is_clkout0 || is_clkfbout) && frac != 0) {
-                --high;
-                --low;
-
-                auto frac_shifted = frac >> 1;
+            // Fractional divide, as Vivado programs it: the integer counter splits on the parity
+            // of the integer part, and the fall of the fractional output goes to the CLKOUT5
+            // (CLKOUT0) or CLKOUT6 (CLKFBOUT) fractional registers, moved by the phase.  EDGE stays
+            // what the duty cycle gives for the integer part.
+            const bool is_fractional_counter = (is_clkout0 || is_clkfbout) && frac != 0;
+            bool frac_wf_r = false;
+            if (is_fractional_counter) {
+                const int integer_part = int(floor(divide));
+                const bool integer_part_odd = integer_part & 1;
+                const bool one_eighth = frac == 1;
+                const bool integer_part_above_three = integer_part >= 4;
+                if (integer_part_odd) {
+                    high = (integer_part - 1) / 2;
+                    low = one_eighth ? high - 1 : high;
+                } else {
+                    high = low = integer_part / 2 - 1;
+                }
+                frac_wf_r = !integer_part_odd;
+                const bool frac_wf_f = integer_part_odd ? one_eighth : !(one_eighth && integer_part_above_three);
+                const int frac_phase_mux_f = (4 * integer_part_odd + (frac >> 1) + phasemux) & 7;
                 // CLKOUT0 controls CLKOUT5_CLKOUT2, CLKFBOUT controls CLKOUT6_CLKOUT2
                 std::string frac_conf_name = is_clkout0 ? "CLKOUT5_CLKOUT2_" : "CLKOUT6_CLKOUT2_";
-
-                if (1 <= frac_shifted) {
-                    write_bit(frac_conf_name + "FRACTIONAL_FRAC_WF_F[0]");
-                    write_int_vector(frac_conf_name + "FRACTIONAL_PHASE_MUX_F[1:0]", frac_shifted, 2);
-                }
+                write_bit(frac_conf_name + "FRACTIONAL_FRAC_WF_F[0]", frac_wf_f);
+                write_int_vector(frac_conf_name + "FRACTIONAL_PHASE_MUX_F[2:0]", frac_phase_mux_f, 3);
             }
 
             write_bit(name + "_CLKOUT1_OUTPUT_ENABLE[0]");
@@ -3115,7 +3219,7 @@ struct FasmBackend
 
             if (!is_clkout_5_or_6 && frac != 0) {
                 write_bit(name + "_CLKOUT2_FRAC_EN[0]", 1);
-                write_bit(name + "_CLKOUT2_FRAC_WF_R[0]", 1);
+                write_bit(name + "_CLKOUT2_FRAC_WF_R[0]", frac_wf_r);
                 write_int_vector(name + "_CLKOUT2_FRAC[2:0]", frac, 3);
             }
         } else {
@@ -3536,10 +3640,24 @@ struct FasmBackend
         // which wants FILTREG1=0x8 and TABLE=filter_lookup[mult-1].)
         write_int_vector("FILTREG1_RESERVED[11:0]", 0x8, 12);
 
-        // Vivado uses 0x100 (integer counters) for non-fractional configs;
-        // golden bitstreams confirm.  0xffff (the old value) is the XAPP888
-        // "enable everything" setting and does not match Vivado output.
-        write_int_vector("POWER_REG_POWER_REG_POWER_REG[15:0]", 0x100, 16);
+        // POWER_REG is 0x9900 when a fractional counter is in use or an output is
+        // shifted by something other than half a VCO period (PHASE_MUX not a
+        // multiple of 4), 0x0100 otherwise.
+        bool needs_fractional_power = false;
+        for (const char *name : {"CLKFBOUT", "CLKOUT0", "CLKOUT1", "CLKOUT2", "CLKOUT3", "CLKOUT4", "CLKOUT5", "CLKOUT6"}) {
+            const std::string n = name;
+            const bool is_used = n == "CLKFBOUT" || get_net_or_empty(ci, ctx->id(n)) != nullptr;
+            const double divide = float_or_default(
+                    ci, n + ((n == "CLKFBOUT") ? "_MULT_F" : (n == "CLKOUT0" ? "_DIVIDE_F" : "_DIVIDE")), 1);
+            int phasemux = 0, delaytime = 0;
+            if (divide > 1)
+                split_phase(clkout_phase(ci, n), divide, true, phasemux, delaytime);
+            const bool is_fractional_divide = divide != floor(divide);
+            const bool is_phase_off_half_cycle = phasemux % 4 != 0;
+            if (is_used && (is_fractional_divide || is_phase_off_half_cycle))
+                needs_fractional_power = true;
+        }
+        write_int_vector("POWER_REG_POWER_REG_POWER_REG[15:0]", needs_fractional_power ? 0x9900 : 0x0100, 16);
         write_bit("LOCKREG3_RESERVED[0]");
         write_int_vector("TABLE[9:0]", filter_lookup[clkfbout_mult - 1], 10);
         pop(2);
@@ -5642,10 +5760,9 @@ void write_gtx_channel(CellInfo *ci)
             boost::split(pins, attr_value, boost::is_any_of(" "));
             for (auto pin : pins) {
                 if (boost::empty(pin)) continue;
-                // These pins have no interconnect path into the site, so the
-                // tile bit is their only source.  It sits ahead of the site's
-                // input inverter, which write_bus_zinv() holds off for every
-                // tile-tied pin, so the bit has to carry the LOGICAL value --
+                // The tile bit sits ahead of the site's input inverter, which
+                // write_bus_zinv() holds off for every tile-tied pin, so the
+                // bit has to carry the LOGICAL value --
                 // flip the constant when the netlist asked for an inversion.
                 //
                 // Splitting the trailing index off matters: erase_all() of
