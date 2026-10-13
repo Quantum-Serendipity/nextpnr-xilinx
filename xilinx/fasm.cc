@@ -2571,6 +2571,53 @@ struct FasmBackend
         }
     }
 
+    int bram_output_word_bit(bool is_36, int half, int port_width, int k)
+    {
+        const int top_down_bit = 17 - k;
+        const bool is_18_nine_wide = !is_36 && port_width == 9;
+        if (is_18_nine_wide) {
+            if (k == 1)
+                return 8;
+            if (k == 9)
+                return 16;
+            return top_down_bit;
+        }
+        const bool is_36_eighteen_wide = is_36 && port_width == 18;
+        const bool is_36_nine_wide_low_half = is_36 && port_width == 9 && half == 0;
+        const int parity_bit = is_36_eighteen_wide ? 8 : (is_36_nine_wide_low_half ? 4 : -1);
+        const bool word_has_parity_to_move = parity_bit >= 0;
+        if (word_has_parity_to_move) {
+            if (k == 1)
+                return parity_bit;
+            const bool k_is_shifted_slot = k >= 2 && k <= 17 - parity_bit;
+            if (k_is_shifted_slot)
+                return 18 - k;
+        }
+        return top_down_bit;
+    }
+
+    void write_bram_output_values(CellInfo *ci, int half, bool is_36)
+    {
+        for (std::string value : {"INIT", "SRVAL"}) {
+            for (std::string port : {"A", "B"}) {
+                const int port_width = int_or_default(ci->params, ctx->id("READ_WIDTH_" + port), 0);
+                std::vector<bool> stored(18, true);
+                const IdString param = ctx->id(value + "_" + port);
+                const bool param_is_given = ci->params.count(param) && !ci->params.at(param).is_string;
+                if (param_is_given) {
+                    const std::string &bits = ci->params.at(param).str;
+                    for (int k = 0; k < 18; k++) {
+                        const int word_bit = bram_output_word_bit(is_36, half, port_width, k);
+                        const int param_bit = is_36 ? (2 * word_bit + half) : word_bit;
+                        const bool bit_is_set = param_bit < int(bits.size()) && bits[param_bit] == Property::S1;
+                        stored[k] = !bit_is_set;
+                    }
+                }
+                write_vector("Z" + value + "_" + port + "[17:0]", stored);
+            }
+        }
+    }
+
     void write_bram_half(int tile, int half, CellInfo *ci)
     {
         cur_tile = tile;
@@ -2627,10 +2674,7 @@ struct FasmBackend
                 if (mode != "WRITE_FIRST")
                     write_bit(std::string(wrmode) + "_" + mode);
             }
-            write_vector("ZINIT_A[17:0]", std::vector<bool>(18, true));
-            write_vector("ZINIT_B[17:0]", std::vector<bool>(18, true));
-            write_vector("ZSRVAL_A[17:0]", std::vector<bool>(18, true));
-            write_vector("ZSRVAL_B[17:0]", std::vector<bool>(18, true));
+            write_bram_output_values(ci, half, is_36);
 
             write_bram_init(half, ci, is_36);
         }
