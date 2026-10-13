@@ -531,6 +531,13 @@ struct FasmBackend
                             c.replace(y0pos, 2, "Y1");
                     }
                 }
+                if (boost::contains(c, ".DATA_RATE_TQ.BUF")) {
+                    auto dot = c.find('.');
+                    bool site_has_tristate_register =
+                            dot != std::string::npos && ologic_t_registered.count(tile_name + "/" + c.substr(0, dot));
+                    if (site_has_tristate_register)
+                        continue;
+                }
                 // Phantom-BUFGCTRL guard: this pseudo-pip's feature list
                 // includes BUFGCTRL.BUFGCTRL_X0Y<n>.* bits whenever the
                 // router crosses the matching CLK_BUFG_BUFGCTRL<n>_O→I0/I1
@@ -540,13 +547,6 @@ struct FasmBackend
                 // clock distribution (see task #47 bit-diff write-up).
                 // Suppress BUFGCTRL.* features on (tile, slot) pairs that
                 // have no actually-bound BUFGCTRL cell.
-                if (boost::contains(c, ".DATA_RATE_TQ.BUF")) {
-                    auto dot = c.find('.');
-                    bool site_has_tristate_register =
-                            dot != std::string::npos && ologic_t_registered.count(tile_name + "/" + c.substr(0, dot));
-                    if (site_has_tristate_register)
-                        continue;
-                }
                 if (boost::starts_with(c, "BUFGCTRL.BUFGCTRL_X0Y")) {
                     // Parse the slot number out of "BUFGCTRL.BUFGCTRL_X0Y<N>.<rest>".
                     const std::string prefix = "BUFGCTRL.BUFGCTRL_X0Y";
