@@ -173,6 +173,7 @@ class HeAPPlacer
         int iter = 0, stalled = 0;
 
         std::vector<std::tuple<CellInfo *, BelId, PlaceStrength>> solution;
+        CellInfo *last_unbound = nullptr;
 
         std::vector<std::unordered_set<IdString>> heap_runs;
         std::unordered_set<IdString> all_celltypes;
@@ -254,12 +255,25 @@ class HeAPPlacer
                 get_criticalities(ctx, &net_crit);
 
             if (legal_hpwl < best_hpwl) {
-                best_hpwl = legal_hpwl;
-                stalled = 0;
-                // Save solution
-                solution.clear();
+                std::vector<std::tuple<CellInfo *, BelId, PlaceStrength>> candidate_solution;
+                CellInfo *unbound = nullptr;
                 for (auto cell : sorted(ctx->cells)) {
-                    solution.emplace_back(cell.second, cell.second->bel, cell.second->belStrength);
+                    if (cell.second->bel == BelId()) {
+                        unbound = cell.second;
+                        break;
+                    }
+                    candidate_solution.emplace_back(cell.second, cell.second->bel, cell.second->belStrength);
+                }
+                if (unbound == nullptr) {
+                    best_hpwl = legal_hpwl;
+                    stalled = 0;
+                    solution = std::move(candidate_solution);
+                } else {
+                    last_unbound = unbound;
+                    if (ctx->debug)
+                        log_info("Ignoring incomplete heap placer solution with unbound cell %s\n",
+                                 ctx->nameOf(unbound));
+                    ++stalled;
                 }
             } else {
                 ++stalled;
@@ -273,6 +287,11 @@ class HeAPPlacer
         }
 
         // Apply saved solution
+        if (solution.empty())
+            log_error("Heap placer failed to find a complete legal placement; every candidate left cell '%s' (type "
+                      "%s) unbound.\n",
+                      last_unbound ? ctx->nameOf(last_unbound) : "?",
+                      last_unbound ? last_unbound->type.c_str(ctx) : "?");
         for (auto &sc : solution) {
             CellInfo *cell = std::get<0>(sc);
             if (cell->bel != BelId())
