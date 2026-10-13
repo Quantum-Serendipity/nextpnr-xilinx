@@ -540,6 +540,13 @@ struct FasmBackend
                 // clock distribution (see task #47 bit-diff write-up).
                 // Suppress BUFGCTRL.* features on (tile, slot) pairs that
                 // have no actually-bound BUFGCTRL cell.
+                if (boost::contains(c, ".DATA_RATE_TQ.BUF")) {
+                    auto dot = c.find('.');
+                    bool site_has_tristate_register =
+                            dot != std::string::npos && ologic_t_registered.count(tile_name + "/" + c.substr(0, dot));
+                    if (site_has_tristate_register)
+                        continue;
+                }
                 if (boost::starts_with(c, "BUFGCTRL.BUFGCTRL_X0Y")) {
                     // Parse the slot number out of "BUFGCTRL.BUFGCTRL_X0Y<N>.<rest>".
                     const std::string prefix = "BUFGCTRL.BUFGCTRL_X0Y";
@@ -1768,6 +1775,13 @@ struct FasmBackend
         pop(); // tile
     }
 
+    // OLOGIC sites whose tristate flip-flop (TFF) holds an ODDR that drives the
+    // pad's T input, as "TILE/OLOGIC_Yn".  The pseudo-pip that crosses the site
+    // for the fabric data (D1 -> OQ) also sets DATA_RATE_TQ.BUF, the unregistered
+    // tristate; Vivado sets DATA_RATE_TQ.DDR for such a site instead, and the two
+    // are alternatives of one field.
+    std::set<std::string> ologic_t_registered;
+
     void write_iol_config(CellInfo *ci)
     {
         std::string tile = get_tile_name(ci->bel.tile);
@@ -1779,7 +1793,14 @@ struct FasmBackend
         std::string site = ctx->getBelSite(ci->bel);
         std::string sitetype = site.substr(0, site.find('_'));
         Loc siteloc = ctx->getSiteLocInTile(ci->bel);
-        push(sitetype + "_Y" + std::to_string(is_sing ? (is_top_sing ? 1 : 0) : (1 - siteloc.y)));
+        std::string site_y = sitetype + "_Y" + std::to_string(is_sing ? (is_top_sing ? 1 : 0) : (1 - siteloc.y));
+        push(site_y);
+        if (ci->type == ctx->id("OLOGICE2_TFF") || ci->type == ctx->id("OLOGICE3_TFF"))
+            ologic_t_registered.insert(tile + "/" + site_y);
+        auto site_bel_is_bound = [&](const char *bel_name) {
+            BelId bel = ctx->getBelByName(ctx->id(site + "/" + bel_name));
+            return bel != BelId() && ctx->getBoundBelCell(bel) != nullptr;
+        };
 
         if (ci->type == ctx->id("ILOGICE3_IFF")) {
             write_bit("IDDR.IN_USE");
@@ -1878,7 +1899,9 @@ struct FasmBackend
             write_bit("ODDR_TDDR.IN_USE");
             write_bit("OQUSED");
             write_bit("OSERDES.DATA_RATE_OQ.DDR");
-            write_bit("OSERDES.DATA_RATE_TQ.BUF");
+            const bool tristate_is_an_oddr = site_bel_is_bound("TFF");
+            if (!tristate_is_an_oddr)
+                write_bit("OSERDES.DATA_RATE_TQ.BUF");
 
             std::string srtype = str_or_default(ci->params, ctx->id("SRTYPE"), "SYNC");
             if (srtype == "SYNC") write_bit("OSERDES.SRTYPE.SYNC");
@@ -1887,7 +1910,7 @@ struct FasmBackend
                 write_bit("IS_" + d + "_INVERTED",
                           bool_or_default(ci->params, ctx->id("IS_" + d + "_INVERTED"), false));
 
-            auto init = int_or_default(ci->params, ctx->id("INIT"), 1);
+            auto init = int_or_default(ci->params, ctx->id("INIT"), 0);
             if (init == 0) write_bit("ZINIT_OQ");
 
             write_bit("ODDR.SRUSED", get_net_or_empty(ci, ctx->id("SR")) != nullptr);
@@ -1896,6 +1919,37 @@ struct FasmBackend
 
             auto clk_inv = bool_or_default(ci->params, ctx->id("IS_CLK_INVERTED"));
             if (!clk_inv) write_bit("ZINV_CLK");
+        } else if (ci->type == ctx->id("OLOGICE2_TFF") || ci->type == ctx->id("OLOGICE3_TFF")) {
+            // An ODDR on the pad's T input.  The tristate register runs in DDR mode,
+            // SRTYPE has its own bit, INIT is ZINIT_TQ (the library default is 0), T1 and
+            // T2 are not inverted.  The site's clock, edge and ODDR_TDDR.IN_USE bits come
+            // from the output ODDR when there is one; alone, Vivado sets SAME_EDGE
+            // whichever edge the ODDR asks for.
+            const bool is_d1_inverted = bool_or_default(ci->params, ctx->id("IS_D1_INVERTED"), false);
+            const bool is_d2_inverted = bool_or_default(ci->params, ctx->id("IS_D2_INVERTED"), false);
+            if (is_d1_inverted || is_d2_inverted)
+                log_error("%s '%s' drives a tristate input with an inverted D1 or D2, which is not supported\n",
+                          ci->type.c_str(ctx), ctx->nameOf(ci));
+
+            write_bit("OSERDES.DATA_RATE_TQ.DDR");
+            std::string srtype = str_or_default(ci->params, ctx->id("SRTYPE"), "SYNC");
+            if (srtype == "SYNC")
+                write_bit("OSERDES.TSRTYPE.SYNC");
+            write_bit("TDDR.SRUSED", get_net_or_empty(ci, ctx->id("SR")) != nullptr);
+            auto init = int_or_default(ci->params, ctx->id("INIT"), 0);
+            if (init == 0)
+                write_bit("ZINIT_TQ");
+            write_bit("ZINV_T1");
+            write_bit("ZINV_T2");
+
+            const bool output_is_an_oddr = site_bel_is_bound("OUTFF");
+            if (!output_is_an_oddr) {
+                write_bit("ODDR_TDDR.IN_USE");
+                write_bit("ODDR.DDR_CLK_EDGE.SAME_EDGE");
+                auto clk_inv = bool_or_default(ci->params, ctx->id("IS_CLK_INVERTED"));
+                if (!clk_inv)
+                    write_bit("ZINV_CLK");
+            }
         } else if (ci->type == ctx->id("OSERDESE2_OSERDESE2")) {
             write_bit("ODDR.DDR_CLK_EDGE.SAME_EDGE");
             write_bit("ODDR.SRUSED");
@@ -2039,6 +2093,8 @@ struct FasmBackend
             } else if (ci->type == ctx->id("ILOGICE3_IFF") ||
                        ci->type == ctx->id("OLOGICE2_OUTFF") ||
                        ci->type == ctx->id("OLOGICE3_OUTFF") ||
+                       ci->type == ctx->id("OLOGICE2_TFF") ||
+                       ci->type == ctx->id("OLOGICE3_TFF") ||
                        ci->type == ctx->id("OSERDESE2_OSERDESE2") ||
                        ci->type == ctx->id("ISERDESE2_ISERDESE2") ||
                        ci->type == ctx->id("IDELAYE2_IDELAYE2")   ||
