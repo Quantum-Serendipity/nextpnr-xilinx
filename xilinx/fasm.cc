@@ -23,6 +23,7 @@
 #include <boost/range/adaptor/reversed.hpp>
 #include <filesystem>
 #include <fstream>
+#include <random>
 #include <system_error>
 #include "log.h"
 #include "nextpnr.h"
@@ -5722,11 +5723,23 @@ void write_gtx_channel(CellInfo *ci)
 
 void Arch::writeFasm(const std::string &filename, bool region_only)
 {
+    std::string dest = filename;
+    bool dest_is_special = false;
     std::error_code status_ec;
-    const auto dest_status = std::filesystem::symlink_status(filename, status_ec);
-    const bool dest_is_special =
-            std::filesystem::exists(dest_status) && !std::filesystem::is_regular_file(dest_status);
-    const std::string write_path = dest_is_special ? filename : filename + ".nextpnr-tmp";
+    if (std::filesystem::is_symlink(std::filesystem::symlink_status(filename, status_ec))) {
+        std::error_code resolve_ec;
+        const auto resolved = std::filesystem::canonical(filename, resolve_ec);
+        if (resolve_ec)
+            dest_is_special = true;
+        else
+            dest = resolved.string();
+    }
+    const auto dest_status = std::filesystem::status(dest, status_ec);
+    if (std::filesystem::exists(dest_status) && !std::filesystem::is_regular_file(dest_status))
+        dest_is_special = true;
+    std::random_device tmp_entropy;
+    const std::string write_path =
+            dest_is_special ? dest : stringf("%s.nextpnr-tmp.%08x", dest.c_str(), unsigned(tmp_entropy()));
     struct PendingFasm
     {
         std::string path;
@@ -5743,7 +5756,7 @@ void Arch::writeFasm(const std::string &filename, bool region_only)
     {
         std::ofstream out(write_path);
         if (!out)
-            log_error("failed to open file %s for writing (%s)\n", write_path.c_str(), strerror(errno));
+            log_error("failed to open file %s for writing (%s)\n", filename.c_str(), strerror(errno));
 
         FasmBackend be(getCtx(), out);
         if (region_only) {
@@ -5762,15 +5775,15 @@ void Arch::writeFasm(const std::string &filename, bool region_only)
         be.write_fasm();
         out.flush();
         if (!out.good())
-            log_error("failed to write FASM file %s\n", write_path.c_str());
+            log_error("failed to write FASM file %s\n", filename.c_str());
     }
 
     if (dest_is_special)
         return;
     std::error_code rename_ec;
-    std::filesystem::rename(write_path, filename, rename_ec);
+    std::filesystem::rename(write_path, dest, rename_ec);
     if (rename_ec)
-        log_error("failed to rename FASM file %s to %s (%s)\n", write_path.c_str(), filename.c_str(),
+        log_error("failed to rename FASM file %s to %s (%s)\n", write_path.c_str(), dest.c_str(),
                   rename_ec.message().c_str());
     pending.commit = true;
 }
