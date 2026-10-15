@@ -985,18 +985,42 @@ void XilinxPacker::pack_constants()
 
     std::vector<std::tuple<CellInfo *, IdString, bool>> const_ports;
 
+    const std::unordered_set<IdString> hard_block_clock_types = {
+            ctx->id("RAMB18E1"), ctx->id("RAMB36E1"), ctx->id("RAMB18E2"),
+            ctx->id("RAMB36E2"), ctx->id("DSP48E1"),  ctx->id("DSP48E2")};
+    const std::unordered_set<IdString> hard_block_clock_pins = {ctx->id("CLKARDCLK"), ctx->id("CLKBWRCLK"),
+                                                                ctx->id("CLK")};
+    int kept_undriven_clocks = 0;
+    auto is_frontend_const_net = [&](const NetInfo *net, const CellInfo *cell, IdString pin) {
+        std::string name = net->name.str(ctx);
+        size_t uniq = name.rfind("__unique__");
+        if (uniq != std::string::npos && uniq + 10 < name.size() &&
+            name.find_first_not_of("0123456789", uniq + 10) == std::string::npos)
+            name.resize(uniq);
+        const std::string tail = cell->name.str(ctx) + "." + pin.str(ctx) + "$const";
+        return name.size() >= tail.size() && name.compare(name.size() - tail.size(), tail.size(), tail) == 0;
+    };
+
     for (auto cell : sorted(ctx->cells)) {
         CellInfo *ci = cell.second;
         if (!tied_pins.count(ci->type))
             continue;
         auto &tp = tied_pins.at(ci->type);
         for (auto port : tp) {
-            if (cell.second->ports.count(port.first) && cell.second->ports.at(port.first).net != nullptr &&
-                cell.second->ports.at(port.first).net->driver.cell != nullptr)
+            NetInfo *pn = ci->ports.count(port.first) ? ci->ports.at(port.first).net : nullptr;
+            if (pn != nullptr && pn->driver.cell != nullptr)
                 continue;
+            if (pn != nullptr && hard_block_clock_types.count(ci->type) && hard_block_clock_pins.count(port.first) &&
+                !is_frontend_const_net(pn, ci, port.first)) {
+                ++kept_undriven_clocks;
+                continue;
+            }
             const_ports.emplace_back(ci, port.first, port.second);
         }
     }
+
+    if (kept_undriven_clocks > 0)
+        log_info("    kept %d hard-block clock pin(s) on an undriven net rather than tying them\n", kept_undriven_clocks);
 
     for (auto net : sorted(ctx->nets)) {
         NetInfo *ni = net.second;
