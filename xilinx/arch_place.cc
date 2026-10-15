@@ -23,6 +23,7 @@
 #include "design_utils.h"
 #include "log.h"
 #include "nextpnr.h"
+#include "place_common.h"
 #include "timing.h"
 #include "util.h"
 NEXTPNR_NAMESPACE_BEGIN
@@ -1369,6 +1370,17 @@ void Arch::fixupPlacement()
         }
     }
     log_info("Running post-placement legalisation...\n");
+    auto region_outside = [&]() {
+        int n = 0;
+        for (auto &cp : cells) {
+            CellInfo *ci = cp.second.get();
+            if (ci->bel != BelId() && !check_cell_bel_region(ci, ci->bel))
+                ++n;
+        }
+        return n;
+    };
+    const int region_outside_before = region.empty() ? 0 : region_outside();
+    int region_stuck = 0;
     // Validity-repair pass: some bind paths (heap solution-apply, detailed
     // refine) strand a cell at an invalid bel -- a LUT6 on a 5LUT (its 6th
     // input is invisible at bind time because ABC LUTs carry logical I0..I5
@@ -1447,7 +1459,7 @@ void Arch::fixupPlacement()
                     Loc ploc = work[i].second;
                     BelId tb = getBelByLocation(ploc);
                     if (tb == BelId() || !checkBelAvail(tb) || getBelType(tb) != vc->type ||
-                        !isValidBelForCell(vc, tb))
+                        !isValidBelForCell(vc, tb) || !check_cell_bel_region(vc, tb))
                         return false;
                     out.push_back(tb);
                     for (auto child : vc->constr_children) {
@@ -1515,11 +1527,23 @@ void Arch::fixupPlacement()
                     if (orig_bels[i] != BelId())
                         bindBel(orig_bels[i], members[i], orig_strength[i]);
                 log_warning("post-place repair: no valid placement for '%s'\n", root->name.c_str(this));
+                for (CellInfo *m : members)
+                    if (m->region != nullptr) {
+                        ++region_stuck;
+                        break;
+                    }
             } else if (mbels != orig_bels)
                 ++fixed;
         }
         if (fixed)
             log_info("post-place repair: relocated %d stranded cluster(s)/cell(s) to valid bels\n", fixed);
+        if (!region.empty())
+            log_info("post-place repair: region-constrained cell(s) outside their region: %d before repair, %d after\n",
+                     region_outside_before, region_outside());
+        if (region_stuck)
+            log_error("post-place repair: %d region-constrained cluster(s)/cell(s) found no valid bel inside their "
+                      "region\n",
+                      region_stuck);
         std::unordered_set<int> bad_tiles;
         for (auto &cp : cells) {
             CellInfo *ci = cp.second.get();
