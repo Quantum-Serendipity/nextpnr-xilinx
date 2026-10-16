@@ -14,6 +14,7 @@ CHIPDB=/path/to/xc7a100tcsg324.bin YOSYS=yosys NEXTPNR=/path/to/nextpnr-xilinx .
 | `mmcm_rst`, `mmcm_pwrdwn` | MMCME2_ADV RST, PWRDWN | `ZINV_<pin>` | `tie1` |
 | `bram_rstreg` | RAMB18E1 RSTREGARSTREG | no `ZINV_RSTREGARSTREG` | `tie1` |
 | `bufgctrl_ce1` | BUFGCTRL CE1 | no `ZINV_CE1` | `tie1` |
+| `bufgce_ce` | BUFGCE CE, renamed CE0 on the BUFGCTRL it becomes | `ZINV_CE0` only on the fabric BUFG | `tie1` (`tie0isinv` only) |
 | `dsp_alumode0` | DSP48E1 ALUMODE[0] | no `ZIS_ALUMODE_INVERTED[0]` | `tie1` |
 | `dsp_inmode1` | DSP48E1 INMODE[1], tied in the DSP tile | no `DSP_0_INMODE1.DSP_VCC_*` | `tie1` |
 | `oddr_d1` | ODDR D1 | `IS_D1_INVERTED` | `tie1` (`tie0isinv` only) |
@@ -24,6 +25,8 @@ Two comparisons are used:
 - **Sorted whole FASM, line for line.** This is the fallback. It is only order-insensitive; every feature line, routing included, must match.
 
 The ODDR designs pin their one fabric register with a `BEL` attribute, so that placement does not move between them.
+
+`bufgce_i_isinv` sets `IS_I_INVERTED` on a BUFGCE. BUFGCTRL has no I0 or I1 inversion bit in the database, so the build must stop rather than drop the inversion.
 
 `pllbase_pwrdwn_tie0` and `pllbase_pwrdwn_tie1` check that `PLLE2_BASE` still gets `ZINV_PWRDWN` only when PWRDWN is tied to 0.
 

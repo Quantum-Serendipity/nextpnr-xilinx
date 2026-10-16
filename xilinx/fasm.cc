@@ -2362,6 +2362,13 @@ struct FasmBackend
                 auto xy = ctx->getSiteLocInTile(ci->bel);
                 bufgctrl_used_y[ci->bel.tile].insert(xy.y);
                 push("BUFGCTRL.BUFGCTRL_X" + std::to_string(xy.x) + "Y" + std::to_string(xy.y));
+                for (auto pin : {"I0", "I1"})
+                    if (bool_or_default(ci->params, ctx->id(std::string("IS_") + pin + "_INVERTED")))
+                        log_error("%s '%s' at %s sets IS_%s_INVERTED, but BUFGCTRL has no %s inversion bit in the "
+                                  "database, so the inversion cannot be programmed. Invert the clock upstream "
+                                  "instead.\n",
+                                  str_or_default(ci->attrs, ctx->id("X_ORIG_TYPE"), "BUFGCTRL").c_str(),
+                                  ctx->nameOf(ci), get_tile_name(ci->bel.tile).c_str(), pin, pin);
                 write_bit("IN_USE");
                 write_bit("INIT_OUT", bool_or_default(ci->params, ctx->id("INIT_OUT")));
                 write_bit("IS_IGNORE0_INVERTED", bool_or_default(ci->params, ctx->id("IS_IGNORE0_INVERTED")));

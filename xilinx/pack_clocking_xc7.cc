@@ -81,6 +81,14 @@ void XC7Packer::prepare_clocking()
             ci->type = ctx->id("BUFGCTRL");
             rename_port(ctx, ci, ctx->id("I"), ctx->id("I0"));
             rename_port(ctx, ci, ctx->id("CE"), ctx->id("CE0"));
+            for (auto pin : {std::make_pair("I", "I0"), std::make_pair("CE", "CE0")}) {
+                IdString from = ctx->id(std::string("IS_") + pin.first + "_INVERTED");
+                auto found = ci->params.find(from);
+                if (found == ci->params.end())
+                    continue;
+                ci->params[ctx->id(std::string("IS_") + pin.second + "_INVERTED")] = found->second;
+                ci->params.erase(from);
+            }
             save_orig_port("I0",  "I");
             save_orig_port("CE0", "CE");
             save_orig_port("O",   "O");
