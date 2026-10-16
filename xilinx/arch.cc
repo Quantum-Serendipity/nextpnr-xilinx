@@ -4045,7 +4045,7 @@ TimingPortClass Arch::getPortTimingClass(const CellInfo *cell, IdString port, in
         if (port == (xc7 ? id_CK : id_CLK))
             return TMG_CLOCK_INPUT;
         else if (port == id_Q) {
-            clockInfoCount = 1;
+            clockInfoCount = cell->ffInfo.is_latch ? 2 : 1;
             return TMG_REGISTER_OUTPUT;
         } else {
             clockInfoCount = 1;
@@ -4128,6 +4128,12 @@ TimingClockingInfo Arch::getPortClockingInfo(const CellInfo *cell, IdString port
     info.clockToQ.min = getDelayFromNS(0.117).delay;
     info.clock_port = xc7 ? id_CK : id_CLK;
     info.edge = RISING_EDGE;
+    bool latch_open_launch = false;
+    if (cell->type == id_SLICE_FFX) {
+        bool closes_on_fall = cell->ffInfo.is_clkinv != cell->ffInfo.is_latch;
+        latch_open_launch = cell->ffInfo.is_latch && port == id_Q && index == 0;
+        info.edge = closes_on_fall != latch_open_launch ? FALLING_EDGE : RISING_EDGE;
+    }
 
     if (!xc7 || !chipdb_has_timing_checks || cell->type != id_SLICE_FFX || cell->bel == BelId())
         return info;
@@ -4140,6 +4146,15 @@ TimingClockingInfo Arch::getPortClockingInfo(const CellInfo *cell, IdString port
 
     if (port == id_Q) {
         DelayInfo ctq;
+        if (cell->ffInfo.is_latch && !latch_open_launch && vi == 2) {
+            if (!xc7_cell_timing_lookup(tt_id, inst_id, variant, id_D, id_Q, ctq, &ctq.min))
+                log_error("prjxray has no D->Q delay for %s in tile type %s (latch '%s' at %s), so the data a "
+                          "transparent latch passes at its closing edge would be timed against a guess\n",
+                          variant.c_str(this), getBelTileType(cell->bel).c_str(this), cell->name.c_str(this),
+                          getBelName(cell->bel).c_str(this));
+            info.clockToQ = ctq;
+            return info;
+        }
         if (xc7_cell_timing_lookup(tt_id, inst_id, variant, id_CLK, id_Q, ctq, &ctq.min))
             info.clockToQ = ctq;
         else
