@@ -109,6 +109,8 @@ Arch::Arch(ArchArgs args) : args(args)
     }
     id_ff_din = id("DIN");
     id_slicem_inst = id("SLICEM");
+    id_lut5_shfreg = id("LUT_OR_MEM5SHFREG");
+    id_lut6_shfreg = id("LUT_OR_MEM6SHFREG");
     const TimingDataPOD *td = chip_info->timing_data.get();
     for (int t = 0; td != nullptr && t < td->num_tile_types && !chipdb_has_timing_checks; t++) {
         const TileCellTimingPOD &tt = td->tile_cell_timings[t];
@@ -3918,22 +3920,41 @@ Arch::SyncPinTiming Arch::dsp48e1PinTiming(const CellInfo *cell, IdString port) 
     return t;
 }
 
-TimingPortClass Arch::syncPinClass(const CellInfo *cell, const SyncPinTiming &t, int &clockInfoCount) const
+TimingPortClass Arch::syncPinClass(const CellInfo *cell, IdString port, const SyncPinTiming &t,
+                                   int &clockInfoCount) const
 {
     if (t.kind == SYNC_PIN_NONE)
         return TMG_IGNORE;
     if (t.kind == SYNC_PIN_COMB_INPUT)
         return TMG_COMB_INPUT;
     const NetInfo *clk = get_net_or_empty(cell, t.clock);
-    bool clk_live = clk != nullptr && clk->driver.cell != nullptr && clk->driver.cell->type != id_PSEUDO_VCC &&
-                    clk->driver.cell->type != id_PSEUDO_GND;
+    bool clk_const = clk != nullptr && clk->driver.cell != nullptr &&
+                     (clk->driver.cell->type == id_PSEUDO_VCC || clk->driver.cell->type == id_PSEUDO_GND);
+    bool clk_live = clk != nullptr && !clk_const;
+    if (clk_live && clk->driver.cell == nullptr && !undriven_clock_logged.count(clk->name) &&
+        undriven_clock_logged.insert(clk->name).second)
+        log_info("timing: clock net '%s' has no driver; the %s pins on it are timed against it by name (first "
+                 "'%s' pin %s)\n",
+                 clk->name.c_str(this), cell->type.c_str(this), cell->name.c_str(this), t.clock.c_str(this));
     if (t.kind == SYNC_PIN_COMB_OUTPUT) {
         if (clk_live && t.clk_to_q_max > 0)
             clockInfoCount = 1;
         return TMG_COMB_OUTPUT;
     }
-    if (!clk_live)
+    if (!clk_live) {
+        const NetInfo *pn = get_net_or_empty(cell, port);
+        bool live = pn != nullptr &&
+                    (t.kind == SYNC_PIN_OUTPUT
+                             ? !pn->users.empty()
+                             : pn->driver.cell != nullptr && pn->driver.cell->type != id_PSEUDO_VCC &&
+                                       pn->driver.cell->type != id_PSEUDO_GND);
+        if (live && t.kind != SYNC_PIN_CLOCK && !unclocked_cell_logged.count(cell->name) &&
+            unclocked_cell_logged.insert(cell->name).second)
+            log_info("timing: '%s' (%s) pin %s carries a signal but is not timed, because its clock pin %s is %s\n",
+                     cell->name.c_str(this), cell->type.c_str(this), port.c_str(this), t.clock.c_str(this),
+                     clk == nullptr ? "unconnected" : "on a constant");
         return TMG_IGNORE;
+    }
     if (t.kind == SYNC_PIN_CLOCK)
         return TMG_CLOCK_INPUT;
     clockInfoCount = 1;
@@ -4034,18 +4055,19 @@ bool Arch::getCellDelay(const CellInfo *cell, IdString fromPort, IdString toPort
 TimingPortClass Arch::getPortTimingClass(const CellInfo *cell, IdString port, int &clockInfoCount) const
 {
     if (cell->type == id_SLICE_LUTX) {
-        if (get_net_or_empty(cell, id_O5) == nullptr && get_net_or_empty(cell, id_O6) == nullptr)
+        if (get_net_or_empty(cell, id_O5) == nullptr && get_net_or_empty(cell, id_O6) == nullptr &&
+            get_net_or_empty(cell, id_MC31) == nullptr)
             return TMG_IGNORE;
         if (port == id_A1 || port == id_A2 || port == id_A3 || port == id_A4 || port == id_A5 || port == id_A6)
             return TMG_COMB_INPUT;
-        return syncPinClass(cell, dramPinTiming(cell, port, false), clockInfoCount);
+        return syncPinClass(cell, port, dramPinTiming(cell, port, false), clockInfoCount);
     } else if (cell->type == id_CARRY4 && cell->bel != BelId()) {
         return cell->ports.at(port).type == PORT_OUT ? TMG_COMB_OUTPUT : TMG_COMB_INPUT;
     } else if (cell->type == id_SLICE_FFX) {
         if (port == (xc7 ? id_CK : id_CLK))
             return TMG_CLOCK_INPUT;
         else if (port == id_Q) {
-            clockInfoCount = 1;
+            clockInfoCount = cell->ffInfo.is_latch ? 2 : 1;
             return TMG_REGISTER_OUTPUT;
         } else {
             clockInfoCount = 1;
@@ -4077,11 +4099,11 @@ TimingPortClass Arch::getPortTimingClass(const CellInfo *cell, IdString port, in
                 return TMG_COMB_INPUT;
             return TMG_IGNORE;
         }
-        return syncPinClass(cell, dsp48e1PinTiming(cell, port), clockInfoCount);
+        return syncPinClass(cell, port, dsp48e1PinTiming(cell, port), clockInfoCount);
     } else if (cell->type == id_RAMB18E1_RAMB18E1 || cell->type == id_RAMB36E1_RAMB36E1) {
-        return syncPinClass(cell, bramPinTiming(cell, port), clockInfoCount);
+        return syncPinClass(cell, port, bramPinTiming(cell, port), clockInfoCount);
     } else if (cell->type == id_ICAP_ICAP) {
-        return syncPinClass(cell, icapPinTiming(cell, port), clockInfoCount);
+        return syncPinClass(cell, port, icapPinTiming(cell, port), clockInfoCount);
     }
     return TMG_IGNORE;
 }
@@ -4128,6 +4150,12 @@ TimingClockingInfo Arch::getPortClockingInfo(const CellInfo *cell, IdString port
     info.clockToQ.min = getDelayFromNS(0.117).delay;
     info.clock_port = xc7 ? id_CK : id_CLK;
     info.edge = RISING_EDGE;
+    bool latch_open_launch = false;
+    if (cell->type == id_SLICE_FFX) {
+        bool closes_on_fall = cell->ffInfo.is_clkinv != cell->ffInfo.is_latch;
+        latch_open_launch = cell->ffInfo.is_latch && port == id_Q && index == 0;
+        info.edge = closes_on_fall != latch_open_launch ? FALLING_EDGE : RISING_EDGE;
+    }
 
     if (!xc7 || !chipdb_has_timing_checks || cell->type != id_SLICE_FFX || cell->bel == BelId())
         return info;
@@ -4140,6 +4168,15 @@ TimingClockingInfo Arch::getPortClockingInfo(const CellInfo *cell, IdString port
 
     if (port == id_Q) {
         DelayInfo ctq;
+        if (cell->ffInfo.is_latch && !latch_open_launch && vi == 2) {
+            if (!xc7_cell_timing_lookup(tt_id, inst_id, variant, id_D, id_Q, ctq, &ctq.min))
+                log_error("prjxray has no D->Q delay for %s in tile type %s (latch '%s' at %s), so the data a "
+                          "transparent latch passes at its closing edge would be timed against a guess\n",
+                          variant.c_str(this), getBelTileType(cell->bel).c_str(this), cell->name.c_str(this),
+                          getBelName(cell->bel).c_str(this));
+            info.clockToQ = ctq;
+            return info;
+        }
         if (xc7_cell_timing_lookup(tt_id, inst_id, variant, id_CLK, id_Q, ctq, &ctq.min))
             info.clockToQ = ctq;
         else
@@ -4194,16 +4231,19 @@ Arch::SyncPinTiming Arch::dramPinTiming(const CellInfo *cell, IdString port, boo
     if (is_out || port == id_A1 || port == id_A2 || port == id_A3 || port == id_A4 || port == id_A5 ||
         port == id_A6)
         t.kind = is_out ? SYNC_PIN_COMB_OUTPUT : SYNC_PIN_COMB_INPUT;
-    if (!xc7 || !cell->attrs.count(id_X_LUT_AS_DRAM))
+    bool is_srl = cell->lutInfo.is_srl;
+    if (!xc7 || !(cell->lutInfo.is_memory || is_srl))
         return t;
     t.clock = id_CLK;
     if (port == id_CLK) {
         t.kind = SYNC_PIN_CLOCK;
         return t;
     }
-    if (is_out) {
-        t.clk_to_q_max = 1.190;
-        t.clk_to_q_min = 0.340;
+    if (is_out || (is_srl && port == id_MC31)) {
+        if (port == id_MC31)
+            t.kind = SYNC_PIN_OUTPUT;
+        t.clk_to_q_max = is_srl ? 1.481 : 1.190;
+        t.clk_to_q_min = is_srl ? 0.236 : 0.340;
         if (lookup)
             dramClockToOut(cell, port, t.clk_to_q_max, t.clk_to_q_min);
         return t;
@@ -4213,8 +4253,8 @@ Arch::SyncPinTiming Arch::dramPinTiming(const CellInfo *cell, IdString port, boo
     if (std::find(std::begin(write_pins), std::end(write_pins), port) == std::end(write_pins))
         return t;
     t.kind = SYNC_PIN_INPUT;
-    t.setup = 0.654;
-    t.hold = 0.745;
+    t.setup = is_srl ? 0.638 : 0.654;
+    t.hold = is_srl ? 0.269 : 0.745;
     if (!lookup)
         return t;
     double v;
@@ -4225,14 +4265,29 @@ Arch::SyncPinTiming Arch::dramPinTiming(const CellInfo *cell, IdString port, boo
     return t;
 }
 
-bool Arch::dramCheck(const CellInfo *cell, IdString port, TimingCheckType type, double &value_ns) const
+bool Arch::dramTimingSite(const CellInfo *cell, int &tt_id, int &inst_id, IdString &variant, bool &is_lut5) const
 {
     if (cell->bel == BelId())
         return false;
-    int tt_id = locInfo(cell->bel).timing_index;
-    int inst_id = locInfo(cell->bel).bel_data[cell->bel.index].timing_inst;
-    bool is_lut5 = (locInfo(cell->bel).bel_data[cell->bel.index].z & 0xF) == BEL_5LUT;
-    IdString variant = is_lut5 ? id_LUT_OR_MEM5LRAM : id_LUT_OR_MEM6LRAM;
+    const BelInfoPOD &bel = locInfo(cell->bel).bel_data[cell->bel.index];
+    IdString tile_type = getBelTileType(cell->bel);
+    if ((tile_type != id_CLBLM_L && tile_type != id_CLBLM_R) || bel.z >= 64)
+        return false;
+    tt_id = locInfo(cell->bel).timing_index;
+    inst_id = bel.timing_inst;
+    is_lut5 = (bel.z & 0xF) == BEL_5LUT;
+    variant = cell->lutInfo.is_srl ? (is_lut5 ? id_lut5_shfreg : id_lut6_shfreg)
+                                   : (is_lut5 ? id_LUT_OR_MEM5LRAM : id_LUT_OR_MEM6LRAM);
+    return true;
+}
+
+bool Arch::dramCheck(const CellInfo *cell, IdString port, TimingCheckType type, double &value_ns) const
+{
+    int tt_id, inst_id;
+    IdString variant;
+    bool is_lut5;
+    if (!dramTimingSite(cell, tt_id, inst_id, variant, is_lut5))
+        return false;
     if (port != id_DI1 && port != id_DI2)
         inst_id = xc7_timing_instance(tt_id, id_slicem_inst);
     delay_t vmax = 0, vmin = 0;
@@ -4244,27 +4299,28 @@ bool Arch::dramCheck(const CellInfo *cell, IdString port, TimingCheckType type, 
     IdString tile_type = getBelTileType(cell->bel);
     if (chipdb_has_timing_checks)
         log_error("prjxray has no %s check for %s.%s in tile type %s (cell '%s' at %s), and this chipdb carries "
-                  "timing checks, so the distributed-RAM write pin would be timed against a guess\n",
+                  "timing checks, so the %s write pin would be timed against a guess\n",
                   type == TIMING_CHECK_SETUP ? "setup" : "hold", variant.c_str(this), port.c_str(this),
-                  tile_type.c_str(this), cell->name.c_str(this), getBelName(cell->bel).c_str(this));
+                  tile_type.c_str(this), cell->name.c_str(this), getBelName(cell->bel).c_str(this),
+                  cell->lutInfo.is_srl ? "shift-register" : "distributed-RAM");
     if (ff_timing_fallback_logged.emplace(tile_type, variant, port, int(type)).second)
         log_warning("chipdb carries no timing checks, so %s.%s in tile type %s (first cell '%s' at %s) uses the "
                     "fixed %s %.3fns\n",
                     variant.c_str(this), port.c_str(this), tile_type.c_str(this), cell->name.c_str(this),
                     getBelName(cell->bel).c_str(this), type == TIMING_CHECK_SETUP ? "setup" : "hold",
-                    type == TIMING_CHECK_SETUP ? 0.654 : 0.745);
+                    cell->lutInfo.is_srl ? (type == TIMING_CHECK_SETUP ? 0.638 : 0.269)
+                                         : (type == TIMING_CHECK_SETUP ? 0.654 : 0.745));
     return false;
 }
 
 bool Arch::dramClockToOut(const CellInfo *cell, IdString port, double &max_ns, double &min_ns) const
 {
-    if (cell->bel == BelId())
+    int tt_id, inst_id;
+    IdString variant;
+    bool is_lut5;
+    if (!dramTimingSite(cell, tt_id, inst_id, variant, is_lut5))
         return false;
-    int tt_id = locInfo(cell->bel).timing_index;
-    int inst_id = locInfo(cell->bel).bel_data[cell->bel.index].timing_inst;
-    bool is_lut5 = (locInfo(cell->bel).bel_data[cell->bel.index].z & 0xF) == BEL_5LUT;
-    IdString variant = is_lut5 ? id_LUT_OR_MEM5LRAM : id_LUT_OR_MEM6LRAM;
-    IdString to = is_lut5 ? id_O5 : port;
+    IdString to = is_lut5 && port != id_MC31 ? id_O5 : port;
     DelayInfo d;
     delay_t dmin = 0;
     if (xc7_cell_timing_lookup(tt_id, inst_id, variant, id_CLK, to, d, &dmin)) {
@@ -4273,10 +4329,11 @@ bool Arch::dramClockToOut(const CellInfo *cell, IdString port, double &max_ns, d
         return true;
     }
     if (inst_id != -1)
-        log_error("prjxray has no CLK->%s delay for %s in tile type %s (cell '%s' at %s), so the distributed-RAM "
+        log_error("prjxray has no CLK->%s delay for %s in tile type %s (cell '%s' at %s), so the %s "
                   "read output would be timed against a guess\n",
                   to.c_str(this), variant.c_str(this), getBelTileType(cell->bel).c_str(this),
-                  cell->name.c_str(this), getBelName(cell->bel).c_str(this));
+                  cell->name.c_str(this), getBelName(cell->bel).c_str(this),
+                  cell->lutInfo.is_srl ? "shift-register" : "distributed-RAM");
     return false;
 }
 

@@ -20,6 +20,7 @@ YOSYS=$(resolve_tool "${YOSYS:-yosys}")
 NEXTPNR=$(resolve_tool "${NEXTPNR:-$HERE/../../../build/nextpnr-xilinx}")
 CHIPDB=$(abspath "${CHIPDB:?set CHIPDB to an xc7a100tfgg484.bin}")
 SEEDS=${SEEDS:-1 2 3}
+PLACERS=${PLACERS:-heap sa}
 OUT=$(abspath "${OUT:-$(mktemp -d)}")
 mkdir -p "$OUT" || exit 1
 cd "$HERE" || exit 1
@@ -37,34 +38,54 @@ if ! "$YOSYS" -q -l "$OUT/yosys.log" \
     exit 1
 fi
 
+for placer in $PLACERS; do
 for s in $SEEDS; do
-    NEXTPNR_SETUP_EXPORT="$OUT/s$s.setup.tsv" "$NEXTPNR" --chipdb "$CHIPDB" --xdc "$HERE/dram-timing.xdc" \
-        --json "$OUT/top.json" --write "$OUT/s$s.routed.json" --fasm "$OUT/s$s.fasm" --log "$OUT/s$s.log" \
-        -q --seed "$s" >/dev/null 2>&1
-    rc=$?
-    guess=$(grep -c 'against a guess' "$OUT/s$s.log")
-    if [ "$rc" -eq 0 ] && [ "$guess" -eq 0 ]; then
-        report "PASS seed $s: place and route rc 0"
+    tag="$placer seed $s"
+    base="$OUT/$placer.s$s"
+    if [ "$placer" = sa ]; then
+        NEXTPNR_SETUP_EXPORT="$base.setup.tsv" "$NEXTPNR" --chipdb "$CHIPDB" --xdc "$HERE/dram-timing.xdc" \
+            --json "$OUT/top.json" --write "$base.placed.json" --log "$base.log" \
+            --placer sa --no-route -q --seed "$s" >/dev/null 2>&1
     else
-        report "FAIL seed $s: rc $rc, $guess timed-against-a-guess error(s): $(grep -m1 '^ERROR' "$OUT/s$s.log")"
+        NEXTPNR_SETUP_EXPORT="$base.setup.tsv" "$NEXTPNR" --chipdb "$CHIPDB" --xdc "$HERE/dram-timing.xdc" \
+            --json "$OUT/top.json" --write "$base.routed.json" --fasm "$base.fasm" --log "$base.log" \
+            --placer "$placer" -q --seed "$s" >/dev/null 2>&1
+    fi
+    rc=$?
+    guess=$(grep -c 'against a guess' "$base.log")
+    if [ "$rc" -eq 0 ] && [ "$guess" -eq 0 ]; then
+        report "PASS $tag: rc 0"
+    else
+        report "FAIL $tag: rc $rc, $guess timed-against-a-guess error(s): $(grep -m1 '^ERROR' "$base.log")"
+        continue
+    fi
+    if [ "$placer" = sa ]; then
+        rows=$(awk -F'\t' 'NR > 1 && $1 ~ /\/DPR[0-9]*$|\/SP[0-9]*$/ && $2 ~ /^(WE|WA[1-8]|DI[12])$/' \
+            "$base.setup.tsv" | wc -l)
+        if [ "$rows" -gt 0 ]; then
+            report "PASS $tag: $rows distributed-RAM write-pin setup row(s) exported after placement"
+        else
+            report "FAIL $tag: no distributed-RAM write-pin setup row exported after placement"
+        fi
         continue
     fi
 
-    ll=$(grep -cE '^CLBLL_[LR]_X[0-9]+Y[0-9]+\.SLICE[LM]_X[01]\.[A-D]LUT\.(RAM|SMALL|SRL)' "$OUT/s$s.fasm")
-    lm=$(grep -cE '^CLBLM_[LR]_X[0-9]+Y[0-9]+\.SLICEM_X0\.[A-D]LUT\.RAM' "$OUT/s$s.fasm")
+    ll=$(grep -cE '^(CLBLL_[LR]_X[0-9]+Y[0-9]+\.SLICE[LM]_X[01]|CLBLM_[LR]_X[0-9]+Y[0-9]+\.SLICEL_X1)\.[A-D]LUT\.(RAM|SMALL|SRL)' "$base.fasm")
+    lm=$(grep -cE '^CLBLM_[LR]_X[0-9]+Y[0-9]+\.SLICEM_X0\.[A-D]LUT\.RAM' "$base.fasm")
     if [ "$ll" -eq 0 ] && [ "$lm" -gt 0 ]; then
-        report "PASS seed $s: $lm SLICEM LUT RAM feature line(s), none in a CLBLL tile"
+        report "PASS $tag: $lm SLICEM LUT RAM feature line(s), none in a SLICEL"
     else
-        report "FAIL seed $s: $lm SLICEM LUT RAM feature line(s), $ll RAM/SRL feature line(s) in a CLBLL tile"
+        report "FAIL $tag: $lm SLICEM LUT RAM feature line(s), $ll RAM/SRL feature line(s) in a SLICEL"
     fi
 
     rows=$(awk -F'\t' 'NR > 1 && $1 ~ /\/DPR[0-9]*$|\/SP[0-9]*$/ && $2 ~ /^(WE|WA[1-8]|DI[12])$/' \
-        "$OUT/s$s.setup.tsv" | wc -l)
+        "$base.setup.tsv" | wc -l)
     if [ "$rows" -gt 0 ]; then
-        report "PASS seed $s: $rows distributed-RAM write-pin setup row(s) exported"
+        report "PASS $tag: $rows distributed-RAM write-pin setup row(s) exported"
     else
-        report "FAIL seed $s: no distributed-RAM write-pin setup row exported"
+        report "FAIL $tag: no distributed-RAM write-pin setup row exported"
     fi
+done
 done
 
 echo "artefacts kept in $OUT"

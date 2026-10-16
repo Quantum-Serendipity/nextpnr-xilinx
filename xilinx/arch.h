@@ -1915,6 +1915,7 @@ struct Arch : BaseCtx
     SyncPinTiming bramPinTiming(const CellInfo *cell, IdString port) const;
     SyncPinTiming icapPinTiming(const CellInfo *cell, IdString port) const;
     SyncPinTiming dramPinTiming(const CellInfo *cell, IdString port, bool lookup) const;
+    bool dramTimingSite(const CellInfo *cell, int &tt_id, int &inst_id, IdString &variant, bool &is_lut5) const;
     bool dramCheck(const CellInfo *cell, IdString port, TimingCheckType type, double &value_ns) const;
     bool dramClockToOut(const CellInfo *cell, IdString port, double &max_ns, double &min_ns) const;
     int xc7_timing_instance(int tt_id, IdString inst_name) const;
@@ -1950,7 +1951,9 @@ struct Arch : BaseCtx
     Dsp48e1Config dsp48e1Config(const CellInfo *cell) const;
     Dsp48e1Stage dsp48e1InputStage(const Dsp48e1Config &cfg, const std::string &base) const;
     SyncPinTiming dsp48e1PinTiming(const CellInfo *cell, IdString port) const;
-    TimingPortClass syncPinClass(const CellInfo *cell, const SyncPinTiming &t, int &clockInfoCount) const;
+    TimingPortClass syncPinClass(const CellInfo *cell, IdString port, const SyncPinTiming &t,
+                                 int &clockInfoCount) const;
+    mutable std::unordered_set<IdString> undriven_clock_logged, unclocked_cell_logged;
     // Get the TimingClockingInfo of a port
     TimingClockingInfo getPortClockingInfo(const CellInfo *cell, IdString port, int index) const;
 
@@ -1969,6 +1972,7 @@ struct Arch : BaseCtx
                              bool expected, double fallback_ns) const;
     bool chipdb_has_timing_checks = false;
     IdString id_ff_variant[3], id_ff_variant_qh[3], id_ff_variant_ql[3], id_ff_din, id_slicem_inst;
+    IdString id_lut5_shfreg, id_lut6_shfreg;
     mutable std::set<std::tuple<IdString, IdString, IdString, int>> ff_timing_fallback_logged;
 
     // Whether or not a given cell can be placed at a given Bel
