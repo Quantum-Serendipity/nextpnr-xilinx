@@ -701,6 +701,7 @@ struct BaseCtx
 
     // Project settings and config switches
     std::unordered_map<IdString, Property> settings;
+    bool target_freq_is_default = false;
 
     // Placed nets and cells.
     std::unordered_map<IdString, std::unique_ptr<NetInfo>> nets;

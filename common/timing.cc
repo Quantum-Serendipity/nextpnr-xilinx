@@ -1810,7 +1810,7 @@ void timing_analysis(Context *ctx, bool print_histogram, bool print_fmax, bool p
             float target = ctx->setting<float>("target_freq") / 1e6;
             if (ctx->nets.at(clock.first)->clkconstr)
                 target = 1000 / ctx->getDelayNS(ctx->nets.at(clock.first)->clkconstr->period.minDelay());
-            else if (bool_or_default(ctx->settings, ctx->id("timing/defaultTargetFreq"), false)) {
+            else if (ctx->target_freq_is_default) {
                 log_info("Max frequency for clock %*s'%s': %.02f MHz (UNCONSTRAINED: no clock constraint reaches "
                          "it and no --freq was given, so the %.02f MHz default is not a requirement)\n",
                          width, "", clock_name.c_str(), clock_fmax[clock.first], target);

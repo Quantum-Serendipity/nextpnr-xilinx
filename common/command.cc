@@ -260,7 +260,7 @@ void CommandHandler::setupContext(Context *ctx)
         auto freq = vm["freq"].as<double>();
         if (freq > 0) {
             ctx->settings[ctx->id("target_freq")] = std::to_string(freq * 1e6);
-            ctx->settings[ctx->id("timing/defaultTargetFreq")] = false;
+            ctx->target_freq_is_default = false;
         }
     }
 
@@ -270,7 +270,7 @@ void CommandHandler::setupContext(Context *ctx)
     // Setting default values
     if (ctx->settings.find(ctx->id("target_freq")) == ctx->settings.end()) {
         ctx->settings[ctx->id("target_freq")] = std::to_string(12e6);
-        ctx->settings[ctx->id("timing/defaultTargetFreq")] = true;
+        ctx->target_freq_is_default = true;
     }
     if (ctx->settings.find(ctx->id("timing_driven")) == ctx->settings.end())
         ctx->settings[ctx->id("timing_driven")] = true;
