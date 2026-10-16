@@ -1,0 +1,34 @@
+# Partition safety
+
+Places `top.v` once on an `xc7a100tfgg484`, with its inputs on the left edge and its outputs on the
+right, routes it, and then runs each arm below against that placement. Every arm is a way a
+partition rectangle used to be escaped, or a partition output used to be lost, at rc 0.
+
+```
+CHIPDB=/path/to/xc7a100tfgg484.bin YOSYS=yosys NEXTPNR=/path/to/nextpnr-xilinx ./run.sh
+```
+
+The rectangles are chosen from the base route, so `run.sh` reads prjxray-db's
+`artix7/xc7a100t/tilegrid.json` to turn tile names into grid coordinates. `PRJXRAY_DB` names the
+database root; the default is this fork's `xilinx/external/prjxray-db` submodule. `geom.py` does the
+lookups. The pre-place arms need a nextpnr built with Python. `NPNR_TIMEOUT` bounds each nextpnr run in seconds (default 600). `run.sh` exits non-zero if any arm
+fails and leaves its outputs in `$OUT` (a fresh `mktemp -d` by default).
+
+| arm | passes when |
+|---|---|
+| `--region-only` without a rectangle | `--write-fixed-routes` is refused, and the file it names is byte-identical afterwards |
+| `--fixed-routes` precedence | a netlist written by a run with `--fixed-routes A` stores A in its settings, and reloading it with `--fixed-routes B` applies B and never A |
+| router1 under a rectangle | a netlist placed with `--router router1`, which stores that router in its settings, is refused when it is routed with `NEXTPNR_PARTITION_ROI` set; with `NEXTPNR_PARTITION_CLAMP=off` and `NEXTPNR_PARTITION_KEEPOUT=off` as well it routes at rc 0 |
+| static keepout, router2 control | a one-tile rectangle on an INT tile the longest static net crosses is routed around by router2 at rc 0, and the keepout gate's census reads 0 unlicensed |
+| static keepout, `--fixed-routes` | the base route replayed with `--fixed-routes` under that rectangle is refused by the keepout gate |
+| static keepout, imported routing | the routed netlist, kept as-is with `NEXTPNR_ROUTE_FIXED_ONLY=1` under that rectangle, is refused by the keepout gate |
+| static keepout, keepout off | the `--fixed-routes` replay with `NEXTPNR_PARTITION_KEEPOUT=off` exits rc 0 and the gate's report-only census names the unlicensed pips |
+| constant containment, imported | a one-tile rectangle on the INT tile carrying the most constant pips of the base route, whose sinks are all outside it, is refused by the keepout gate when the routed netlist is kept as-is |
+| constant containment, fresh bridge | routing the placed netlist under that rectangle either ties every constant sink without a pip inside it, or refuses because no tie avoids it; rc 0 with a constant pip inside fails |
+| constant containment, keepout off | routing the placed netlist under that rectangle with `NEXTPNR_PARTITION_KEEPOUT=off` exits rc 0 and the gate's report-only census counts the constant pips; the keepout switch turns off the constant confinement as well |
+| constant containment, router1 escape | the router1 netlist routed under that rectangle with `NEXTPNR_PARTITION_CLAMP=off` and `NEXTPNR_PARTITION_KEEPOUT=off` exits rc 0 |
+| frozen cell not moved | under a rectangle elsewhere on the die, a placement of the placed netlist with `NEXTPNR_BEL_BLACKLIST` naming the bel a static LUT sits on is refused by the post-place repair, not relocated |
+| pinned cell not moved, no rectangle | with no rectangle, a placement of the placed netlist with one LUT pinned at `BEL_STRENGTH` 3 and its bel in `NEXTPNR_BEL_BLACKLIST` is refused by the post-place repair, which calls the cell pinned and names no rectangle |
+| pre-place region inside the rectangle | with the fixture's LUTs and FF unplaced (so they are RM) under a rectangle at (20,120)-(120,200), a `--pre-place` hook that confines them to (100,180)-(120,200) is honoured: every one lands inside it |
+| constant ties inside the rectangle | the netlist that hook placed, routed under the same rectangle, exits rc 0 with constant pips inside the rectangle, and the gate's constant census reads 0 crossings |
+| pre-place region reaching outside | the same hook with a region at (0,100)-(30,130), partly outside the rectangle, is refused |

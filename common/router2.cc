@@ -78,16 +78,7 @@ struct Router2
         // vector index belongs there.
         int partition_rect = -1;
         int px0 = 0, py0 = 0, px1 = 0, py1 = 0;
-        // Static keepout, resolved once in setup_nets(). Bit k of keepout_allow
-        // is this net's licence to bind a pip inside rectangle k; keepout_check
-        // false takes the net off the predicate entirely, which is the case for
-        // an exempt net and for one already licensed everywhere. A mask rather
-        // than a rectangle index because a net may legitimately reach into more
-        // than one region -- an anchor net feeding two slots is not a defect.
-        uint64_t keepout_allow = 0;
-        bool keepout_check = false;
-        uint64_t keepout_narrow = 0;
-        std::unordered_set<PipId> keepout_locked;
+        PartitionKeepoutLicence keepout;
     };
 
     struct WireScore
@@ -365,63 +356,34 @@ struct Router2
             // because its own endpoints are on both sides of it. There is no
             // box that expresses "anywhere but here".
             if (cfg.keepout_active) {
-                const bool named = cfg.keepout_exempt_nets.count(ni->name) > 0;
-                // Asked of the arch rather than of a name list, because a list
-                // exempts what someone remembered to write down. On a design
-                // whose clock reaches the fabric through a global buffer this
-                // is the property that actually distinguishes the spine, and it
-                // widens by itself when a design adds a second buffer.
-                const bool global_buf = ni->driver.cell != nullptr && ni->driver.cell->bel != BelId() &&
-                                        ctx->getBelGlobalBuf(ni->driver.cell->bel);
-                if (named)
+                PartitionKeepoutLicence &kl = nets.at(i).keepout;
+                kl = partition_keepout_licence(ctx, cfg, ni);
+                if (kl.exempt_named)
                     keepout_nets_exempt_named++;
-                if (global_buf) {
+                if (kl.exempt_buf) {
                     keepout_nets_exempt_buf++;
                     if (keepout_exempt_buf_names.size() < keepout_exempt_buf_report_cap)
                         keepout_exempt_buf_names.push_back(ni->name);
                 }
-                if (named && global_buf)
+                if (kl.exempt_named && kl.exempt_buf)
                     keepout_nets_exempt_both++;
-                if (!named && !global_buf) {
-                    uint64_t allow = 0, anchored = 0;
-                    auto pit = cfg.partition_nets.find(ni->name);
-                    if (pit != cfg.partition_nets.end()) {
-                        allow |= uint64_t(1) << pit->second;
-                        keepout_nets_governed.at(pit->second)++;
-                    }
-                    // An endpoint placed inside a rectangle is the interface: a
-                    // net that terminates on a cell in there has to be able to
-                    // arrive, and refusing it would refuse the anchor LUTs the
-                    // whole partition-pin scheme is built on.
-                    auto note_cell = [&](const CellInfo *c) {
-                        if (c == nullptr || c->bel == BelId())
-                            return;
-                        Loc l = ctx->getBelLocation(c->bel);
-                        for (size_t k = 0; k < keepout_rects.size(); k++) {
-                            const auto &kr = keepout_rects[k];
-                            if (l.x < kr.x0 || l.x > kr.x1 || l.y < kr.y0 || l.y > kr.y1)
-                                continue;
-                            if (!(anchored & (uint64_t(1) << k))) {
-                                anchored |= uint64_t(1) << k;
-                                keepout_nets_anchored.at(k)++;
-                            }
-                            allow |= uint64_t(1) << k;
-                            break;
-                        }
-                    };
-                    note_cell(ni->driver.cell);
-                    for (auto &u : ni->users)
-                        note_cell(u.cell);
-                    const uint64_t every = keepout_rects.size() >= 64
-                                                   ? ~uint64_t(0)
-                                                   : ((uint64_t(1) << keepout_rects.size()) - 1);
-                    nets.at(i).keepout_allow = allow;
-                    if ((allow & every) != every) {
-                        nets.at(i).keepout_check = true;
-                        keepout_nets_scope++;
-                    }
-                    if (cfg.keepout_narrow && anchored != 0)
-                        resolve_keepout_narrow(ni, nets.at(i), anchored);
+                if (kl.governed >= 0)
+                    keepout_nets_governed.at(kl.governed)++;
+                for (size_t k = 0; k < keepout_rects.size(); k++) {
+                    if (kl.anchored & (uint64_t(1) << k))
+                        keepout_nets_anchored.at(k)++;
+                    if (kl.narrow & (uint64_t(1) << k))
+                        keepout_nets_narrowed_rect.at(k)++;
+                }
+                if (kl.check)
+                    keepout_nets_scope++;
+                if (kl.narrow != 0)
+                    keepout_nets_narrowed++;
+                for (const auto &lt : kl.locked_taken) {
+                    keepout_narrow_pips++;
+                    keepout_locked_pips_rect.at(pip_keepout_rect(lt.first))++;
+                    if (!lt.second)
+                        keepout_narrow_pips_unbound++;
                 }
             }
             i++;
@@ -705,7 +667,7 @@ struct Router2
         if (!cfg.keepout_active)
             return;
         const auto &nd = nets.at(net->udata);
-        if (!nd.keepout_check && !nd.keepout_narrow)
+        if (!nd.keepout.check && !nd.keepout.narrow)
             return;
         log_warning("partition static keepout: net '%s' is in scope, so it may bind pips only inside a rectangle it "
                     "is licensed for.\n",
@@ -713,20 +675,20 @@ struct Router2
         for (size_t k = 0; k < keepout_rects.size(); k++) {
             const uint64_t bit = uint64_t(1) << k;
             const auto &r = keepout_rects[k];
-            if (nd.keepout_narrow & bit) {
+            if (nd.keepout.narrow & bit) {
                 int n = 0;
-                for (PipId p : nd.keepout_locked)
+                for (PipId p : nd.keepout.locked)
                     if (pip_keepout_rect(p) == int(k))
                         n++;
                 log_warning("partition static keepout:   rectangle %d (%d,%d)-(%d,%d) narrowed to its %d locked "
                             "pip(s)\n",
                             int(k), r.x0, r.y0, r.x1, r.y1, n);
-                for (PipId p : nd.keepout_locked)
+                for (PipId p : nd.keepout.locked)
                     if (pip_keepout_rect(p) == int(k))
                         log_warning("partition static keepout:     locked %s\n", ctx->nameOfPip(p));
                 continue;
             }
-            if (nd.keepout_allow & bit)
+            if (nd.keepout.allow & bit)
                 continue;
             log_warning("partition static keepout:   no licence for rectangle %d (%d,%d)-(%d,%d)\n", int(k), r.x0,
                         r.y0, r.x1, r.y1);
@@ -771,59 +733,10 @@ struct Router2
         return -1;
     }
 
-    void resolve_keepout_narrow(NetInfo *ni, PerNetData &nd, uint64_t anchored)
-    {
-        uint64_t narrow = 0;
-        auto take = [&](PipId p, bool bound) {
-            const int kr = pip_keepout_rect(p);
-            if (kr < 0 || !(anchored & (uint64_t(1) << kr)))
-                return;
-            if (nd.keepout_locked.insert(p).second) {
-                keepout_narrow_pips++;
-                keepout_locked_pips_rect.at(kr)++;
-                if (!bound)
-                    keepout_narrow_pips_unbound++;
-            }
-            narrow |= uint64_t(1) << kr;
-        };
-        for (auto &nw : ni->wires) {
-            if (nw.second.strength < STRENGTH_LOCKED)
-                continue;
-            if (nw.second.pip != PipId())
-                take(nw.second.pip, true);
-        }
-        auto lit = cfg.keepout_licence_pips.find(ni->name);
-        if (lit != cfg.keepout_licence_pips.end())
-            for (PipId p : lit->second)
-                take(p, false);
-        if (narrow == 0)
-            return;
-        nd.keepout_narrow = narrow;
-        keepout_nets_narrowed++;
-        for (size_t k = 0; k < keepout_rects.size(); k++)
-            if (narrow & (uint64_t(1) << k))
-                keepout_nets_narrowed_rect.at(k)++;
-    }
-
-    enum KeepoutVerdict
-    {
-        KEEPOUT_OUTSIDE,
-        KEEPOUT_ADMIT,
-        KEEPOUT_VETO_RECT,
-        KEEPOUT_VETO_NARROW,
-    };
-
-    KeepoutVerdict keepout_verdict(const PerNetData &nd, PipId pip, int &kr) const
+    PartitionKeepoutVerdict keepout_verdict(const PerNetData &nd, PipId pip, int &kr) const
     {
         kr = pip_keepout_rect(pip);
-        if (kr < 0)
-            return KEEPOUT_OUTSIDE;
-        const uint64_t bit = uint64_t(1) << kr;
-        if (nd.keepout_narrow & bit)
-            return nd.keepout_locked.count(pip) ? KEEPOUT_ADMIT : KEEPOUT_VETO_NARROW;
-        if (!nd.keepout_check)
-            return KEEPOUT_ADMIT;
-        return (nd.keepout_allow & bit) ? KEEPOUT_ADMIT : KEEPOUT_VETO_RECT;
+        return partition_keepout_verdict(nd.keepout, pip, kr);
     }
 
     double curr_cong_weight, hist_cong_weight, estimate_weight;
@@ -1332,7 +1245,7 @@ struct Router2
         // structurally zero and admits-plus-vetoes cannot separate "refused
         // nothing" from "never ran". This can, and it costs one atomic per arc
         // instead of one per pip explored.
-        if (nd.keepout_check || nd.keepout_narrow)
+        if (nd.keepout.check || nd.keepout.narrow)
             keepout_arcs.fetch_add(1, std::memory_order_relaxed);
         // First try strongly iteration-limited routing backwards BFS
         // this will deal with certain nets faster than forward A*
@@ -1389,9 +1302,9 @@ struct Router2
                     partition_veto_bwd.fetch_add(1, std::memory_order_relaxed);
                     continue;
                 }
-                if (nd.keepout_check || nd.keepout_narrow) {
+                if (nd.keepout.check || nd.keepout.narrow) {
                     int kr = -1;
-                    const KeepoutVerdict v = keepout_verdict(nd, uh, kr);
+                    const PartitionKeepoutVerdict v = keepout_verdict(nd, uh, kr);
                     if (v == KEEPOUT_ADMIT) {
                         keepout_admit[kr].fetch_add(1, std::memory_order_relaxed);
                     } else if (v != KEEPOUT_OUTSIDE) {
@@ -1513,9 +1426,9 @@ struct Router2
                 }
                 // Not guarded by is_bb either, and here the box could not have
                 // done the job in the first place.
-                if (nd.keepout_check || nd.keepout_narrow) {
+                if (nd.keepout.check || nd.keepout.narrow) {
                     int kr = -1;
-                    const KeepoutVerdict v = keepout_verdict(nd, dh, kr);
+                    const PartitionKeepoutVerdict v = keepout_verdict(nd, dh, kr);
                     if (v == KEEPOUT_ADMIT) {
                         keepout_admit[kr].fetch_add(1, std::memory_order_relaxed);
                     } else if (v != KEEPOUT_OUTSIDE) {
@@ -1686,8 +1599,7 @@ struct Router2
             if (res1 == ARC_FATAL)
                 return false; // Arc failed irrecoverably
             else if (res1 == ARC_RETRY_WITHOUT_BB) {
-                if (cfg.keepout_active &&
-                    (nets.at(net->udata).keepout_check || nets.at(net->udata).keepout_narrow))
+                if (cfg.keepout_active && (nets.at(net->udata).keepout.check || nets.at(net->udata).keepout.narrow))
                     keepout_bb_retries.fetch_add(1, std::memory_order_relaxed);
                 if (is_mt) {
                     // Can't break out of bounding box in multi-threaded mode, so mark this arc as a failure
@@ -2329,6 +2241,83 @@ void router2(Context *ctx, const Router2Cfg &cfg)
     Router2 rt(ctx, cfg);
     rt.ctx = ctx;
     rt();
+}
+
+int partition_keepout_rect(const PartitionRouteCfg &cfg, Loc l)
+{
+    for (int k = 0; k < cfg.partition_rect_count(); k++) {
+        const auto r = cfg.partition_rect(k);
+        if (l.x >= r.x0 && l.x <= r.x1 && l.y >= r.y0 && l.y <= r.y1)
+            return k;
+    }
+    return -1;
+}
+
+PartitionKeepoutLicence partition_keepout_licence(const Context *ctx, const PartitionRouteCfg &cfg, const NetInfo *ni)
+{
+    if (cfg.partition_rect_count() > 64)
+        log_error("partition keepout: the licence carries one bit per rectangle and supports at most 64, but %d were "
+                  "given\n",
+                  cfg.partition_rect_count());
+    PartitionKeepoutLicence kl;
+    kl.exempt_named = cfg.keepout_exempt_nets.count(ni->name) > 0;
+    kl.exempt_buf =
+            ni->driver.cell != nullptr && ni->driver.cell->bel != BelId() && ctx->getBelGlobalBuf(ni->driver.cell->bel);
+    if (kl.exempt_named || kl.exempt_buf)
+        return kl;
+    auto pit = cfg.partition_nets.find(ni->name);
+    if (pit != cfg.partition_nets.end()) {
+        kl.governed = pit->second;
+        kl.allow |= uint64_t(1) << pit->second;
+    }
+    auto note_cell = [&](const CellInfo *c) {
+        if (c == nullptr || c->bel == BelId())
+            return;
+        const int k = partition_keepout_rect(cfg, ctx->getBelLocation(c->bel));
+        if (k < 0)
+            return;
+        kl.anchored |= uint64_t(1) << k;
+        kl.allow |= uint64_t(1) << k;
+    };
+    note_cell(ni->driver.cell);
+    for (auto &u : ni->users)
+        note_cell(u.cell);
+    const int n = cfg.partition_rect_count();
+    const uint64_t every = n >= 64 ? ~uint64_t(0) : ((uint64_t(1) << n) - 1);
+    kl.check = (kl.allow & every) != every;
+    if (!cfg.keepout_narrow || kl.anchored == 0)
+        return kl;
+    auto take = [&](PipId p, bool bound) {
+        const int k = partition_keepout_rect(cfg, ctx->getPipLocation(p));
+        if (k < 0 || !(kl.anchored & (uint64_t(1) << k)))
+            return;
+        if (kl.locked.insert(p).second)
+            kl.locked_taken.emplace_back(p, bound);
+        kl.narrow |= uint64_t(1) << k;
+    };
+    for (auto &nw : ni->wires) {
+        if (nw.second.strength < STRENGTH_LOCKED)
+            continue;
+        if (nw.second.pip != PipId())
+            take(nw.second.pip, true);
+    }
+    auto lit = cfg.keepout_licence_pips.find(ni->name);
+    if (lit != cfg.keepout_licence_pips.end())
+        for (PipId p : lit->second)
+            take(p, false);
+    return kl;
+}
+
+PartitionKeepoutVerdict partition_keepout_verdict(const PartitionKeepoutLicence &lic, PipId pip, int kr)
+{
+    if (kr < 0)
+        return KEEPOUT_OUTSIDE;
+    const uint64_t bit = uint64_t(1) << kr;
+    if (lic.narrow & bit)
+        return lic.locked.count(pip) ? KEEPOUT_ADMIT : KEEPOUT_VETO_NARROW;
+    if (!lic.check)
+        return KEEPOUT_ADMIT;
+    return (lic.allow & bit) ? KEEPOUT_ADMIT : KEEPOUT_VETO_RECT;
 }
 
 Router2Cfg::Router2Cfg(Context *ctx)

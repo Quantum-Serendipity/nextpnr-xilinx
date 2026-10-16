@@ -24,10 +24,14 @@
 #include <cctype>
 #include <cmath>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <map>
 #include <queue>
+#include <random>
 #include <set>
+#include <system_error>
+#include "design_utils.h"
 #include "log.h"
 #include "nextpnr.h"
 #include "placer1.h"
@@ -36,7 +40,6 @@
 #include "router2.h"
 #include "timing.h"
 #include "util.h"
-#include "design_utils.h"
 
 NEXTPNR_NAMESPACE_BEGIN
 
@@ -68,6 +71,12 @@ void IdString::initialize_arch(const BaseCtx *ctx)
 // -----------------------------------------------------------------------
 
 static const ChipInfoPOD *get_chip_info(const RelPtr<ChipInfoPOD> *ptr) { return ptr->get(); }
+
+static bool env_says_off(const char *name)
+{
+    const char *v = getenv(name);
+    return v != nullptr && std::string(v) == "off";
+}
 
 Arch::Arch(ArchArgs args) : args(args)
 {
@@ -955,13 +964,27 @@ bool Arch::place()
     if (roi_active()) {
         IdString rname = id("partition_region");
         createRectangularRegion(rname, roi_x0, roi_y0, roi_x1, roi_y1);
-        int steered = 0;
+        int steered = 0, kept = 0;
         for (auto &cell : cells) {
             CellInfo *ci = cell.second.get();
             if (!is_rm_cell(ci))
                 continue;
-            ci->region = region.at(rname).get();
             ++steered;
+            if (ci->region == nullptr) {
+                ci->region = region.at(rname).get();
+                continue;
+            }
+            bool inside = ci->region->constr_bels && !ci->region->bels.empty();
+            for (BelId b : ci->region->bels)
+                if (bel_outside_roi(b)) {
+                    inside = false;
+                    break;
+                }
+            if (!inside)
+                log_error("partition region: RM cell '%s' was given region '%s' before placement, and that region "
+                          "is not a non-empty set of bels inside the partition rectangle (%d,%d)-(%d,%d)\n",
+                          ci->name.c_str(this), ci->region->name.c_str(this), roi_x0, roi_y0, roi_x1, roi_y1);
+            ++kept;
         }
         // Unconditional, like every other partition census in this file: a
         // mechanism that is silent when it does nothing cannot be told apart
@@ -969,6 +992,7 @@ bool Arch::place()
         // snapshot is empty, which is worth seeing.
         log_info("partition region: steering %d RM cell(s) into (%d,%d)-(%d,%d), %d bel(s) in region\n", steered,
                  roi_x0, roi_y0, roi_x1, roi_y1, int(region.at(rname)->bels.size()));
+        log_info("partition region: %d of them keep a region set before placement, inside the rectangle\n", kept);
     }
 
     std::string placer = str_or_default(settings, id("placer"), defaultPlacer);
@@ -1101,18 +1125,34 @@ static bool const_sink_is_config_delivered(const PortRef &usr)
 // routeBufhcePassthroughCE() (a synthetic sink with no netlist user at all).
 // iters_out, if given, receives the number of BFS iterations actually used
 // (success or failure) so callers can track a "worst case" figure.
-bool Arch::bridgeConstToWire(NetInfo *net, int pseudo_intent, WireId sink, int iter_max, int *iters_out)
+bool Arch::const_path_in_rect(const NetInfo *net, WireId wire, int rect) const
+{
+    for (size_t hops = 0; hops <= net->wires.size(); hops++) {
+        auto it = net->wires.find(wire);
+        if (it == net->wires.end() || it->second.pip == PipId())
+            return true;
+        if (partition_rect_at(getPipLocation(it->second.pip)) != rect)
+            return false;
+        wire = getPipSrcWire(it->second.pip);
+    }
+    return false;
+}
+
+bool Arch::bridgeConstToWire(NetInfo *net, int pseudo_intent, WireId sink, int sink_rect, int iter_max, int *iters_out)
 {
     std::queue<WireId> visit;
     std::unordered_map<WireId, PipId> backtrace;
     WireId dest = WireId();
     visit.push(sink);
+    const bool confined = roi_active() && !env_says_off("NEXTPNR_PARTITION_KEEPOUT");
     int iter = 0;
     while (!visit.empty() && iter < iter_max) {
         ++iter;
         WireId curr = visit.front();
         visit.pop();
-        bool curr_is_dest = (getBoundWireNet(curr) == net) || (wireIntent(curr) == pseudo_intent);
+        bool curr_is_dest = (getBoundWireNet(curr) == net &&
+                             (curr == sink || !confined || const_path_in_rect(net, curr, sink_rect))) ||
+                            (wireIntent(curr) == pseudo_intent);
         if (curr_is_dest) {
             dest = curr;
             break;
@@ -1126,6 +1166,8 @@ bool Arch::bridgeConstToWire(NetInfo *net, int pseudo_intent, WireId sink, int i
             continue;
         for (auto uh : getPipsUphill(curr)) {
             if (!checkPipAvail(uh))
+                continue;
+            if (confined && partition_rect_at(getPipLocation(uh)) != sink_rect)
                 continue;
             WireId s = getPipSrcWire(uh);
             bool src_already_visited = (backtrace.count(s) != 0);
@@ -1251,8 +1293,9 @@ std::vector<Arch::ConstHoldout> Arch::routeVcc()
                     log_error("Pin '%s' of bel '%s' has no associated wire\n", usr.port.c_str(this),
                               nameOfBel(usr.cell->bel));
                 const int budget = (passes == 1) ? iter_max : iter_max_retry;
+                const int sink_rect = partition_rect_at(getBelLocation(usr.cell->bel));
                 int iter = 0;
-                bool bridged = bridgeConstToWire(net, pseudo_intent, sink, budget, &iter);
+                bool bridged = bridgeConstToWire(net, pseudo_intent, sink, sink_rect, budget, &iter);
                 if (iter > max_iter_seen)
                     max_iter_seen = iter;
                 if (!bridged) {
@@ -1376,7 +1419,8 @@ void Arch::routeBufhcePassthroughCE()
                 ++already_driven;
                 continue;
             }
-            bool bridged = bridgeConstToWire(vcc, ID_PSEUDO_VCC, ce_wire, 50000);
+            bool bridged =
+                    bridgeConstToWire(vcc, ID_PSEUDO_VCC, ce_wire, partition_rect_at(getPipLocation(pip)), 50000);
             if (bridged) {
                 ++tied;
             } else {
@@ -2560,45 +2604,97 @@ void Arch::applyFixedRoutes(const std::string &filename, std::function<void()> r
 // full routed design through write->read must re-bind every pip and leave the
 // router with nothing to do (self-test); a filtered subset captures a hard
 // macro's frozen island.
+void Arch::writeFileReplacing(const std::string &filename, const char *what,
+                              std::function<void(std::ostream &)> body) const
+{
+    std::string dest = filename;
+    bool dest_is_special = false;
+    std::error_code status_ec;
+    if (std::filesystem::is_symlink(std::filesystem::symlink_status(filename, status_ec))) {
+        std::error_code resolve_ec;
+        const auto resolved = std::filesystem::canonical(filename, resolve_ec);
+        if (resolve_ec)
+            dest_is_special = true;
+        else
+            dest = resolved.string();
+    }
+    const auto dest_status = std::filesystem::status(dest, status_ec);
+    if (std::filesystem::exists(dest_status) && !std::filesystem::is_regular_file(dest_status))
+        dest_is_special = true;
+    std::random_device tmp_entropy;
+    const std::string write_path =
+            dest_is_special ? dest : stringf("%s.nextpnr-tmp.%08x", dest.c_str(), unsigned(tmp_entropy()));
+    struct PendingFile
+    {
+        std::string path;
+        bool commit = false;
+        ~PendingFile()
+        {
+            if (!commit) {
+                std::error_code remove_ec;
+                std::filesystem::remove(path, remove_ec);
+            }
+        }
+    } pending{write_path, dest_is_special};
+
+    {
+        std::ofstream out(write_path);
+        if (!out)
+            log_error("failed to open file %s for writing (%s)\n", filename.c_str(), strerror(errno));
+        body(out);
+        out.flush();
+        if (!out.good())
+            log_error("failed to write %s file %s\n", what, filename.c_str());
+    }
+
+    if (dest_is_special)
+        return;
+    std::error_code rename_ec;
+    std::filesystem::rename(write_path, dest, rename_ec);
+    if (rename_ec)
+        log_error("failed to rename %s file %s to %s (%s)\n", what, write_path.c_str(), dest.c_str(),
+                  rename_ec.message().c_str());
+    pending.commit = true;
+}
+
 void Arch::writeFixedRoutes(const std::string &filename, bool region_only) const
 {
-    std::ofstream out(filename);
-    if (!out)
-        log_error("failed to open fixed-routes output '%s'\n", filename.c_str());
     if (region_only && !roi_active())
         log_error("--region-only needs a partition rectangle; set NEXTPNR_PARTITION_ROI\n");
-    out << "# nextpnr-xilinx fixed-routes: <net> <tile>/<src_idx>.<dst_idx>\n";
     int npips = 0, nnets = 0, nskipped = 0;
-    for (auto &np : nets) {
-        NetInfo *ni = np.second.get();
-        bool any = false;
-        for (auto &w : ni->wires) {
-            PipId pip = w.second.pip;
-            if (pip == PipId())
-                continue;
-            // The format is one self-contained line per pip -- the net name is
-            // re-emitted on every line and there is no per-net header -- so a
-            // per-pip filter needs no format change.  What it DOES produce is a
-            // disconnected locked tree for any net the rectangle cuts, which is
-            // the reader's normal case (applyFixedRoutes hands the remainder to
-            // router2) but is invisible in the file: nothing records that a
-            // fragment is a fragment.
-            if (region_only) {
-                Loc l = getPipLocation(pip);
-                if (l.x < roi_x0 || l.x > roi_x1 || l.y < roi_y0 || l.y > roi_y1) {
-                    nskipped++;
+    writeFileReplacing(filename, "fixed-routes", [&](std::ostream &out) {
+        out << "# nextpnr-xilinx fixed-routes: <net> <tile>/<src_idx>.<dst_idx>\n";
+        for (auto &np : nets) {
+            NetInfo *ni = np.second.get();
+            bool any = false;
+            for (auto &w : ni->wires) {
+                PipId pip = w.second.pip;
+                if (pip == PipId())
                     continue;
+                // The format is one self-contained line per pip -- the net name is
+                // re-emitted on every line and there is no per-net header -- so a
+                // per-pip filter needs no format change.  What it DOES produce is a
+                // disconnected locked tree for any net the rectangle cuts, which is
+                // the reader's normal case (applyFixedRoutes hands the remainder to
+                // router2) but is invisible in the file: nothing records that a
+                // fragment is a fragment.
+                if (region_only) {
+                    Loc l = getPipLocation(pip);
+                    if (l.x < roi_x0 || l.x > roi_x1 || l.y < roi_y0 || l.y > roi_y1) {
+                        nskipped++;
+                        continue;
+                    }
                 }
+                auto &pd = locInfo(pip).pip_data[pip.index];
+                out << ni->name.str(this) << ' ' << chip_info->tile_insts[pip.tile].name.get() << '/' << pd.src_index
+                    << '.' << pd.dst_index << '\n';
+                npips++;
+                any = true;
             }
-            auto &pd = locInfo(pip).pip_data[pip.index];
-            out << ni->name.str(this) << ' ' << chip_info->tile_insts[pip.tile].name.get() << '/' << pd.src_index
-                << '.' << pd.dst_index << '\n';
-            npips++;
-            any = true;
+            if (any)
+                nnets++;
         }
-        if (any)
-            nnets++;
-    }
+    });
     if (region_only)
         log_info("Wrote %d fixed-route pips across %d nets to '%s' (%d outside the rectangle skipped)\n", npips, nnets,
                  filename.c_str(), nskipped);
@@ -3068,6 +3164,7 @@ bool Arch::route()
         // all -- every pip came from the imported ROUTING attribute or
         // applyFixedRoutes. It is precisely the case the backstop is for.
         check_partition_routing();
+        check_partition_keepout();
         getCtx()->settings[getCtx()->id("route")] = 1;
         archInfoToAttributes();
         log_info("    route-fixed-only: imported routing kept as-is; no general router run\n");
@@ -3083,6 +3180,7 @@ bool Arch::route()
         // are deliberately left for an external router, but whatever THIS tool
         // bound is still ours to answer for.
         check_partition_routing();
+        check_partition_keepout();
         getCtx()->settings[getCtx()->id("route")] = 1;
         archInfoToAttributes();
         return true;
@@ -3092,6 +3190,15 @@ bool Arch::route()
     bool result = true;
     auto run_router = [&]() {
         if (router == "router1") {
+            if (roi_active()) {
+                if (!env_says_off("NEXTPNR_PARTITION_CLAMP") || !env_says_off("NEXTPNR_PARTITION_KEEPOUT"))
+                    log_error("router1 has neither the partition route clamp nor the static keepout, and "
+                              "NEXTPNR_PARTITION_ROI is set. Route with router2; the router may also come from a "
+                              "'router' setting stored in the input netlist. Running router1 under a rectangle "
+                              "needs NEXTPNR_PARTITION_CLAMP=off and NEXTPNR_PARTITION_KEEPOUT=off, which say that "
+                              "neither mechanism is wanted.\n");
+                log_warning("partition route clamp and static keepout: both DISABLED, routing with router1\n");
+            }
             result = router1(getCtx(), Router1Cfg(getCtx()));
         } else if (router == "router2") {
             auto cfg = Router2Cfg(getCtx());
@@ -3152,24 +3259,7 @@ bool Arch::route()
                             "static content will differ. This setting exists to produce the wide-licence control arm.\n");
             }
             if (roi_active() && (!clamp_off || !keepout_off)) {
-                cfg.partition_active = !clamp_off;
-                cfg.keepout_active = !keepout_off;
-                cfg.keepout_narrow = !keepout_off && !narrow_off;
-                cfg.partition_x0 = roi_x0;
-                cfg.partition_y0 = roi_y0;
-                cfg.partition_x1 = roi_x1;
-                cfg.partition_y1 = roi_y1;
-                for (const RoiRect &s : roi_siblings)
-                    cfg.partition_siblings.push_back({s.x0, s.y0, s.x1, s.y1});
-                // Read even when the clamp is off, because the keepout needs it:
-                // rule 1 of its licence is "this net is governed by rectangle k",
-                // and a governed net must keep the right to route in its own
-                // rectangle no matter which mechanism is switched on.
-                cfg.partition_nets = partition_net_rects();
-                if (cfg.keepout_active)
-                    cfg.keepout_exempt_nets = load_keepout_exempt_nets();
-                if (cfg.keepout_narrow)
-                    cfg.keepout_licence_pips = load_keepout_licence_pips();
+                fill_partition_route_cfg(cfg, clamp_off, keepout_off, narrow_off);
                 int in_rect0 = 0;
                 for (const auto &pn : cfg.partition_nets)
                     if (pn.second == 0)
@@ -3226,6 +3316,7 @@ bool Arch::route()
     // so a violation aborts BEFORE the offending routing is stamped back into
     // the ROUTING attribute and becomes re-importable.
     check_partition_routing();
+    check_partition_keepout();
     // POST-ROUTE timing, ON BY DEFAULT UNDER router2.
     //
     // router1 calls timing_analysis itself once routing is done, so a router1
@@ -5023,6 +5114,8 @@ std::unordered_set<IdString> Arch::load_keepout_exempt_nets() const
     std::unordered_set<IdString> out;
     if (!roi_active())
         return out;
+    if (keepout_exempt_loaded)
+        return keepout_exempt_cache;
     // The P exemptions come along. A net the operator has already declared out
     // of the rectangle's scope for placement cannot then be forbidden to route
     // past it -- that would leave the clock spine holding a P exemption it
@@ -5061,6 +5154,8 @@ std::unordered_set<IdString> Arch::load_keepout_exempt_nets() const
     log_info("partition keepout exemptions: %d net(s) named (%d inherited from the invariant P exemptions, %d from "
              "%s, %d unresolved)\n",
              int(out.size()), from_p, n, f == nullptr ? "<unset>" : f, miss);
+    keepout_exempt_cache = out;
+    keepout_exempt_loaded = true;
     return out;
 }
 
@@ -5070,6 +5165,8 @@ std::unordered_map<IdString, std::vector<PipId>> Arch::load_keepout_licence_pips
     const char *f = getenv("NEXTPNR_PARTITION_KEEPOUT_LICENCE");
     if (f == nullptr || !roi_active())
         return out;
+    if (keepout_licence_loaded)
+        return keepout_licence_cache;
     std::ifstream in(f);
     if (!in)
         log_error("NEXTPNR_PARTITION_KEEPOUT_LICENCE: cannot open '%s'\n", f);
@@ -5137,6 +5234,8 @@ std::unordered_map<IdString, std::vector<PipId>> Arch::load_keepout_licence_pips
         log_error("keepout licence: %d line(s) did not resolve (net-miss %d, tile-miss %d, pip-miss %d, malformed "
                   "%d); the narrow licence is not the one the file asks for\n",
                   miss_net + miss_tile + miss_pip + malformed, miss_net, miss_tile, miss_pip, malformed);
+    keepout_licence_cache = out;
+    keepout_licence_loaded = true;
     return out;
 }
 
@@ -5326,6 +5425,160 @@ void Arch::check_partition_routing() const
                   "came from one of the paths that bypass it: the netlist's imported ROUTING attribute, "
                   "applyFixedRoutes, routeClock, routeVcc, fixupRouting, or router1. A partial bitstream built from "
                   "this routing would write configuration frames outside the region and corrupt static logic.\n",
+                  bad_nets);
+}
+
+void Arch::fill_partition_route_cfg(PartitionRouteCfg &cfg, bool clamp_off, bool keepout_off, bool narrow_off) const
+{
+    cfg.partition_active = !clamp_off;
+    cfg.keepout_active = !keepout_off;
+    cfg.keepout_narrow = !keepout_off && !narrow_off;
+    cfg.partition_x0 = roi_x0;
+    cfg.partition_y0 = roi_y0;
+    cfg.partition_x1 = roi_x1;
+    cfg.partition_y1 = roi_y1;
+    for (const RoiRect &s : roi_siblings)
+        cfg.partition_siblings.push_back({s.x0, s.y0, s.x1, s.y1});
+    cfg.partition_nets = partition_net_rects();
+    if (cfg.keepout_active)
+        cfg.keepout_exempt_nets = load_keepout_exempt_nets();
+    if (cfg.keepout_narrow)
+        cfg.keepout_licence_pips = load_keepout_licence_pips();
+}
+
+void Arch::check_partition_keepout() const
+{
+    if (!roi_active())
+        return;
+    const bool keepout_off = env_says_off("NEXTPNR_PARTITION_KEEPOUT");
+    const bool narrow_off = env_says_off("NEXTPNR_PARTITION_KEEPOUT_NARROW");
+    PartitionRouteCfg cfg;
+    fill_partition_route_cfg(cfg, false, false, narrow_off);
+
+    const IdString gnd_net = id("$PACKER_GND_NET"), vcc_net = id("$PACKER_VCC_NET");
+    int nets_checked = 0, bad_nets = 0;
+    int64_t pips_inside = 0, pips_bad = 0;
+    std::vector<std::pair<std::string, std::string>> offenders;
+    int64_t const_pips = 0;
+    std::set<std::pair<std::string, std::string>> const_offenders;
+    std::unordered_set<PipId> const_bad_pips;
+    for (IdString cn : {gnd_net, vcc_net}) {
+        auto nit = nets.find(cn);
+        if (nit == nets.end())
+            continue;
+        const NetInfo *net = nit->second.get();
+        std::unordered_map<WireId, int> sink_rect;
+        for (auto &usr : net->users) {
+            if (usr.cell == nullptr || usr.cell->bel == BelId())
+                continue;
+            WireId w = getCtx()->getNetinfoSinkWire(net, usr);
+            if (w != WireId())
+                sink_rect[w] = partition_rect_at(getBelLocation(usr.cell->bel));
+        }
+        std::unordered_set<WireId> drives;
+        for (auto &w : net->wires)
+            if (w.second.pip != PipId()) {
+                drives.insert(getPipSrcWire(w.second.pip));
+                const_pips++;
+            }
+        for (auto &w : net->wires) {
+            if (w.second.pip == PipId())
+                continue;
+            auto sit = sink_rect.find(w.first);
+            if (sit == sink_rect.end() && drives.count(w.first))
+                continue;
+            const int want = sit != sink_rect.end() ? sit->second : partition_rect_at(getPipLocation(w.second.pip));
+            WireId cur = w.first;
+            for (size_t hops = 0; hops <= net->wires.size(); hops++) {
+                auto it = net->wires.find(cur);
+                if (it == net->wires.end() || it->second.pip == PipId())
+                    break;
+                const PipId pip = it->second.pip;
+                const Loc l = getPipLocation(pip);
+                const int kr = partition_rect_at(l);
+                if (kr != want) {
+                    const_bad_pips.insert(pip);
+                    const_offenders.emplace(
+                            std::string(net->name.c_str(this)),
+                            stringf("%s at tile (%d,%d), in %s, on the path to a %s %s", nameOfPip(pip), l.x, l.y,
+                                    kr < 0 ? "no rectangle" : stringf("rectangle %d", kr).c_str(),
+                                    sit != sink_rect.end() ? "sink" : "route end",
+                                    want < 0 ? "outside every rectangle" : stringf("in rectangle %d", want).c_str()));
+                }
+                cur = getPipSrcWire(pip);
+            }
+        }
+    }
+    const int64_t const_bad = int64_t(const_bad_pips.size());
+    for (auto np : sorted(nets)) {
+        NetInfo *net = np.second;
+        if (net->name == gnd_net || net->name == vcc_net)
+            continue;
+        const PartitionKeepoutLicence lic = partition_keepout_licence(getCtx(), cfg, net);
+        if (!lic.check && !lic.narrow)
+            continue;
+        nets_checked++;
+        int bad_here = 0;
+        for (auto &w : net->wires) {
+            const PipId pip = w.second.pip;
+            if (pip == PipId())
+                continue;
+            const Loc l = getPipLocation(pip);
+            const int kr = partition_keepout_rect(cfg, l);
+            if (kr < 0)
+                continue;
+            pips_inside++;
+            const PartitionKeepoutVerdict v = partition_keepout_verdict(lic, pip, kr);
+            if (v == KEEPOUT_ADMIT)
+                continue;
+            pips_bad++;
+            bad_here++;
+            const RoiRect r = roi_rect(kr);
+            offenders.emplace_back(std::string(net->name.c_str(this)),
+                                   stringf("%s at tile (%d,%d), inside rectangle %d (%d,%d)-(%d,%d), %s",
+                                           nameOfPip(pip), l.x, l.y, kr, r.x0, r.y0, r.x1, r.y1,
+                                           v == KEEPOUT_VETO_NARROW ? "not one of the net's locked pips there"
+                                                                    : "a rectangle the net has no licence for"));
+        }
+        if (bad_here > 0)
+            bad_nets++;
+    }
+
+    std::sort(offenders.begin(), offenders.end());
+    const size_t report_cap = 20;
+    for (size_t i = 0; i < offenders.size() && i < report_cap; i++)
+        log_warning("partition keepout gate: net '%s' binds pip %s\n", offenders[i].first.c_str(),
+                    offenders[i].second.c_str());
+    if (offenders.size() > report_cap)
+        log_warning("partition keepout gate: %d further unlicensed pip(s) not listed\n",
+                    int(offenders.size() - report_cap));
+    size_t const_listed = 0;
+    for (const auto &o : const_offenders)
+        if (const_listed++ < report_cap)
+            log_warning("partition keepout gate: constant net '%s' binds pip %s\n", o.first.c_str(), o.second.c_str());
+    if (const_offenders.size() > report_cap)
+        log_warning("partition keepout gate: %d further constant pip and path pair(s) that cross a rectangle edge "
+                    "not listed\n",
+                    int(const_offenders.size() - report_cap));
+    log_info("partition keepout gate [%s]: %d static net(s) in scope, %lld of their pip(s) inside a rectangle, "
+             "%lld unlicensed in %d net(s)\n",
+             keepout_off ? "report only, keepout DISABLED" : "fatal", nets_checked, (long long)pips_inside,
+             (long long)pips_bad, bad_nets);
+    log_info("partition keepout gate [%s]: %lld constant pip(s), %lld on a path whose sink is on the other side of a "
+             "rectangle edge\n",
+             keepout_off ? "report only, keepout DISABLED" : "fatal", (long long)const_pips, (long long)const_bad);
+    if (const_bad > 0 && !keepout_off)
+        log_error("partition keepout gate: %lld constant pip(s) sit on a path that crosses a rectangle edge (listed "
+                  "above). A constant sink inside a rectangle must be tied from inside it and one outside every "
+                  "rectangle from outside them all; otherwise --region-only drops the tie, or a partial loaded "
+                  "into the rectangle overwrites it.\n",
+                  (long long)const_bad);
+    if (pips_bad > 0 && !keepout_off)
+        log_error("partition keepout gate: %d static net(s) bind pips inside a partition rectangle they hold no "
+                  "licence for (listed above). router2's keepout refuses such pips during its own search, so these "
+                  "came from a path that bypasses it: the netlist's imported ROUTING attribute, applyFixedRoutes, "
+                  "routeClock, routeVcc, fixupRouting, or a Python bindPip. A partial bitstream loaded into that "
+                  "rectangle overwrites them and cuts the static net.\n",
                   bad_nets);
 }
 

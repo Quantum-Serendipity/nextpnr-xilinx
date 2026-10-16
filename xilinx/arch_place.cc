@@ -1251,18 +1251,7 @@ bool Arch::isValidBelForCell(CellInfo *cell, BelId bel) const
     // classify the entire locked design as stranded at the strand test below
     // (the `isValidBelForCell(m, m->bel)` sweep in fixupPlacement) -- it does
     // NOT skip them, because its `attrs.count(id("BEL"))` guard is itself inert
-    // on a round-tripped netlist -- and the repair loop would try to relocate
-    // the static region. The rectangle would destroy the thing it exists to
-    // protect.
-    //
-    // The asymmetry has a cost worth stating: checkBelAvail's rectangle test IS
-    // bel-only, so a static cell that somehow becomes stranded cannot be
-    // repaired back to its own out-of-rectangle bel (fixupPlacement's restore
-    // path re-checks checkBelAvail), and the ring search could relocate it
-    // INSIDE the rectangle.  Measured on the adversarial round trip: 16082
-    // static cells, 0 moved, 0 entered the rectangle, 0 left unbound.  Latent,
-    // not live -- and asserted as such by scripts/partition-roi-evidence.sh,
-    // because the RM-side containment check would not notice either failure.
+    // on a round-tripped netlist.
     if (roi_active() && is_rm_cell(cell) && bel_outside_roi(bel)) {
         ++roi_veto_cell;
         return false;
@@ -1392,7 +1381,7 @@ void Arch::fixupPlacement()
         // Collect stranded cluster roots / standalone cells (a LUT+FF pair has
         // the LUT as root and the FF as a constr_z child; the placer can leave
         // the LUT6 root on a 5LUT).  A cell is a root here if it has no parent.
-        std::vector<CellInfo *> roots;
+        std::vector<CellInfo *> roots, frozen_invalid;
         for (auto &cp : cells) {
             CellInfo *ci = cp.second.get();
             if (ci->bel == BelId() || ci->constr_parent != nullptr)
@@ -1416,26 +1405,50 @@ void Arch::fixupPlacement()
                 }
             if (has_carry)
                 continue;
+            bool movable = true;
+            for (auto m : tree)
+                if (m->belStrength >= STRENGTH_FIXED || (roi_active() && !is_rm_cell(m))) {
+                    movable = false;
+                    break;
+                }
             bool invalid = false;
             for (auto m : tree)
                 if (m->bel != BelId() && !isValidBelForCell(m, m->bel))
                     invalid = true;
-            if (!invalid) {
-                bool movable = true;
+            if (invalid && !movable) {
+                frozen_invalid.push_back(ci);
+                continue;
+            }
+            if (!invalid && movable)
                 for (auto m : tree)
-                    if (m->belStrength >= STRENGTH_FIXED || (roi_active() && !is_rm_cell(m))) {
-                        movable = false;
+                    if (m->bel != BelId() && !isBelLocationValid(m->bel)) {
+                        invalid = true;
                         break;
                     }
-                if (movable)
-                    for (auto m : tree)
-                        if (m->bel != BelId() && !isBelLocationValid(m->bel)) {
-                            invalid = true;
-                            break;
-                        }
-            }
             if (invalid)
                 roots.push_back(ci);
+        }
+        if (!frozen_invalid.empty()) {
+            const size_t report_cap = 20;
+            for (size_t i = 0; i < frozen_invalid.size() && i < report_cap; i++) {
+                const CellInfo *fc = frozen_invalid[i];
+                log_warning("post-place repair: '%s' (%s, strength %d) is invalid at its own bel %s\n",
+                            fc->name.c_str(this), !roi_active() ? "pinned" : is_rm_cell(fc) ? "RM" : "static",
+                            int(fc->belStrength), nameOfBel(fc->bel));
+            }
+            if (frozen_invalid.size() > report_cap)
+                log_warning("post-place repair: %d further frozen cluster(s) not listed\n",
+                            int(frozen_invalid.size() - report_cap));
+            if (roi_active())
+                log_error("post-place repair: %d cluster(s) with a fixed, locked or static member are invalid at their "
+                          "own bels (listed above). They may not be moved: a static cell moved under a partition "
+                          "rectangle can only land inside it. Check NEXTPNR_BEL_BLACKLIST against the bels the "
+                          "imported static occupies.\n",
+                          int(frozen_invalid.size()));
+            log_error("post-place repair: %d cluster(s) with a fixed or locked member are invalid at their own bels "
+                      "(listed above). They may not be moved: moving one would discard the placement it was pinned "
+                      "to. Check NEXTPNR_BEL_BLACKLIST and the pinned bels against each other.\n",
+                      int(frozen_invalid.size()));
         }
         int fixed = 0;
         for (CellInfo *root : roots) {
@@ -1551,8 +1564,7 @@ void Arch::fixupPlacement()
                 continue;
             if (!isBelLocationValid(ci->bel)) {
                 bad_tiles.insert(ci->bel.tile);
-                log_warning("post-place repair: tile of bel %s still has an invalid placement; routing will fail "
-                            "there\n",
+                log_warning("post-place repair: tile of bel %s still has an invalid placement\n",
                             getBelName(ci->bel).c_str(this));
             }
         }

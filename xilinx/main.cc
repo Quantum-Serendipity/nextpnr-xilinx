@@ -27,6 +27,7 @@
 #include "jsonwrite.h"
 #include "log.h"
 #include "timing.h"
+#include "util.h"
 
 USING_NEXTPNR_NAMESPACE
 
@@ -114,6 +115,15 @@ void UspCommandHandler::setupArchContext(Context *ctx)
 void UspCommandHandler::customAfterLoad(Context *ctx)
 {
     ctx->xdc_strict = vm.count("xdc-strict") != 0;
+    if (vm.count("fixed-routes")) {
+        const IdString key = ctx->id("fixed-routes");
+        const std::string given = vm["fixed-routes"].as<std::string>();
+        const std::string loaded = str_or_default(ctx->settings, key, "");
+        if (loaded != given)
+            log_info("fixed-routes: '%s' from the command line replaces '%s' stored in the input netlist\n",
+                     given.c_str(), loaded.c_str());
+        ctx->settings[key] = given;
+    }
     auto erase_attrs = [&](std::unordered_map<IdString, Property> &attrs, std::initializer_list<const char *> names) {
         for (auto it = attrs.begin(); it != attrs.end();) {
             const std::string &key = it->first.str(ctx);

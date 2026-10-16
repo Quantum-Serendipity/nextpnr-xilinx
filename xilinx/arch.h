@@ -706,6 +706,8 @@ inline bool matchBufhcePassthroughPip(const std::string &dst_wire, const std::st
     return true;
 }
 
+struct PartitionRouteCfg;
+
 struct Arch : BaseCtx
 {
     boost::iostreams::mapped_file_source blob_file;
@@ -999,6 +1001,16 @@ struct Arch : BaseCtx
     {
         return x >= r.x0 && x <= r.x1 && y >= r.y0 && y <= r.y1;
     }
+    int partition_rect_at(Loc l) const
+    {
+        if (!roi_active())
+            return -1;
+        for (int i = 0; i < roi_rect_count(); i++)
+            if (rect_holds(roi_rect(i), l.x, l.y))
+                return i;
+        return -1;
+    }
+    bool const_path_in_rect(const NetInfo *net, WireId wire, int rect) const;
 
     // One veto counter per enforcement point, reported at the end of
     // Arch::place().  These exist because "0 RM cells outside the rectangle" is
@@ -1100,8 +1112,14 @@ struct Arch : BaseCtx
     // entry here.  An entry that names no net is warned about for the same
     // reason load_exempt_nets warns.
     std::unordered_set<IdString> load_keepout_exempt_nets() const;
+    mutable std::unordered_set<IdString> keepout_exempt_cache;
+    mutable bool keepout_exempt_loaded = false;
 
     std::unordered_map<IdString, std::vector<PipId>> load_keepout_licence_pips() const;
+    mutable std::unordered_map<IdString, std::vector<PipId>> keepout_licence_cache;
+    mutable bool keepout_licence_loaded = false;
+
+    void fill_partition_route_cfg(PartitionRouteCfg &cfg, bool clamp_off, bool keepout_off, bool narrow_off) const;
 
     // Invariant P, asserted at the end of Arch::place().
     //
@@ -1194,6 +1212,7 @@ struct Arch : BaseCtx
     // and nothing else -- so a pass over it sees every pip feature that can
     // reach the bitstream.
     void check_partition_routing() const;
+    void check_partition_keepout() const;
 
     bool checkBelAvail(BelId bel) const
     {
@@ -2101,12 +2120,15 @@ struct Arch : BaseCtx
     void ripupConstNets();
     void routeClock();
     void routeBufhcePassthroughCE();
-    bool bridgeConstToWire(NetInfo *net, int pseudo_intent, WireId sink, int iter_max, int *iters_out = nullptr);
+    bool bridgeConstToWire(NetInfo *net, int pseudo_intent, WireId sink, int sink_rect, int iter_max,
+                           int *iters_out = nullptr);
     bool isGlobalClockNet(const NetInfo *clk_net, bool &lenient) const;
     std::unordered_set<IdString> fixedRouteClocks(const std::string &filename) const;
     void applyFixedRoutes(const std::string &filename, std::function<void()> route_unlocked_clocks);
     // region_only restricts the dump to the NEXTPNR_PARTITION_ROI rectangle.
     void writeFixedRoutes(const std::string &filename, bool region_only = false) const;
+    void writeFileReplacing(const std::string &filename, const char *what,
+                            std::function<void(std::ostream &)> body) const;
     bool gtClockTemplateRoute(NetInfo *clk_net, PortRef &usr, int &conflicts);
     void findSourceSinkLocations();
     std::unordered_map<WireId, Loc> sink_locs, source_locs;
