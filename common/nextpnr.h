@@ -418,6 +418,7 @@ struct NetInfo : ArchNetInfo
     PortRef driver;
     std::vector<PortRef> users;
     std::unordered_map<IdString, Property> attrs;
+    char undef_const = 0;
 
     // wire -> uphill_pip
     std::unordered_map<WireId, PipMap> wires;

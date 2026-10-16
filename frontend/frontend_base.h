@@ -651,7 +651,7 @@ template <typename FrontendType> struct GenericFrontend
     {
 
         if (constval == 'x' || constval == 'z') {
-            net->attrs[ctx->id("NEXTPNR_UNDEF_CONST")] = std::string(1, constval);
+            net->undef_const = constval;
             return;
         }
         NPNR_ASSERT(constval == '0' || constval == '1');

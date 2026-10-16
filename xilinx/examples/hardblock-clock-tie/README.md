@@ -2,8 +2,8 @@
 
 `pack_constants` keeps a block-RAM or DSP clock pin on its net when the net has no driver, so that
 an RM-only build can leave the region clock to the static design. A clock bit the netlist gives as
-`x` or `z` is not such a net: the frontend marks it `NEXTPNR_UNDEF_CONST`, and the packer ties the
-pin and warns, naming the cell and pin. This regression packs three `RAMB18E1` designs with
+`x` or `z` is not such a net: the frontend records the value on the net (`NetInfo::undef_const`),
+and the packer ties the pin and warns, naming the cell and pin. This regression packs three `RAMB18E1` designs with
 `--pack-only` and reads the clock net of `CLKARDCLK` in the written JSON.
 
 ```

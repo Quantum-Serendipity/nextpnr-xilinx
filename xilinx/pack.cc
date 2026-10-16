@@ -990,7 +990,6 @@ void XilinxPacker::pack_constants()
             ctx->id("RAMB36E2"), ctx->id("DSP48E1"),  ctx->id("DSP48E2")};
     const std::unordered_set<IdString> hard_block_clock_pins = {ctx->id("CLKARDCLK"), ctx->id("CLKBWRCLK"),
                                                                 ctx->id("CLK")};
-    const IdString undef_const = ctx->id("NEXTPNR_UNDEF_CONST");
     int newly_kept = 0;
 
     for (auto cell : sorted(ctx->cells)) {
@@ -1004,7 +1003,7 @@ void XilinxPacker::pack_constants()
                 continue;
             const bool hard_block_clock =
                     hard_block_clock_types.count(ci->type) && hard_block_clock_pins.count(port.first);
-            if (pn != nullptr && hard_block_clock && !pn->attrs.count(undef_const)) {
+            if (pn != nullptr && hard_block_clock && pn->undef_const == 0) {
                 if (kept_undriven_clocks.emplace(ci->name, port.first).second)
                     ++newly_kept;
                 continue;
@@ -1013,7 +1012,7 @@ void XilinxPacker::pack_constants()
                 log_warning("%s pin %s of '%s' is on net '%s', an undefined ('%s') constant in the netlist; tying it "
                             "to %d.\n",
                             ci->type.c_str(ctx), port.first.c_str(ctx), ctx->nameOf(ci), ctx->nameOf(pn),
-                            pn->attrs.at(undef_const).as_string().c_str(), int(port.second));
+                            std::string(1, pn->undef_const).c_str(), int(port.second));
             const_ports.emplace_back(ci, port.first, port.second);
         }
     }
