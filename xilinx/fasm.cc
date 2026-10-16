@@ -2924,16 +2924,25 @@ struct FasmBackend
         return phase;
     }
 
-    // The phase in eighths of a VCO period, split into PHASE_MUX and DELAY_TIME.  A negative phase
-    // is taken modulo 360; the MMCM rounds to the nearest eighth, the PLL truncates and saturates
-    // at 511.
     void split_phase(double phase, double divide, bool is_mmcm, int &phasemux, int &delaytime)
     {
         const double phase_normalized = phase < 0 ? phase + 360 : phase;
         const double eighths = phase_normalized / 360 * divide * 8;
-        const int phase_eighths = is_mmcm ? int(floor(eighths + 0.5)) : std::min(int(floor(eighths)), 511);
+        const int phase_eighths = is_mmcm ? int(floor(eighths + 0.5)) : int(floor(eighths));
         phasemux = phase_eighths % 8;
         delaytime = phase_eighths / 8;
+    }
+
+    void check_delay_time(CellInfo *ci, const std::string &prim, const std::string &name, double phase,
+                          double divide, int delaytime, bool used)
+    {
+        if (!used || delaytime <= 63)
+            return;
+        log_error("PHASE_OUT_OF_RANGE: %s '%s' at %s requests %s_PHASE=%.6g on a divide-%.6g counter, a delay of %d "
+                  "VCO cycles; DELAY_TIME is six bits, so at most 63 cycles plus seven eighths (%.6g degrees at this "
+                  "divide) can be programmed.\n",
+                  prim.c_str(), ctx->nameOf(ci), get_tile_name(ci->bel.tile).c_str(), name.c_str(), phase, divide,
+                  delaytime, 511.0 * 360 / (divide * 8));
     }
 
     void write_pll_clkout(const std::string &name, CellInfo *ci)
@@ -2967,6 +2976,7 @@ struct FasmBackend
         if (used)
             check_divider_grid(ci, "PLLE2_ADV", divide_attr, false);
         check_duty_cycle(ci, "PLLE2_ADV", name, divide, frac, used, duty);
+        check_delay_time(ci, "PLLE2_ADV", name, phase, divide, delaytime, used);
         if (name == "DIVCLK") {
             write_int_vector("DIVCLK_DIVCLK_HIGH_TIME[5:0]", high, 6);
             write_int_vector("DIVCLK_DIVCLK_LOW_TIME[5:0]", low, 6);
@@ -3172,6 +3182,7 @@ struct FasmBackend
         if (used)
             check_divider_grid(ci, "MMCME2_ADV", divide_attr, fractional_counter);
         check_duty_cycle(ci, "MMCME2_ADV", name, divide, frac, used, duty);
+        check_delay_time(ci, "MMCME2_ADV", name, phase, divide, delaytime, used);
         if (name == "DIVCLK") {
             write_int_vector("DIVCLK_DIVCLK_HIGH_TIME[5:0]", high, 6);
             write_int_vector("DIVCLK_DIVCLK_LOW_TIME[5:0]", low, 6);
