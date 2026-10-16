@@ -5679,13 +5679,6 @@ void write_gtx_channel(CellInfo *ci)
             }
         };
 
-        // Tolerant parameter read: SVS/yosys store all-binary parameter values
-        // (e.g. USE_DPORT="0", PATTERN, MASK -- and even a "FALSE" that the
-        // front-end normalised to "0") as *numeric* Properties, on which
-        // str_or_default()/as_string() assert (is_string == false). Property::str
-        // holds the literal for string params AND the [01xz] bit-string for
-        // numeric ones (exactly what as_string() would have returned), so reading
-        // it directly is bit-for-bit equivalent but never aborts.
         auto dsp_str = [&](const char *pname, std::string def) -> std::string {
             auto it = ci->params.find(ctx->id(pname));
             if (it == ci->params.end())
@@ -5714,33 +5707,35 @@ void write_gtx_channel(CellInfo *ci)
         if (use_simd == "TWO24")  write_bit("USE_SIMD_FOUR12_TWO24");
         if (use_simd == "FOUR12") write_bit("USE_SIMD_FOUR12");
 
-        // PATTERN
-        auto pattern_str = dsp_str("PATTERN", "");
-        if (!boost::empty(pattern_str)) {
-            const size_t pattern_size = 48;
-            std::vector<bool> pattern_vector(pattern_size, true);
-            size_t i = 0;
-            for (auto it = pattern_str.crbegin(); it != pattern_str.crend() && i < pattern_size; ++i, ++it) {
-                pattern_vector[i] = *it == '1';
+        auto dsp_bits48 = [&](const char *pname, uint64_t def) -> std::vector<bool> {
+            std::vector<bool> bits(48, false);
+            auto it = ci->params.find(ctx->id(pname));
+            if (it == ci->params.end()) {
+                for (int i = 0; i < 48; i++)
+                    bits[i] = (def >> i) & 1;
+                return bits;
             }
-            write_vector("PATTERN[47:0]", pattern_vector);
-        }
+            const Property &prop = it->second;
+            for (int i = 0; i < int(prop.str.size()); i++) {
+                const char c = prop.str[i];
+                if (prop.is_string || (c != Property::S0 && c != Property::S1) || (i >= 48 && c == Property::S1))
+                    log_error("DSP48E1 '%s' at %s has %s='%s', which is not a 48-bit binary value.\n",
+                              ctx->nameOf(ci), tile_name.c_str(), pname,
+                              prop.is_string ? prop.str.c_str() : std::string(prop.str.rbegin(), prop.str.rend()).c_str());
+                if (i < 48)
+                    bits[i] = c == Property::S1;
+            }
+            return bits;
+        };
+
+        if (ci->params.count(ctx->id("PATTERN")))
+            write_vector("PATTERN[47:0]", dsp_bits48("PATTERN", 0));
 
         auto autoreset_patdet = dsp_str("AUTORESET_PATDET", "NO_RESET");
         if (autoreset_patdet == "RESET_MATCH")     write_bit("AUTORESET_PATDET_RESET");
         if (autoreset_patdet == "RESET_NOT_MATCH") write_bit("AUTORESET_PATDET_RESET_NOT_MATCH");
 
-        // MASK
-        auto mask_str = dsp_str("MASK", "001111111111111111111111111111111111111111111111");
-        // Yosys gives us 48 bit, but prjxray only recognizes 46 bits
-        // The most significant two bits seem to be zero, so let us just truncate them
-        const size_t mask_size = 46;
-        std::vector<bool> mask_vector(mask_size, true);
-        size_t i = 0;
-        for (auto it = mask_str.crbegin(); it != mask_str.crend() && i < mask_size; ++i, ++it) {
-            mask_vector[i] = *it == '1';
-        }
-        write_vector("MASK[45:0]", mask_vector);
+        write_vector("MASK[47:0]", dsp_bits48("MASK", 0x3FFFFFFFFFFFULL));
 
         auto sel_mask = dsp_str("SEL_MASK", "MASK");
         if (sel_mask == "C")              write_bit("SEL_MASK_C");

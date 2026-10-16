@@ -91,5 +91,13 @@ if builds pll_d100_p90; then
 fi
 refuses pll_d100_p270 'PHASE_OUT_OF_RANGE'
 
+if builds dsp_pattern; then
+    feature dsp_pattern '\.PATTERN\[' "DSP48.DSP_0.PATTERN[47:0] = 48'b$(printf '0%.0s' $(seq 47))1"
+    feature dsp_pattern '\.MASK\[' "DSP48.DSP_0.MASK[47:0] = 48'b11$(printf '0%.0s' $(seq 44))10"
+fi
+if builds dsp_default; then
+    lines dsp_default '\.PATTERN\[' 0
+    feature dsp_default '\.MASK\[' "DSP48.DSP_0.MASK[47:0] = 48'b00$(printf '1%.0s' $(seq 46))"
+fi
 echo "artefacts kept in $OUT"
 exit "$rc_total"
