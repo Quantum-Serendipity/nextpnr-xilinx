@@ -650,8 +650,10 @@ template <typename FrontendType> struct GenericFrontend
     void add_constant_driver(HierModuleState &m, NetInfo *net, char constval)
     {
 
-        if (constval == 'x' || constval == 'z')
-            return; // 'x' or 'z' is the same as undriven
+        if (constval == 'x' || constval == 'z') {
+            net->attrs[ctx->id("NEXTPNR_UNDEF_CONST")] = std::string(1, constval);
+            return;
+        }
         NPNR_ASSERT(constval == '0' || constval == '1');
         IdString cell_name = unique_name(
                 m.prefix, net->name.str(ctx) + (constval == '1' ? "$VCC$" : "$GND$") + std::to_string(const_autoidx++),

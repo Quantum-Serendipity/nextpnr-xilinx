@@ -147,6 +147,7 @@ struct XilinxPacker
     // Constant pins
     std::unordered_map<IdString, std::unordered_map<IdString, bool>> tied_pins;
     std::unordered_map<IdString, std::unordered_set<IdString>> invertible_pins;
+    std::set<std::pair<IdString, IdString>> kept_undriven_clocks;
     void pack_constants();
     void disconnect_constant_port(CellInfo *ci,IdString port);
 

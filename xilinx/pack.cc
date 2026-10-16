@@ -990,16 +990,8 @@ void XilinxPacker::pack_constants()
             ctx->id("RAMB36E2"), ctx->id("DSP48E1"),  ctx->id("DSP48E2")};
     const std::unordered_set<IdString> hard_block_clock_pins = {ctx->id("CLKARDCLK"), ctx->id("CLKBWRCLK"),
                                                                 ctx->id("CLK")};
-    int kept_undriven_clocks = 0;
-    auto is_frontend_const_net = [&](const NetInfo *net, const CellInfo *cell, IdString pin) {
-        std::string name = net->name.str(ctx);
-        size_t uniq = name.rfind("__unique__");
-        if (uniq != std::string::npos && uniq + 10 < name.size() &&
-            name.find_first_not_of("0123456789", uniq + 10) == std::string::npos)
-            name.resize(uniq);
-        const std::string tail = cell->name.str(ctx) + "." + pin.str(ctx) + "$const";
-        return name.size() >= tail.size() && name.compare(name.size() - tail.size(), tail.size(), tail) == 0;
-    };
+    const IdString undef_const = ctx->id("NEXTPNR_UNDEF_CONST");
+    int newly_kept = 0;
 
     for (auto cell : sorted(ctx->cells)) {
         CellInfo *ci = cell.second;
@@ -1010,17 +1002,24 @@ void XilinxPacker::pack_constants()
             NetInfo *pn = ci->ports.count(port.first) ? ci->ports.at(port.first).net : nullptr;
             if (pn != nullptr && pn->driver.cell != nullptr)
                 continue;
-            if (pn != nullptr && hard_block_clock_types.count(ci->type) && hard_block_clock_pins.count(port.first) &&
-                !is_frontend_const_net(pn, ci, port.first)) {
-                ++kept_undriven_clocks;
+            const bool hard_block_clock =
+                    hard_block_clock_types.count(ci->type) && hard_block_clock_pins.count(port.first);
+            if (pn != nullptr && hard_block_clock && !pn->attrs.count(undef_const)) {
+                if (kept_undriven_clocks.emplace(ci->name, port.first).second)
+                    ++newly_kept;
                 continue;
             }
+            if (pn != nullptr && hard_block_clock)
+                log_warning("%s pin %s of '%s' is on net '%s', an undefined ('%s') constant in the netlist; tying it "
+                            "to %d.\n",
+                            ci->type.c_str(ctx), port.first.c_str(ctx), ctx->nameOf(ci), ctx->nameOf(pn),
+                            pn->attrs.at(undef_const).as_string().c_str(), int(port.second));
             const_ports.emplace_back(ci, port.first, port.second);
         }
     }
 
-    if (kept_undriven_clocks > 0)
-        log_info("    kept %d hard-block clock pin(s) on an undriven net rather than tying them\n", kept_undriven_clocks);
+    if (newly_kept > 0)
+        log_info("    kept %d hard-block clock pin(s) on an undriven net rather than tying them\n", newly_kept);
 
     for (auto net : sorted(ctx->nets)) {
         NetInfo *ni = net.second;
