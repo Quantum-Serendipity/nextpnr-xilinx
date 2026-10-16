@@ -4265,15 +4265,29 @@ Arch::SyncPinTiming Arch::dramPinTiming(const CellInfo *cell, IdString port, boo
     return t;
 }
 
-bool Arch::dramCheck(const CellInfo *cell, IdString port, TimingCheckType type, double &value_ns) const
+bool Arch::dramTimingSite(const CellInfo *cell, int &tt_id, int &inst_id, IdString &variant, bool &is_lut5) const
 {
     if (cell->bel == BelId())
         return false;
-    int tt_id = locInfo(cell->bel).timing_index;
-    int inst_id = locInfo(cell->bel).bel_data[cell->bel.index].timing_inst;
-    bool is_lut5 = (locInfo(cell->bel).bel_data[cell->bel.index].z & 0xF) == BEL_5LUT;
-    IdString variant = cell->lutInfo.is_srl ? (is_lut5 ? id_lut5_shfreg : id_lut6_shfreg)
-                                            : (is_lut5 ? id_LUT_OR_MEM5LRAM : id_LUT_OR_MEM6LRAM);
+    const BelInfoPOD &bel = locInfo(cell->bel).bel_data[cell->bel.index];
+    IdString tile_type = getBelTileType(cell->bel);
+    if ((tile_type != id_CLBLM_L && tile_type != id_CLBLM_R) || bel.z >= 64)
+        return false;
+    tt_id = locInfo(cell->bel).timing_index;
+    inst_id = bel.timing_inst;
+    is_lut5 = (bel.z & 0xF) == BEL_5LUT;
+    variant = cell->lutInfo.is_srl ? (is_lut5 ? id_lut5_shfreg : id_lut6_shfreg)
+                                   : (is_lut5 ? id_LUT_OR_MEM5LRAM : id_LUT_OR_MEM6LRAM);
+    return true;
+}
+
+bool Arch::dramCheck(const CellInfo *cell, IdString port, TimingCheckType type, double &value_ns) const
+{
+    int tt_id, inst_id;
+    IdString variant;
+    bool is_lut5;
+    if (!dramTimingSite(cell, tt_id, inst_id, variant, is_lut5))
+        return false;
     if (port != id_DI1 && port != id_DI2)
         inst_id = xc7_timing_instance(tt_id, id_slicem_inst);
     delay_t vmax = 0, vmin = 0;
@@ -4301,13 +4315,11 @@ bool Arch::dramCheck(const CellInfo *cell, IdString port, TimingCheckType type, 
 
 bool Arch::dramClockToOut(const CellInfo *cell, IdString port, double &max_ns, double &min_ns) const
 {
-    if (cell->bel == BelId())
+    int tt_id, inst_id;
+    IdString variant;
+    bool is_lut5;
+    if (!dramTimingSite(cell, tt_id, inst_id, variant, is_lut5))
         return false;
-    int tt_id = locInfo(cell->bel).timing_index;
-    int inst_id = locInfo(cell->bel).bel_data[cell->bel.index].timing_inst;
-    bool is_lut5 = (locInfo(cell->bel).bel_data[cell->bel.index].z & 0xF) == BEL_5LUT;
-    IdString variant = cell->lutInfo.is_srl ? (is_lut5 ? id_lut5_shfreg : id_lut6_shfreg)
-                                            : (is_lut5 ? id_LUT_OR_MEM5LRAM : id_LUT_OR_MEM6LRAM);
     IdString to = is_lut5 && port != id_MC31 ? id_O5 : port;
     DelayInfo d;
     delay_t dmin = 0;
