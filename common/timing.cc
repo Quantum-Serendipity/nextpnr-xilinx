@@ -150,7 +150,7 @@ struct Timing
     std::unordered_map<std::string, int> tag_index;
     std::unordered_map<const CellInfo *, std::vector<std::pair<int, IdString>>> to_ids;
     std::unordered_map<ClockEvent, delay_t> domain_raw_max;
-    std::unordered_map<IdString, std::vector<std::string>> clock_names, clock_names_gen;
+    std::unordered_map<IdString, std::vector<std::vector<std::string>>> clock_names, clock_names_gen;
     int exc_setup_skipped = 0, exc_hold_skipped = 0, exc_max_delay = 0;
 
     struct ExceptionResult
@@ -263,58 +263,104 @@ struct Timing
             names.push_back(net->clkconstr->name);
     }
 
-    const NetInfo *clock_source(const NetInfo *net, bool include_generated) const
+    bool constant_net(const NetInfo *net) const
     {
+        if (net->driver.cell == nullptr)
+            return false;
+        const std::string &type = net->driver.cell->type.str(ctx);
+        return type == "PSEUDO_GND" || type == "PSEUDO_VCC" || type == "GND" || type == "VCC";
+    }
+
+    std::vector<const NetInfo *> clock_sources(const NetInfo *net, bool include_generated) const
+    {
+        std::vector<const NetInfo *> sources;
         const CellInfo *drv = net->driver.cell;
         if (drv == nullptr)
-            return nullptr;
+            return sources;
         const std::string &type = drv->type.str(ctx);
-        std::vector<const char *> inputs;
+        std::vector<const char *> inputs, alternates;
         if (type.find("BUF") != std::string::npos) {
             if (type.find("BUFR") != std::string::npos && !include_generated) {
                 auto div = drv->params.find(ctx->id("BUFR_DIVIDE"));
                 if (div != drv->params.end() && div->second.is_string && div->second.as_string() != "BYPASS" &&
                     div->second.as_string() != "1")
-                    return nullptr;
+                    return sources;
             }
             inputs = {"I", "I0", "PAD"};
+            if (type.find("BUFGCTRL") != std::string::npos || type.find("BUFGMUX") != std::string::npos)
+                alternates = {"I1"};
         } else if (include_generated && (type.find("PLLE2") != std::string::npos ||
                                          type.find("MMCME2") != std::string::npos)) {
             inputs = {"CLKIN1"};
+            alternates = {"CLKIN2"};
         }
-        for (auto in : inputs) {
+        auto input_net = [&](const char *in) -> const NetInfo * {
             auto fnd = drv->ports.find(ctx->id(in));
-            if (fnd != drv->ports.end() && fnd->second.type == PORT_IN && fnd->second.net != nullptr)
-                return fnd->second.net;
+            if (fnd == drv->ports.end() || fnd->second.type != PORT_IN || fnd->second.net == nullptr ||
+                constant_net(fnd->second.net))
+                return nullptr;
+            return fnd->second.net;
+        };
+        for (auto in : inputs)
+            if (const NetInfo *n = input_net(in)) {
+                sources.push_back(n);
+                break;
+            }
+        for (auto in : alternates)
+            if (const NetInfo *n = input_net(in))
+                sources.push_back(n);
+        return sources;
+    }
+
+    void collect_identities(const NetInfo *net, bool include_generated, std::vector<std::string> &names, int depth,
+                            std::vector<std::vector<std::string>> &out) const
+    {
+        size_t mark = names.size();
+        add_clock_names(net, names);
+        std::vector<const NetInfo *> sources;
+        if (depth + 1 < 16)
+            sources = clock_sources(net, include_generated);
+        if (sources.empty())
+            out.push_back(names);
+        for (auto src : sources)
+            collect_identities(src, include_generated, names, depth + 1, out);
+        names.resize(mark);
+    }
+
+    const std::vector<std::vector<std::string>> &clock_identities(IdString clk, bool include_generated)
+    {
+        auto &cache = include_generated ? clock_names_gen : clock_names;
+        auto fnd = cache.find(clk);
+        if (fnd != cache.end())
+            return fnd->second;
+        std::vector<std::vector<std::string>> identities;
+        auto ni = ctx->nets.find(clk);
+        if (ni == ctx->nets.end()) {
+            identities.push_back({clk.str(ctx)});
+        } else {
+            std::vector<std::string> names;
+            collect_identities(ni->second.get(), include_generated, names, 0, identities);
         }
-        return nullptr;
+        return cache.emplace(clk, std::move(identities)).first->second;
+    }
+
+    static bool identity_matches(const std::vector<std::string> &identity, const std::vector<std::string> &pats)
+    {
+        for (auto &pat : pats)
+            for (auto &n : identity)
+                if (glob_match(n, pat))
+                    return true;
+        return false;
     }
 
     bool clock_matches(IdString clk, const std::vector<std::string> &pats, bool include_generated)
     {
         if (clk == async_clock || pats.empty())
             return false;
-        auto &cache = include_generated ? clock_names_gen : clock_names;
-        auto fnd = cache.find(clk);
-        if (fnd == cache.end()) {
-            std::vector<std::string> names;
-            auto ni = ctx->nets.find(clk);
-            if (ni == ctx->nets.end()) {
-                names.push_back(clk.str(ctx));
-            } else {
-                const NetInfo *cursor = ni->second.get();
-                for (int depth = 0; cursor != nullptr && depth < 16; depth++) {
-                    add_clock_names(cursor, names);
-                    cursor = clock_source(cursor, include_generated);
-                }
-            }
-            fnd = cache.emplace(clk, names).first;
-        }
-        for (auto &pat : pats)
-            for (auto &n : fnd->second)
-                if (glob_match(n, pat))
-                    return true;
-        return false;
+        for (auto &identity : clock_identities(clk, include_generated))
+            if (!identity_matches(identity, pats))
+                return false;
+        return true;
     }
 
     bool groups_exclude(IdString launch, IdString capture)
@@ -322,17 +368,24 @@ struct Timing
         if (launch == async_clock || capture == async_clock)
             return false;
         for (auto &grp : ctx->timing_clock_groups) {
-            int gl = -1, gc = -1;
-            for (int i = 0; i < int(grp.groups.size()); i++) {
-                if (gl < 0 && clock_matches(launch, grp.groups.at(i), grp.include_generated))
-                    gl = i;
-                if (gc < 0 && clock_matches(capture, grp.groups.at(i), grp.include_generated))
-                    gc = i;
+            auto group_of = [&](const std::vector<std::string> &identity) {
+                for (int i = 0; i < int(grp.groups.size()); i++)
+                    if (identity_matches(identity, grp.groups.at(i)))
+                        return i;
+                return -1;
+            };
+            bool all_excluded = true;
+            for (auto &li : clock_identities(launch, grp.include_generated)) {
+                int gl = group_of(li);
+                for (auto &ci : clock_identities(capture, grp.include_generated)) {
+                    int gc = group_of(ci);
+                    bool excluded = (grp.groups.size() == 1) ? ((gl == 0) != (gc == 0))
+                                                             : (gl >= 0 && gc >= 0 && gl != gc);
+                    if (!excluded)
+                        all_excluded = false;
+                }
             }
-            if (grp.groups.size() == 1) {
-                if ((gl == 0) != (gc == 0))
-                    return true;
-            } else if (gl >= 0 && gc >= 0 && gl != gc)
+            if (all_excluded)
                 return true;
         }
         return false;
