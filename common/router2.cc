@@ -2255,6 +2255,10 @@ int partition_keepout_rect(const PartitionRouteCfg &cfg, Loc l)
 
 PartitionKeepoutLicence partition_keepout_licence(const Context *ctx, const PartitionRouteCfg &cfg, const NetInfo *ni)
 {
+    if (cfg.partition_rect_count() > 64)
+        log_error("partition keepout: the licence carries one bit per rectangle and supports at most 64, but %d were "
+                  "given\n",
+                  cfg.partition_rect_count());
     PartitionKeepoutLicence kl;
     kl.exempt_named = cfg.keepout_exempt_nets.count(ni->name) > 0;
     kl.exempt_buf =

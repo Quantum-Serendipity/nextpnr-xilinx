@@ -1142,13 +1142,14 @@ bool Arch::bridgeConstToWire(NetInfo *net, int pseudo_intent, WireId sink, int s
     std::unordered_map<WireId, PipId> backtrace;
     WireId dest = WireId();
     visit.push(sink);
+    const bool confined = roi_active() && !env_says_off("NEXTPNR_PARTITION_KEEPOUT");
     int iter = 0;
     while (!visit.empty() && iter < iter_max) {
         ++iter;
         WireId curr = visit.front();
         visit.pop();
         bool curr_is_dest = (getBoundWireNet(curr) == net &&
-                             (curr == sink || !roi_active() || const_path_in_rect(net, curr, sink_rect))) ||
+                             (curr == sink || !confined || const_path_in_rect(net, curr, sink_rect))) ||
                             (wireIntent(curr) == pseudo_intent);
         if (curr_is_dest) {
             dest = curr;
@@ -1164,7 +1165,7 @@ bool Arch::bridgeConstToWire(NetInfo *net, int pseudo_intent, WireId sink, int s
         for (auto uh : getPipsUphill(curr)) {
             if (!checkPipAvail(uh))
                 continue;
-            if (partition_rect_at(getPipLocation(uh)) != sink_rect)
+            if (confined && partition_rect_at(getPipLocation(uh)) != sink_rect)
                 continue;
             WireId s = getPipSrcWire(uh);
             bool src_already_visited = (backtrace.count(s) != 0);
@@ -5403,6 +5404,7 @@ void Arch::check_partition_keepout() const
     std::vector<std::pair<std::string, std::string>> offenders;
     int64_t const_pips = 0;
     std::set<std::pair<std::string, std::string>> const_offenders;
+    std::unordered_set<PipId> const_bad_pips;
     for (IdString cn : {gnd_net, vcc_net}) {
         auto nit = nets.find(cn);
         if (nit == nets.end())
@@ -5437,18 +5439,20 @@ void Arch::check_partition_keepout() const
                 const PipId pip = it->second.pip;
                 const Loc l = getPipLocation(pip);
                 const int kr = partition_rect_at(l);
-                if (kr != want)
+                if (kr != want) {
+                    const_bad_pips.insert(pip);
                     const_offenders.emplace(
                             std::string(net->name.c_str(this)),
                             stringf("%s at tile (%d,%d), in %s, on the path to a %s %s", nameOfPip(pip), l.x, l.y,
                                     kr < 0 ? "no rectangle" : stringf("rectangle %d", kr).c_str(),
                                     sit != sink_rect.end() ? "sink" : "route end",
                                     want < 0 ? "outside every rectangle" : stringf("in rectangle %d", want).c_str()));
+                }
                 cur = getPipSrcWire(pip);
             }
         }
     }
-    const int64_t const_bad = int64_t(const_offenders.size());
+    const int64_t const_bad = int64_t(const_bad_pips.size());
     for (auto np : sorted(nets)) {
         NetInfo *net = np.second;
         if (net->name == gnd_net || net->name == vcc_net)
@@ -5496,8 +5500,8 @@ void Arch::check_partition_keepout() const
         if (const_listed++ < report_cap)
             log_warning("partition keepout gate: constant net '%s' binds pip %s\n", o.first.c_str(), o.second.c_str());
     if (const_offenders.size() > report_cap)
-        log_warning("partition keepout gate: %d further constant pip(s) on a path that crosses a rectangle edge not "
-                    "listed\n",
+        log_warning("partition keepout gate: %d further constant pip and path pair(s) that cross a rectangle edge "
+                    "not listed\n",
                     int(const_offenders.size() - report_cap));
     log_info("partition keepout gate [%s]: %d static net(s) in scope, %lld of their pip(s) inside a rectangle, "
              "%lld unlicensed in %d net(s)\n",

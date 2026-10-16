@@ -229,6 +229,26 @@ arm_const_containment() {
     else
         report "FAIL constant containment, fresh bridge: rc $rc, $inside constant pip(s) in tile ($cx,$cy)"
     fi
+
+    NEXTPNR_PARTITION_ROI=$r NEXTPNR_PARTITION_KEEPOUT=off npnr "$OUT/m12-off.log" --json "$OUT/placed.json" \
+        --no-pack --no-place
+    rc=$?
+    local census
+    census=$(grep -c 'partition keepout gate \[report only, keepout DISABLED\]: [0-9]* constant pip' "$OUT/m12-off.log")
+    if [ "$rc" -eq 0 ] && [ "$census" -eq 1 ]; then
+        report "PASS constant containment with NEXTPNR_PARTITION_KEEPOUT=off: tile ($cx,$cy) does not confine the ties, rc 0, report-only census"
+    else
+        report "FAIL constant containment with NEXTPNR_PARTITION_KEEPOUT=off: rc $rc, $census report-only constant census line(s): $(grep -m1 '^ERROR' "$OUT/m12-off.log")"
+    fi
+
+    NEXTPNR_PARTITION_ROI=$r NEXTPNR_PARTITION_CLAMP=off NEXTPNR_PARTITION_KEEPOUT=off npnr "$OUT/m12-r1.log" \
+        --json "$OUT/placed-router1.json" --no-pack --no-place
+    rc=$?
+    if [ "$rc" -eq 0 ]; then
+        report "PASS constant containment, router1 with the clamp and the keepout both off over tile ($cx,$cy): rc 0"
+    else
+        report "FAIL constant containment, router1 with the clamp and the keepout both off over tile ($cx,$cy): rc $rc: $(grep -m1 '^ERROR' "$OUT/m12-r1.log")"
+    fi
 }
 
 arm_frozen_cell_not_moved() {
@@ -257,6 +277,28 @@ for name, cell in ctx.cells:
 EOF
 }
 
+arm_pinned_cell_not_moved_without_a_rectangle() {
+    local bel
+    bel=$(geom cell-tiles "$OUT/placed.json" SLICE_LUTX | awk 'NR == 1 { print $1 }')
+    printf '%s\n' "$bel" >"$OUT/m8-pin.bel"
+    geom pin "$OUT/placed.json" "$OUT/m8-pin.json" "$bel" 3 || {
+        report "FAIL pinned cell on a blacklisted bel without a rectangle: could not pin the cell on $bel"
+        return
+    }
+    env -u NEXTPNR_PARTITION_ROI NEXTPNR_BEL_BLACKLIST=$OUT/m8-pin.bel timeout "$NPNR_TIMEOUT" "$NEXTPNR" \
+        --chipdb "$CHIPDB" --log "$OUT/m8-pin.log" -q --json "$OUT/m8-pin.json" --no-pack --no-route \
+        --write "$OUT/m8-pin-out.json" >/dev/null 2>&1
+    local rc=$?
+    local err
+    err=$(grep -m1 '^ERROR: post-place repair:' "$OUT/m8-pin.log")
+    if [ "$rc" -ne 0 ] && grep -q 'a fixed or locked member are invalid at their own bels' <<<"$err" &&
+            ! grep -q 'rectangle' <<<"$err" && grep -q "(pinned, strength 3) is invalid at its own bel" "$OUT/m8-pin.log"; then
+        report "PASS pinned cell on a blacklisted bel without a rectangle: refused at rc $rc, no rectangle named"
+    else
+        report "FAIL pinned cell on a blacklisted bel without a rectangle: rc $rc: ${err:-no post-place repair error}"
+    fi
+}
+
 arm_pre_place_region_kept() {
     geom unplace "$OUT/placed.json" "$OUT/rm.json" SLICE_LUTX SLICE_FFX
     roi "$OUT/part.roi.json" 20 120 120 200
@@ -276,6 +318,20 @@ arm_pre_place_region_kept() {
         report "FAIL pre-place region inside the rectangle: rc $rc, $outside RM cell(s) outside (100,180)-(120,200): $(tr '\n' ';' <<<"$placed")"
     fi
 
+    if [ "$rc" -eq 0 ]; then
+        NEXTPNR_PARTITION_ROI=$OUT/part.roi.json NEXTPNR_PARTITION_NETS=warn npnr "$OUT/l6-route.log" \
+            --json "$OUT/l6-in.json" --no-pack --no-place --write-fixed-routes "$OUT/l6-route.routes"
+        local rrc=$?
+        local inside_const='-' clean
+        [ -f "$OUT/l6-route.routes" ] && inside_const=$(geom count "$OUT/l6-route.routes" const 20 120 120 200)
+        clean=$(grep -c 'partition keepout gate \[fatal\]: [0-9]* constant pip(s), 0 on a path' "$OUT/l6-route.log")
+        if [ "$rrc" -eq 0 ] && [ "$inside_const" != '-' ] && [ "$inside_const" -gt 0 ] && [ "$clean" -eq 1 ]; then
+            report "PASS constant ties for RM sinks inside the rectangle: rc 0, $inside_const constant pip(s) inside, gate census clean"
+        else
+            report "FAIL constant ties for RM sinks inside the rectangle: rc $rrc, $inside_const constant pip(s) inside, $clean clean constant census line(s)"
+        fi
+    fi
+
     sub_region_hook "$OUT/sub-out.py" 0 100 30 130
     NEXTPNR_PARTITION_ROI=$OUT/part.roi.json NEXTPNR_PARTITION_NETS=warn npnr "$OUT/l6-out.log" --json "$OUT/rm.json" \
         --no-pack --no-route --pre-place "$OUT/sub-out.py" --write "$OUT/l6-out.json"
@@ -293,6 +349,7 @@ arm_router1_refused_under_a_rectangle
 arm_static_keepout
 arm_const_containment
 arm_frozen_cell_not_moved
+arm_pinned_cell_not_moved_without_a_rectangle
 arm_pre_place_region_kept
 
 echo "artefacts kept in $OUT"

@@ -1433,16 +1433,21 @@ void Arch::fixupPlacement()
             for (size_t i = 0; i < frozen_invalid.size() && i < report_cap; i++) {
                 const CellInfo *fc = frozen_invalid[i];
                 log_warning("post-place repair: '%s' (%s, strength %d) is invalid at its own bel %s\n",
-                            fc->name.c_str(this), is_rm_cell(fc) ? "RM" : "static", int(fc->belStrength),
-                            nameOfBel(fc->bel));
+                            fc->name.c_str(this), !roi_active() ? "pinned" : is_rm_cell(fc) ? "RM" : "static",
+                            int(fc->belStrength), nameOfBel(fc->bel));
             }
             if (frozen_invalid.size() > report_cap)
                 log_warning("post-place repair: %d further frozen cluster(s) not listed\n",
                             int(frozen_invalid.size() - report_cap));
-            log_error("post-place repair: %d cluster(s) with a fixed, locked or static member are invalid at their own "
-                      "bels (listed above). They may not be moved: a static cell moved under a partition rectangle "
-                      "can only land inside it. Check NEXTPNR_BEL_BLACKLIST against the bels the imported static "
-                      "occupies.\n",
+            if (roi_active())
+                log_error("post-place repair: %d cluster(s) with a fixed, locked or static member are invalid at their "
+                          "own bels (listed above). They may not be moved: a static cell moved under a partition "
+                          "rectangle can only land inside it. Check NEXTPNR_BEL_BLACKLIST against the bels the "
+                          "imported static occupies.\n",
+                          int(frozen_invalid.size()));
+            log_error("post-place repair: %d cluster(s) with a fixed or locked member are invalid at their own bels "
+                      "(listed above). They may not be moved: moving one would discard the placement it was pinned "
+                      "to. Check NEXTPNR_BEL_BLACKLIST and the pinned bels against each other.\n",
                       int(frozen_invalid.size()));
         }
         int fixed = 0;
@@ -1515,7 +1520,7 @@ void Arch::fixupPlacement()
                             if (!cluster_bels(rb, mbels))
                                 continue;
                             for (size_t i = 0; i < members.size(); i++)
-                                bindBel(mbels[i], members[i], std::max(orig_strength[i], STRENGTH_STRONG));
+                                bindBel(mbels[i], members[i], STRENGTH_STRONG);
                             bool allok = true;
                             for (BelId b : mbels)
                                 if (!isBelLocationValid(b)) {

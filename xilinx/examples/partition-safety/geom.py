@@ -81,6 +81,20 @@ def unplace(placed, out, cell_types):
         json.dump(d, f)
 
 
+def pin(placed, out, bel, strength):
+    with open(placed) as f:
+        d = json.load(f)
+    hit = 0
+    for c in d["modules"]["top"]["cells"].values():
+        if c["attributes"].get("NEXTPNR_BEL") == bel:
+            c["attributes"]["BEL_STRENGTH"] = format(strength, "032b")
+            hit += 1
+    if hit == 0:
+        sys.exit("no cell sits on " + bel)
+    with open(out, "w") as f:
+        json.dump(d, f)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--tilegrid", required=True)
@@ -101,6 +115,11 @@ def main():
     p.add_argument("placed")
     p.add_argument("out")
     p.add_argument("cell_types", nargs="+")
+    p = sub.add_parser("pin")
+    p.add_argument("placed")
+    p.add_argument("out")
+    p.add_argument("bel")
+    p.add_argument("strength", type=int)
     a = ap.parse_args()
     with open(a.tilegrid) as f:
         grid = json.load(f)
@@ -114,6 +133,8 @@ def main():
         cell_tiles(grid, a.placed, a.cell_type)
     elif a.cmd == "unplace":
         unplace(a.placed, a.out, a.cell_types)
+    elif a.cmd == "pin":
+        pin(a.placed, a.out, a.bel, a.strength)
 
 
 if __name__ == "__main__":
