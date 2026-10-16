@@ -80,6 +80,12 @@ else
     report FAIL "hier_x: synthesis or packing failed"
 fi
 
+if synth hier_x_merge hier_x_merge "" && pack hier_x_merge; then
+    grade hier_x_merge 1 1 0
+else
+    report FAIL "hier_x_merge: synthesis or packing failed"
+fi
+
 if synth flat_x flat_x -flatten && pack flat_x; then
     grade flat_x 1 1 0
 else

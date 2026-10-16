@@ -682,6 +682,8 @@ template <typename FrontendType> struct GenericFrontend
                 base->driver = mergee->driver;
             }
         }
+        if (base->undef_const == 0)
+            base->undef_const = mergee->undef_const;
         // Combine users
         for (auto &usr : mergee->users) {
             usr.cell->ports[usr.port].net = base;
