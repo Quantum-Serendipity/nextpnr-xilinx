@@ -24,10 +24,14 @@
 #include <cctype>
 #include <cmath>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <map>
 #include <queue>
+#include <random>
 #include <set>
+#include <system_error>
+#include "design_utils.h"
 #include "log.h"
 #include "nextpnr.h"
 #include "placer1.h"
@@ -36,7 +40,6 @@
 #include "router2.h"
 #include "timing.h"
 #include "util.h"
-#include "design_utils.h"
 
 NEXTPNR_NAMESPACE_BEGIN
 
@@ -2558,45 +2561,97 @@ void Arch::applyFixedRoutes(const std::string &filename, std::function<void()> r
 // full routed design through write->read must re-bind every pip and leave the
 // router with nothing to do (self-test); a filtered subset captures a hard
 // macro's frozen island.
+void Arch::writeFileReplacing(const std::string &filename, const char *what,
+                              std::function<void(std::ostream &)> body) const
+{
+    std::string dest = filename;
+    bool dest_is_special = false;
+    std::error_code status_ec;
+    if (std::filesystem::is_symlink(std::filesystem::symlink_status(filename, status_ec))) {
+        std::error_code resolve_ec;
+        const auto resolved = std::filesystem::canonical(filename, resolve_ec);
+        if (resolve_ec)
+            dest_is_special = true;
+        else
+            dest = resolved.string();
+    }
+    const auto dest_status = std::filesystem::status(dest, status_ec);
+    if (std::filesystem::exists(dest_status) && !std::filesystem::is_regular_file(dest_status))
+        dest_is_special = true;
+    std::random_device tmp_entropy;
+    const std::string write_path =
+            dest_is_special ? dest : stringf("%s.nextpnr-tmp.%08x", dest.c_str(), unsigned(tmp_entropy()));
+    struct PendingFile
+    {
+        std::string path;
+        bool commit = false;
+        ~PendingFile()
+        {
+            if (!commit) {
+                std::error_code remove_ec;
+                std::filesystem::remove(path, remove_ec);
+            }
+        }
+    } pending{write_path, dest_is_special};
+
+    {
+        std::ofstream out(write_path);
+        if (!out)
+            log_error("failed to open file %s for writing (%s)\n", filename.c_str(), strerror(errno));
+        body(out);
+        out.flush();
+        if (!out.good())
+            log_error("failed to write %s file %s\n", what, filename.c_str());
+    }
+
+    if (dest_is_special)
+        return;
+    std::error_code rename_ec;
+    std::filesystem::rename(write_path, dest, rename_ec);
+    if (rename_ec)
+        log_error("failed to rename %s file %s to %s (%s)\n", what, write_path.c_str(), dest.c_str(),
+                  rename_ec.message().c_str());
+    pending.commit = true;
+}
+
 void Arch::writeFixedRoutes(const std::string &filename, bool region_only) const
 {
-    std::ofstream out(filename);
-    if (!out)
-        log_error("failed to open fixed-routes output '%s'\n", filename.c_str());
     if (region_only && !roi_active())
         log_error("--region-only needs a partition rectangle; set NEXTPNR_PARTITION_ROI\n");
-    out << "# nextpnr-xilinx fixed-routes: <net> <tile>/<src_idx>.<dst_idx>\n";
     int npips = 0, nnets = 0, nskipped = 0;
-    for (auto &np : nets) {
-        NetInfo *ni = np.second.get();
-        bool any = false;
-        for (auto &w : ni->wires) {
-            PipId pip = w.second.pip;
-            if (pip == PipId())
-                continue;
-            // The format is one self-contained line per pip -- the net name is
-            // re-emitted on every line and there is no per-net header -- so a
-            // per-pip filter needs no format change.  What it DOES produce is a
-            // disconnected locked tree for any net the rectangle cuts, which is
-            // the reader's normal case (applyFixedRoutes hands the remainder to
-            // router2) but is invisible in the file: nothing records that a
-            // fragment is a fragment.
-            if (region_only) {
-                Loc l = getPipLocation(pip);
-                if (l.x < roi_x0 || l.x > roi_x1 || l.y < roi_y0 || l.y > roi_y1) {
-                    nskipped++;
+    writeFileReplacing(filename, "fixed-routes", [&](std::ostream &out) {
+        out << "# nextpnr-xilinx fixed-routes: <net> <tile>/<src_idx>.<dst_idx>\n";
+        for (auto &np : nets) {
+            NetInfo *ni = np.second.get();
+            bool any = false;
+            for (auto &w : ni->wires) {
+                PipId pip = w.second.pip;
+                if (pip == PipId())
                     continue;
+                // The format is one self-contained line per pip -- the net name is
+                // re-emitted on every line and there is no per-net header -- so a
+                // per-pip filter needs no format change.  What it DOES produce is a
+                // disconnected locked tree for any net the rectangle cuts, which is
+                // the reader's normal case (applyFixedRoutes hands the remainder to
+                // router2) but is invisible in the file: nothing records that a
+                // fragment is a fragment.
+                if (region_only) {
+                    Loc l = getPipLocation(pip);
+                    if (l.x < roi_x0 || l.x > roi_x1 || l.y < roi_y0 || l.y > roi_y1) {
+                        nskipped++;
+                        continue;
+                    }
                 }
+                auto &pd = locInfo(pip).pip_data[pip.index];
+                out << ni->name.str(this) << ' ' << chip_info->tile_insts[pip.tile].name.get() << '/' << pd.src_index
+                    << '.' << pd.dst_index << '\n';
+                npips++;
+                any = true;
             }
-            auto &pd = locInfo(pip).pip_data[pip.index];
-            out << ni->name.str(this) << ' ' << chip_info->tile_insts[pip.tile].name.get() << '/' << pd.src_index
-                << '.' << pd.dst_index << '\n';
-            npips++;
-            any = true;
+            if (any)
+                nnets++;
         }
-        if (any)
-            nnets++;
-    }
+    });
     if (region_only)
         log_info("Wrote %d fixed-route pips across %d nets to '%s' (%d outside the rectangle skipped)\n", npips, nnets,
                  filename.c_str(), nskipped);
