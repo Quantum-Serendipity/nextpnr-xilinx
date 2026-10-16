@@ -1046,8 +1046,10 @@ struct Timing
                 }
             }
             std::unordered_map<ClockEvent, delay_t> worst_slack;
+            std::unordered_map<const NetInfo *, std::vector<std::pair<ClockEvent, std::vector<delay_t>>>>
+                    net_domain_slack;
+            std::unordered_map<const NetInfo *, std::unordered_map<ClockEvent, unsigned>> net_domain_length;
 
-            // Assign slack values
             for (auto &net_entry : net_data) {
                 const NetInfo *net = net_entry.first;
                 std::vector<std::pair<ClockEvent, std::vector<delay_t>>> domain_slack;
@@ -1057,9 +1059,6 @@ struct Timing
                         continue;
                     if (nd.min_required.empty())
                         continue;
-                    auto &nc = (*net_crit)[net->name];
-                    if (nc.slack.empty())
-                        nc.slack.resize(net->users.size(), std::numeric_limits<delay_t>::max());
                     ClockEvent domain{startdomain.first.clock, startdomain.first.edge};
                     auto ds = std::find_if(domain_slack.begin(), domain_slack.end(),
                                            [&](const std::pair<ClockEvent, std::vector<delay_t>> &d) {
@@ -1070,63 +1069,46 @@ struct Timing
                                                                                std::numeric_limits<delay_t>::max()));
                         ds = std::prev(domain_slack.end());
                     }
-#if 0
-                    if (ctx->debug)
-                        log_info("Net %s cd %s\n", net->name.c_str(ctx), startdomain.first.clock.c_str(ctx));
-#endif
+                    auto &len = net_domain_length[net][domain];
+                    len = std::max(len, nd.max_path_length);
                     for (size_t i = 0; i < net->users.size(); i++) {
                         delay_t slack = nd.min_required.at(i) -
                                         (nd.max_arrival + ctx->getNetinfoRouteDelay(net, net->users.at(i)));
-#if 0
-                        if (ctx->debug)
-                            log_info("    user %s.%s required %.02fns arrival %.02f route %.02f slack %.02f\n",
-                                    net->users.at(i).cell->name.c_str(ctx), net->users.at(i).port.c_str(ctx),
-                                    ctx->getDelayNS(nd.min_required.at(i)), ctx->getDelayNS(nd.max_arrival),
-                                    ctx->getDelayNS(ctx->getNetinfoRouteDelay(net, net->users.at(i))), ctx->getDelayNS(slack));
-#endif
                         if (worst_slack.count(domain))
                             worst_slack.at(domain) = std::min(worst_slack.at(domain), slack);
                         else
                             worst_slack[domain] = slack;
                         ds->second.at(i) = std::min(ds->second.at(i), slack);
                     }
-                    if (ctx->debug)
-                        log_break();
                 }
-                if (!domain_slack.empty()) {
-                    auto &nc = (*net_crit)[net->name];
-                    for (auto &ds : domain_slack)
-                        for (size_t i = 0; i < net->users.size(); i++)
-                            nc.slack.at(i) = ds.second.at(i);
-                }
+                if (domain_slack.empty())
+                    continue;
+                auto &nc = (*net_crit)[net->name];
+                nc.slack.assign(net->users.size(), std::numeric_limits<delay_t>::max());
+                for (auto &ds : domain_slack)
+                    for (size_t i = 0; i < net->users.size(); i++)
+                        nc.slack.at(i) = std::min(nc.slack.at(i), ds.second.at(i));
+                net_domain_slack.emplace(net, std::move(domain_slack));
             }
             const std::unordered_map<ClockEvent, delay_t> &domain_dmax = domain_raw_max;
-            // Assign criticality values
-            for (auto &net_entry : net_data) {
-                const NetInfo *net = net_entry.first;
-                for (auto &startdomain : net_entry.second) {
-                    if (startdomain.first.clock == async_clock)
-                        continue;
-                    auto &nd = startdomain.second;
-                    if (nd.min_required.empty())
-                        continue;
-                    auto &nc = (*net_crit)[net->name];
-                    if (nc.slack.empty())
+            for (auto &entry : net_domain_slack) {
+                const NetInfo *net = entry.first;
+                auto &nc = (*net_crit)[net->name];
+                for (auto &ds : entry.second) {
+                    const ClockEvent &domain = ds.first;
+                    if (!domain_dmax.count(domain))
                         continue;
                     if (nc.criticality.empty())
                         nc.criticality.resize(net->users.size(), 0);
-                    // Only consider intra-clock paths for criticality
-                    ClockEvent domain{startdomain.first.clock, startdomain.first.edge};
-                    if (!domain_dmax.count(domain))
-                        continue;
                     delay_t dmax = domain_dmax.at(domain);
                     for (size_t i = 0; i < net->users.size(); i++) {
                         float criticality =
-                                1.0f - ((float(nc.slack.at(i)) - float(worst_slack.at(domain))) / dmax);
-                        nc.criticality.at(i) = std::min<double>(1.0, std::max<double>(0.0, criticality));
+                                1.0f - ((float(ds.second.at(i)) - float(worst_slack.at(domain))) / dmax);
+                        nc.criticality.at(i) =
+                                std::max<float>(nc.criticality.at(i), std::min(1.0f, std::max(0.0f, criticality)));
                     }
-                    nc.max_path_length = nd.max_path_length;
-                    nc.cd_worst_slack = worst_slack.at(domain);
+                    nc.max_path_length = std::max(nc.max_path_length, net_domain_length.at(net).at(domain));
+                    nc.cd_worst_slack = std::min(nc.cd_worst_slack, worst_slack.at(domain));
                 }
             }
             // Export per-net max criticality (0..1) for timing-driven PLACEMENT
