@@ -56,7 +56,7 @@ void XC7Packer::prepare_clocking()
         };
         // Tag a port rename so downstream consumers (json2dcp / fasm.cc)
         // can reconstruct the source-RTL port name.  The general xform_cell
-        // path in pack.cc:70 does this automatically; this lambda mirrors
+        // path does this automatically; this lambda mirrors
         // that behaviour for the rename_port() calls in this loop that
         // bypass xform_cell.  Without these tags the json2dcp EDIF leaves
         // the packed cell's pins floating (e.g. clk_raw had no sink because
@@ -83,6 +83,27 @@ void XC7Packer::prepare_clocking()
             ci->type = ctx->id("BUFGCTRL");
             rename_port(ctx, ci, ctx->id("I"), ctx->id("I0"));
             rename_port(ctx, ci, ctx->id("CE"), ctx->id("CE0"));
+            {
+                IdString is_i_inv = ctx->id("IS_I_INVERTED");
+                NetInfo *i0_net = get_net_or_empty(ci, ctx->id("I0"));
+                NetInfo *vcc = ctx->nets.at(ctx->id("$PACKER_VCC_NET")).get();
+                NetInfo *gnd = ctx->nets.at(ctx->id("$PACKER_GND_NET")).get();
+                if (ci->params.count(is_i_inv) && (i0_net == vcc || i0_net == gnd)) {
+                    if (bool_or_default(ci->params, is_i_inv)) {
+                        disconnect_port(ctx, ci, ctx->id("I0"));
+                        connect_port(ctx, i0_net == vcc ? gnd : vcc, ci, ctx->id("I0"));
+                    }
+                    ci->params.erase(is_i_inv);
+                }
+            }
+            for (auto pin : {std::make_pair("I", "I0"), std::make_pair("CE", "CE0")}) {
+                IdString from = ctx->id(std::string("IS_") + pin.first + "_INVERTED");
+                auto found = ci->params.find(from);
+                if (found == ci->params.end())
+                    continue;
+                ci->params[ctx->id(std::string("IS_") + pin.second + "_INVERTED")] = found->second;
+                ci->params.erase(from);
+            }
             save_orig_port("I0",  "I");
             save_orig_port("CE0", "CE");
             save_orig_port("O",   "O");

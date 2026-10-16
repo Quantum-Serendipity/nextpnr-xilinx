@@ -2708,6 +2708,8 @@ bool Arch::isGlobalClockNet(const NetInfo *clk_net, bool &lenient) const
     if (clk_driver.cell == nullptr)
         return false;
     auto driver_type = clk_driver.cell->type;
+    if (driver_type == id_PSEUDO_GND || driver_type == id_PSEUDO_VCC)
+        return false;
     auto no_users = clk_net->users.size();
     auto clk_net_user = no_users == 1 ? clk_net->users.front().cell : nullptr;
     auto clk_net_user_type = clk_net_user == nullptr ? IdString() : clk_net_user->type;

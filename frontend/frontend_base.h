@@ -652,8 +652,10 @@ template <typename FrontendType> struct GenericFrontend
     void add_constant_driver(HierModuleState &m, NetInfo *net, char constval)
     {
 
-        if (constval == 'x' || constval == 'z')
-            return; // 'x' or 'z' is the same as undriven
+        if (constval == 'x' || constval == 'z') {
+            net->undef_const = constval;
+            return;
+        }
         NPNR_ASSERT(constval == '0' || constval == '1');
         IdString cell_name = unique_name(
                 m.prefix, net->name.str(ctx) + (constval == '1' ? "$VCC$" : "$GND$") + std::to_string(const_autoidx++),
@@ -682,6 +684,8 @@ template <typename FrontendType> struct GenericFrontend
                 base->driver = mergee->driver;
             }
         }
+        if (base->undef_const == 0)
+            base->undef_const = mergee->undef_const;
         // Combine users
         for (auto &usr : mergee->users) {
             usr.cell->ports[usr.port].net = base;

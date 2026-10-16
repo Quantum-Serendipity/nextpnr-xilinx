@@ -30,6 +30,7 @@ FAMILIES=(
     "mmcm_pwrdwn   MMCME2_ADV.ZINV_PWRDWN     1 0 yes"
     "bram_rstreg   ZINV_RSTREGARSTREG         0 1 yes"
     "bufgctrl_ce1  ZINV_CE1                   0 1 yes"
+    "bufgce_ce     ZINV_CE0                   1 2 no"
     "dsp_alumode0  ZIS_ALUMODE_INVERTED[0]    0 1 yes"
     "dsp_inmode1   _INMODE1.DSP_VCC_          0 1 yes"
     "oddr_d1       IS_D1_INVERTED             1 0 no"
@@ -104,6 +105,47 @@ for fam in "${FAMILIES[@]}"; do
         fi
     done
 done
+
+refuses() {
+    local v=$1 want=$2
+    if ! "$YOSYS" -q -l "$OUT/$v.yosys.log" \
+            -p "read_verilog \"$HERE/$v.v\"; synth_xilinx -flatten -abc9 -arch xc7 -top top; write_json \"$OUT/$v.json\"" \
+            >/dev/null 2>&1; then
+        report FAIL "$v: yosys"
+        return
+    fi
+    "$NEXTPNR" --chipdb "$CHIPDB" --xdc "$HERE/invertible-tie.xdc" --json "$OUT/$v.json" \
+        --fasm "$OUT/$v.fasm" --log "$OUT/$v.npnr.log" -q --seed 1 >/dev/null 2>&1
+    local rc=$?
+    if [ "$rc" -ne 0 ] && grep -qF -- "$want" "$OUT/$v.npnr.log"; then
+        report PASS "$v: refused (rc $rc) with '$want'"
+    else
+        report FAIL "$v: rc $rc, want a refusal naming '$want'"
+    fi
+}
+
+refuses bufgce_i_isinv "IS_I0_INVERTED"
+
+if build bufg_i_tie0; then
+    report PASS "bufg_i_tie0: built with I0 on the GND constant"
+else
+    rc_total=1
+fi
+
+if build bufgce_i_tie0 && build bufgce_i_tie1 && build bufgce_i_tie1isinv; then
+    if how=$(same_fasm bufgce_i_tie1isinv bufgce_i_tie0); then
+        report PASS "bufgce_i_tie1isinv == bufgce_i_tie0 ($how)"
+    else
+        report FAIL "bufgce_i_tie1isinv != bufgce_i_tie0"
+    fi
+    if same_fasm bufgce_i_tie0 bufgce_i_tie1 >/dev/null; then
+        report FAIL "bufgce_i_tie0 == bufgce_i_tie1, want I0 on opposite constants"
+    else
+        report PASS "bufgce_i_tie0 != bufgce_i_tie1"
+    fi
+else
+    rc_total=1
+fi
 
 if build bufgmux_undrv; then
     s0=$(count bufgmux_undrv ZINV_S0)
