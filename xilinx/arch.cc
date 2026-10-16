@@ -962,13 +962,27 @@ bool Arch::place()
     if (roi_active()) {
         IdString rname = id("partition_region");
         createRectangularRegion(rname, roi_x0, roi_y0, roi_x1, roi_y1);
-        int steered = 0;
+        int steered = 0, kept = 0;
         for (auto &cell : cells) {
             CellInfo *ci = cell.second.get();
             if (!is_rm_cell(ci))
                 continue;
-            ci->region = region.at(rname).get();
             ++steered;
+            if (ci->region == nullptr) {
+                ci->region = region.at(rname).get();
+                continue;
+            }
+            bool inside = ci->region->constr_bels && !ci->region->bels.empty();
+            for (BelId b : ci->region->bels)
+                if (bel_outside_roi(b)) {
+                    inside = false;
+                    break;
+                }
+            if (!inside)
+                log_error("partition region: RM cell '%s' was given region '%s' before placement, and that region "
+                          "is not a non-empty set of bels inside the partition rectangle (%d,%d)-(%d,%d)\n",
+                          ci->name.c_str(this), ci->region->name.c_str(this), roi_x0, roi_y0, roi_x1, roi_y1);
+            ++kept;
         }
         // Unconditional, like every other partition census in this file: a
         // mechanism that is silent when it does nothing cannot be told apart
@@ -976,6 +990,7 @@ bool Arch::place()
         // snapshot is empty, which is worth seeing.
         log_info("partition region: steering %d RM cell(s) into (%d,%d)-(%d,%d), %d bel(s) in region\n", steered,
                  roi_x0, roi_y0, roi_x1, roi_y1, int(region.at(rname)->bels.size()));
+        log_info("partition region: %d of them keep a region set before placement, inside the rectangle\n", kept);
     }
 
     std::string placer = str_or_default(settings, id("placer"), defaultPlacer);

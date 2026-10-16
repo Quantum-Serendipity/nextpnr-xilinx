@@ -248,12 +248,52 @@ arm_frozen_cell_not_moved() {
     fi
 }
 
+sub_region_hook() {
+    cat >"$1" <<EOF
+ctx.createRectangularRegion("sub", $2, $3, $4, $5)
+for name, cell in ctx.cells:
+    if cell.type in ("SLICE_LUTX", "SLICE_FFX"):
+        ctx.constrainCellToRegion(name, "sub")
+EOF
+}
+
+arm_pre_place_region_kept() {
+    geom unplace "$OUT/placed.json" "$OUT/rm.json" SLICE_LUTX SLICE_FFX
+    roi "$OUT/part.roi.json" 20 120 120 200
+
+    sub_region_hook "$OUT/sub-in.py" 100 180 120 200
+    NEXTPNR_PARTITION_ROI=$OUT/part.roi.json NEXTPNR_PARTITION_NETS=warn npnr "$OUT/l6-in.log" --json "$OUT/rm.json" \
+        --no-pack --no-route --pre-place "$OUT/sub-in.py" --write "$OUT/l6-in.json"
+    local rc=$?
+    local placed='' outside=0
+    if [ "$rc" -eq 0 ]; then
+        placed=$( { geom cell-tiles "$OUT/l6-in.json" SLICE_LUTX; geom cell-tiles "$OUT/l6-in.json" SLICE_FFX; } )
+        outside=$(awk '!($2 >= 100 && $2 <= 120 && $3 >= 180 && $3 <= 200)' <<<"$placed" | wc -l)
+    fi
+    if [ "$rc" -eq 0 ] && [ -n "$placed" ] && [ "$outside" -eq 0 ]; then
+        report "PASS pre-place region inside the rectangle: every RM cell placed inside (100,180)-(120,200)"
+    else
+        report "FAIL pre-place region inside the rectangle: rc $rc, $outside RM cell(s) outside (100,180)-(120,200): $(tr '\n' ';' <<<"$placed")"
+    fi
+
+    sub_region_hook "$OUT/sub-out.py" 0 100 30 130
+    NEXTPNR_PARTITION_ROI=$OUT/part.roi.json NEXTPNR_PARTITION_NETS=warn npnr "$OUT/l6-out.log" --json "$OUT/rm.json" \
+        --no-pack --no-route --pre-place "$OUT/sub-out.py" --write "$OUT/l6-out.json"
+    rc=$?
+    if [ "$rc" -ne 0 ] && grep -q "^ERROR: partition region: RM cell .* is not a non-empty set of bels inside" "$OUT/l6-out.log"; then
+        report "PASS pre-place region reaching outside the rectangle: refused at rc $rc"
+    else
+        report "FAIL pre-place region reaching outside the rectangle: rc $rc, no refusal"
+    fi
+}
+
 arm_region_only_keeps_output
 arm_fixed_routes_command_line_wins
 arm_router1_refused_under_a_rectangle
 arm_static_keepout
 arm_const_containment
 arm_frozen_cell_not_moved
+arm_pre_place_region_kept
 
 echo "artefacts kept in $OUT"
 exit "$rc_total"

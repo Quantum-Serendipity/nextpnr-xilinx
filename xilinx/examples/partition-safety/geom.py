@@ -70,6 +70,17 @@ def cell_tiles(grid, placed, cell_type):
         print(bel, x, y)
 
 
+def unplace(placed, out, cell_types):
+    with open(placed) as f:
+        d = json.load(f)
+    for c in d["modules"]["top"]["cells"].values():
+        if c["type"] in cell_types:
+            c["attributes"].pop("NEXTPNR_BEL", None)
+            c["attributes"].pop("BEL_STRENGTH", None)
+    with open(out, "w") as f:
+        json.dump(d, f)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--tilegrid", required=True)
@@ -86,6 +97,10 @@ def main():
     p = sub.add_parser("cell-tiles")
     p.add_argument("placed")
     p.add_argument("cell_type")
+    p = sub.add_parser("unplace")
+    p.add_argument("placed")
+    p.add_argument("out")
+    p.add_argument("cell_types", nargs="+")
     a = ap.parse_args()
     with open(a.tilegrid) as f:
         grid = json.load(f)
@@ -97,6 +112,8 @@ def main():
         count(read_routes(a.routes, grid), a.x0, a.y0, a.x1, a.y1, a.which)
     elif a.cmd == "cell-tiles":
         cell_tiles(grid, a.placed, a.cell_type)
+    elif a.cmd == "unplace":
+        unplace(a.placed, a.out, a.cell_types)
 
 
 if __name__ == "__main__":

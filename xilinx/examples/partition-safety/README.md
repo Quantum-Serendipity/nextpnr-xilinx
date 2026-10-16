@@ -11,7 +11,7 @@ CHIPDB=/path/to/xc7a100tfgg484.bin YOSYS=yosys NEXTPNR=/path/to/nextpnr-xilinx .
 The rectangles are chosen from the base route, so `run.sh` reads prjxray-db's
 `artix7/xc7a100t/tilegrid.json` to turn tile names into grid coordinates. `PRJXRAY_DB` names the
 database root; the default is this fork's `xilinx/external/prjxray-db` submodule. `geom.py` does the
-lookups. `NPNR_TIMEOUT` bounds each nextpnr run in seconds (default 600). `run.sh` exits non-zero if any arm
+lookups. The pre-place arms need a nextpnr built with Python. `NPNR_TIMEOUT` bounds each nextpnr run in seconds (default 600). `run.sh` exits non-zero if any arm
 fails and leaves its outputs in `$OUT` (a fresh `mktemp -d` by default).
 
 | arm | passes when |
@@ -26,3 +26,5 @@ fails and leaves its outputs in `$OUT` (a fresh `mktemp -d` by default).
 | constant containment, imported | a one-tile rectangle on the INT tile carrying the most constant pips of the base route, whose sinks are all outside it, is refused by the keepout gate when the routed netlist is kept as-is |
 | constant containment, fresh bridge | routing the placed netlist under that rectangle either ties every constant sink without a pip inside it, or refuses because no tie avoids it; rc 0 with a constant pip inside fails |
 | frozen cell not moved | under a rectangle elsewhere on the die, a placement of the placed netlist with `NEXTPNR_BEL_BLACKLIST` naming the bel a static LUT sits on is refused by the post-place repair, not relocated |
+| pre-place region inside the rectangle | with the fixture's LUTs and FF unplaced (so they are RM) under a rectangle at (20,120)-(120,200), a `--pre-place` hook that confines them to (100,180)-(120,200) is honoured: every one lands inside it |
+| pre-place region reaching outside | the same hook with a region at (0,100)-(30,130), partly outside the rectangle, is refused |
