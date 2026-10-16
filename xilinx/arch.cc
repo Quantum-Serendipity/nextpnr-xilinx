@@ -72,6 +72,12 @@ void IdString::initialize_arch(const BaseCtx *ctx)
 
 static const ChipInfoPOD *get_chip_info(const RelPtr<ChipInfoPOD> *ptr) { return ptr->get(); }
 
+static bool env_says_off(const char *name)
+{
+    const char *v = getenv(name);
+    return v != nullptr && std::string(v) == "off";
+}
+
 Arch::Arch(ArchArgs args) : args(args)
 {
     try {
@@ -3121,6 +3127,7 @@ bool Arch::route()
         // all -- every pip came from the imported ROUTING attribute or
         // applyFixedRoutes. It is precisely the case the backstop is for.
         check_partition_routing();
+        check_partition_keepout();
         getCtx()->settings[getCtx()->id("route")] = 1;
         archInfoToAttributes();
         log_info("    route-fixed-only: imported routing kept as-is; no general router run\n");
@@ -3136,6 +3143,7 @@ bool Arch::route()
         // are deliberately left for an external router, but whatever THIS tool
         // bound is still ours to answer for.
         check_partition_routing();
+        check_partition_keepout();
         getCtx()->settings[getCtx()->id("route")] = 1;
         archInfoToAttributes();
         return true;
@@ -3146,11 +3154,7 @@ bool Arch::route()
     auto run_router = [&]() {
         if (router == "router1") {
             if (roi_active()) {
-                const char *clamp_mode = getenv("NEXTPNR_PARTITION_CLAMP");
-                const char *keepout_mode = getenv("NEXTPNR_PARTITION_KEEPOUT");
-                const bool both_off = clamp_mode != nullptr && std::string(clamp_mode) == "off" &&
-                                      keepout_mode != nullptr && std::string(keepout_mode) == "off";
-                if (!both_off)
+                if (!env_says_off("NEXTPNR_PARTITION_CLAMP") || !env_says_off("NEXTPNR_PARTITION_KEEPOUT"))
                     log_error("router1 has neither the partition route clamp nor the static keepout, and "
                               "NEXTPNR_PARTITION_ROI is set. Route with router2; the router may also come from a "
                               "'router' setting stored in the input netlist. Running router1 under a rectangle "
@@ -3218,24 +3222,7 @@ bool Arch::route()
                             "static content will differ. This setting exists to produce the wide-licence control arm.\n");
             }
             if (roi_active() && (!clamp_off || !keepout_off)) {
-                cfg.partition_active = !clamp_off;
-                cfg.keepout_active = !keepout_off;
-                cfg.keepout_narrow = !keepout_off && !narrow_off;
-                cfg.partition_x0 = roi_x0;
-                cfg.partition_y0 = roi_y0;
-                cfg.partition_x1 = roi_x1;
-                cfg.partition_y1 = roi_y1;
-                for (const RoiRect &s : roi_siblings)
-                    cfg.partition_siblings.push_back({s.x0, s.y0, s.x1, s.y1});
-                // Read even when the clamp is off, because the keepout needs it:
-                // rule 1 of its licence is "this net is governed by rectangle k",
-                // and a governed net must keep the right to route in its own
-                // rectangle no matter which mechanism is switched on.
-                cfg.partition_nets = partition_net_rects();
-                if (cfg.keepout_active)
-                    cfg.keepout_exempt_nets = load_keepout_exempt_nets();
-                if (cfg.keepout_narrow)
-                    cfg.keepout_licence_pips = load_keepout_licence_pips();
+                fill_partition_route_cfg(cfg, clamp_off, keepout_off, narrow_off);
                 int in_rect0 = 0;
                 for (const auto &pn : cfg.partition_nets)
                     if (pn.second == 0)
@@ -3292,6 +3279,7 @@ bool Arch::route()
     // so a violation aborts BEFORE the offending routing is stamped back into
     // the ROUTING attribute and becomes re-importable.
     check_partition_routing();
+    check_partition_keepout();
     // POST-ROUTE timing, ON BY DEFAULT UNDER router2.
     //
     // router1 calls timing_analysis itself once routing is done, so a router1
@@ -5034,6 +5022,8 @@ std::unordered_set<IdString> Arch::load_keepout_exempt_nets() const
     std::unordered_set<IdString> out;
     if (!roi_active())
         return out;
+    if (keepout_exempt_loaded)
+        return keepout_exempt_cache;
     // The P exemptions come along. A net the operator has already declared out
     // of the rectangle's scope for placement cannot then be forbidden to route
     // past it -- that would leave the clock spine holding a P exemption it
@@ -5072,6 +5062,8 @@ std::unordered_set<IdString> Arch::load_keepout_exempt_nets() const
     log_info("partition keepout exemptions: %d net(s) named (%d inherited from the invariant P exemptions, %d from "
              "%s, %d unresolved)\n",
              int(out.size()), from_p, n, f == nullptr ? "<unset>" : f, miss);
+    keepout_exempt_cache = out;
+    keepout_exempt_loaded = true;
     return out;
 }
 
@@ -5081,6 +5073,8 @@ std::unordered_map<IdString, std::vector<PipId>> Arch::load_keepout_licence_pips
     const char *f = getenv("NEXTPNR_PARTITION_KEEPOUT_LICENCE");
     if (f == nullptr || !roi_active())
         return out;
+    if (keepout_licence_loaded)
+        return keepout_licence_cache;
     std::ifstream in(f);
     if (!in)
         log_error("NEXTPNR_PARTITION_KEEPOUT_LICENCE: cannot open '%s'\n", f);
@@ -5148,6 +5142,8 @@ std::unordered_map<IdString, std::vector<PipId>> Arch::load_keepout_licence_pips
         log_error("keepout licence: %d line(s) did not resolve (net-miss %d, tile-miss %d, pip-miss %d, malformed "
                   "%d); the narrow licence is not the one the file asks for\n",
                   miss_net + miss_tile + miss_pip + malformed, miss_net, miss_tile, miss_pip, malformed);
+    keepout_licence_cache = out;
+    keepout_licence_loaded = true;
     return out;
 }
 
@@ -5337,6 +5333,92 @@ void Arch::check_partition_routing() const
                   "came from one of the paths that bypass it: the netlist's imported ROUTING attribute, "
                   "applyFixedRoutes, routeClock, routeVcc, fixupRouting, or router1. A partial bitstream built from "
                   "this routing would write configuration frames outside the region and corrupt static logic.\n",
+                  bad_nets);
+}
+
+void Arch::fill_partition_route_cfg(PartitionRouteCfg &cfg, bool clamp_off, bool keepout_off, bool narrow_off) const
+{
+    cfg.partition_active = !clamp_off;
+    cfg.keepout_active = !keepout_off;
+    cfg.keepout_narrow = !keepout_off && !narrow_off;
+    cfg.partition_x0 = roi_x0;
+    cfg.partition_y0 = roi_y0;
+    cfg.partition_x1 = roi_x1;
+    cfg.partition_y1 = roi_y1;
+    for (const RoiRect &s : roi_siblings)
+        cfg.partition_siblings.push_back({s.x0, s.y0, s.x1, s.y1});
+    cfg.partition_nets = partition_net_rects();
+    if (cfg.keepout_active)
+        cfg.keepout_exempt_nets = load_keepout_exempt_nets();
+    if (cfg.keepout_narrow)
+        cfg.keepout_licence_pips = load_keepout_licence_pips();
+}
+
+void Arch::check_partition_keepout() const
+{
+    if (!roi_active())
+        return;
+    const bool keepout_off = env_says_off("NEXTPNR_PARTITION_KEEPOUT");
+    const bool narrow_off = env_says_off("NEXTPNR_PARTITION_KEEPOUT_NARROW");
+    PartitionRouteCfg cfg;
+    fill_partition_route_cfg(cfg, false, false, narrow_off);
+
+    const IdString gnd_net = id("$PACKER_GND_NET"), vcc_net = id("$PACKER_VCC_NET");
+    int nets_checked = 0, bad_nets = 0;
+    int64_t pips_inside = 0, pips_bad = 0;
+    std::vector<std::pair<std::string, std::string>> offenders;
+    for (auto np : sorted(nets)) {
+        NetInfo *net = np.second;
+        if (net->name == gnd_net || net->name == vcc_net)
+            continue;
+        const PartitionKeepoutLicence lic = partition_keepout_licence(getCtx(), cfg, net);
+        if (!lic.check && !lic.narrow)
+            continue;
+        nets_checked++;
+        int bad_here = 0;
+        for (auto &w : net->wires) {
+            const PipId pip = w.second.pip;
+            if (pip == PipId())
+                continue;
+            const Loc l = getPipLocation(pip);
+            const int kr = partition_keepout_rect(cfg, l);
+            if (kr < 0)
+                continue;
+            pips_inside++;
+            const PartitionKeepoutVerdict v = partition_keepout_verdict(lic, pip, kr);
+            if (v == KEEPOUT_ADMIT)
+                continue;
+            pips_bad++;
+            bad_here++;
+            const RoiRect r = roi_rect(kr);
+            offenders.emplace_back(std::string(net->name.c_str(this)),
+                                   stringf("%s at tile (%d,%d), inside rectangle %d (%d,%d)-(%d,%d), %s",
+                                           nameOfPip(pip), l.x, l.y, kr, r.x0, r.y0, r.x1, r.y1,
+                                           v == KEEPOUT_VETO_NARROW ? "not one of the net's locked pips there"
+                                                                    : "a rectangle the net has no licence for"));
+        }
+        if (bad_here > 0)
+            bad_nets++;
+    }
+
+    std::sort(offenders.begin(), offenders.end());
+    const size_t report_cap = 20;
+    for (size_t i = 0; i < offenders.size() && i < report_cap; i++)
+        log_warning("partition keepout gate: net '%s' binds pip %s\n", offenders[i].first.c_str(),
+                    offenders[i].second.c_str());
+    if (offenders.size() > report_cap)
+        log_warning("partition keepout gate: %d further unlicensed pip(s) not listed\n",
+                    int(offenders.size() - report_cap));
+    log_info("partition keepout gate [%s]: %d static net(s) in scope, %lld of their pip(s) inside a rectangle, "
+             "%lld unlicensed in %d net(s)\n",
+             keepout_off ? "report only, keepout DISABLED" : "fatal", nets_checked, (long long)pips_inside,
+             (long long)pips_bad, bad_nets);
+    if (pips_bad > 0 && !keepout_off)
+        log_error("partition keepout gate: %d static net(s) bind pips inside a partition rectangle they hold no "
+                  "licence for (listed above). router2's keepout refuses such pips during its own search, so these "
+                  "came from a path that bypasses it: the netlist's imported ROUTING attribute, applyFixedRoutes, "
+                  "routeClock, routeVcc, fixupRouting, or a Python bindPip. A partial bitstream loaded into that "
+                  "rectangle overwrites them and cuts the static net.\n",
                   bad_nets);
 }
 

@@ -22,35 +22,8 @@
 
 NEXTPNR_NAMESPACE_BEGIN
 
-struct Router2Cfg
+struct PartitionRouteCfg
 {
-    Router2Cfg(Context *ctx);
-
-    // Maximum iterations for backwards routing attempt
-    int backwards_max_iter;
-    // Maximum iterations for backwards routing attempt for global nets
-    int global_backwards_max_iter;
-    // Padding added to bounding boxes to account for imperfect routing,
-    // congestion, etc
-    int bb_margin_x, bb_margin_y;
-    // Cost factor added to input pin wires; effectively reduces the
-    // benefit of sharing interconnect
-    float ipin_cost_adder;
-    // Cost factor for "bias" towards center location of net
-    float bias_cost_factor;
-    // Starting current and historical congestion cost factor
-    float init_curr_cong_weight, hist_cong_weight;
-    // Current congestion cost multiplier
-    float curr_cong_mult;
-
-    // Weight given to delay estimate in A*. Higher values
-    // mean faster and more directed routing, at the risk
-    // of choosing a less congestion/delay-optimal route
-    float estimate_weight;
-
-    // Print additional performance profiling information
-    bool perf_profile = false;
-
     // ---- partition containment (Unit 7.4) ----------------------------------
     // A partial-reconfiguration build confines the reconfigurable module's nets
     // to a fixed tile rectangle. The arch fills these in; every field has an
@@ -111,6 +84,63 @@ struct Router2Cfg
             return PartitionRect{partition_x0, partition_y0, partition_x1, partition_y1};
         return partition_siblings.at(i - 1);
     }
+
+    int partition_rect_count() const { return 1 + int(partition_siblings.size()); }
+};
+
+struct PartitionKeepoutLicence
+{
+    bool exempt_named = false;
+    bool exempt_buf = false;
+    int governed = -1;
+    uint64_t anchored = 0;
+    uint64_t allow = 0;
+    bool check = false;
+    uint64_t narrow = 0;
+    std::unordered_set<PipId> locked;
+    std::vector<std::pair<PipId, bool>> locked_taken;
+};
+
+enum PartitionKeepoutVerdict
+{
+    KEEPOUT_OUTSIDE,
+    KEEPOUT_ADMIT,
+    KEEPOUT_VETO_RECT,
+    KEEPOUT_VETO_NARROW,
+};
+
+int partition_keepout_rect(const PartitionRouteCfg &cfg, Loc l);
+PartitionKeepoutLicence partition_keepout_licence(const Context *ctx, const PartitionRouteCfg &cfg, const NetInfo *ni);
+PartitionKeepoutVerdict partition_keepout_verdict(const PartitionKeepoutLicence &lic, PipId pip, int kr);
+
+struct Router2Cfg : PartitionRouteCfg
+{
+    Router2Cfg(Context *ctx);
+
+    // Maximum iterations for backwards routing attempt
+    int backwards_max_iter;
+    // Maximum iterations for backwards routing attempt for global nets
+    int global_backwards_max_iter;
+    // Padding added to bounding boxes to account for imperfect routing,
+    // congestion, etc
+    int bb_margin_x, bb_margin_y;
+    // Cost factor added to input pin wires; effectively reduces the
+    // benefit of sharing interconnect
+    float ipin_cost_adder;
+    // Cost factor for "bias" towards center location of net
+    float bias_cost_factor;
+    // Starting current and historical congestion cost factor
+    float init_curr_cong_weight, hist_cong_weight;
+    // Current congestion cost multiplier
+    float curr_cong_mult;
+
+    // Weight given to delay estimate in A*. Higher values
+    // mean faster and more directed routing, at the risk
+    // of choosing a less congestion/delay-optimal route
+    float estimate_weight;
+
+    // Print additional performance profiling information
+    bool perf_profile = false;
 };
 
 void router2(Context *ctx, const Router2Cfg &cfg);

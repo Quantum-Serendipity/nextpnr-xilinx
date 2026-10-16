@@ -706,6 +706,8 @@ inline bool matchBufhcePassthroughPip(const std::string &dst_wire, const std::st
     return true;
 }
 
+struct PartitionRouteCfg;
+
 struct Arch : BaseCtx
 {
     boost::iostreams::mapped_file_source blob_file;
@@ -1100,8 +1102,14 @@ struct Arch : BaseCtx
     // entry here.  An entry that names no net is warned about for the same
     // reason load_exempt_nets warns.
     std::unordered_set<IdString> load_keepout_exempt_nets() const;
+    mutable std::unordered_set<IdString> keepout_exempt_cache;
+    mutable bool keepout_exempt_loaded = false;
 
     std::unordered_map<IdString, std::vector<PipId>> load_keepout_licence_pips() const;
+    mutable std::unordered_map<IdString, std::vector<PipId>> keepout_licence_cache;
+    mutable bool keepout_licence_loaded = false;
+
+    void fill_partition_route_cfg(PartitionRouteCfg &cfg, bool clamp_off, bool keepout_off, bool narrow_off) const;
 
     // Invariant P, asserted at the end of Arch::place().
     //
@@ -1194,6 +1202,7 @@ struct Arch : BaseCtx
     // and nothing else -- so a pass over it sees every pip feature that can
     // reach the bitstream.
     void check_partition_routing() const;
+    void check_partition_keepout() const;
 
     bool checkBelAvail(BelId bel) const
     {

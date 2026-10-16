@@ -17,12 +17,20 @@ resolve_tool() {
 
 HERE=$(cd "$(dirname "$0")" && pwd) || exit 1
 YOSYS=$(resolve_tool "${YOSYS:-yosys}")
+PYTHON=$(resolve_tool "${PYTHON:-python3}")
 NEXTPNR=$(resolve_tool "${NEXTPNR:-$HERE/../../../build/nextpnr-xilinx}")
 CHIPDB=$(abspath "${CHIPDB:?set CHIPDB to an xc7a100tfgg484.bin}")
+PRJXRAY_DB=$(abspath "${PRJXRAY_DB:-$HERE/../../external/prjxray-db}")
+TILEGRID=$PRJXRAY_DB/artix7/xc7a100t/tilegrid.json
 NPNR_TIMEOUT=${NPNR_TIMEOUT:-600}
 OUT=$(abspath "${OUT:-$(mktemp -d)}")
 mkdir -p "$OUT" || exit 1
 cd "$HERE" || exit 1
+
+if [ ! -r "$TILEGRID" ]; then
+    echo "FAIL no tilegrid at $TILEGRID; set PRJXRAY_DB"
+    exit 1
+fi
 
 rc_total=0
 report() {
@@ -33,6 +41,10 @@ report() {
 roi() {
     printf '{"info": {"GRID_X_MIN": %d, "GRID_X_MAX": %d, "GRID_Y_MIN": %d, "GRID_Y_MAX": %d}}\n' "$2" "$4" "$3" "$5" \
         >"$1"
+}
+
+geom() {
+    "$PYTHON" "$HERE/geom.py" --tilegrid "$TILEGRID" "$@"
 }
 
 npnr() {
@@ -127,9 +139,67 @@ arm_router1_refused_under_a_rectangle() {
     fi
 }
 
+refused_by_keepout_gate() {
+    [ "$1" -ne 0 ] && grep -q '^ERROR: partition keepout gate:' "$2"
+}
+
+arm_static_keepout() {
+    local sx sy
+    read -r sx sy < <(geom pick-static "$OUT/all.routes") || {
+        report "FAIL static keepout: no static INT pip to put a rectangle on"
+        return
+    }
+    local r=$OUT/static.roi.json
+    roi "$r" "$sx" "$sy" "$sx" "$sy"
+    local base_in
+    base_in=$(geom count "$OUT/all.routes" static "$sx" "$sy" "$sx" "$sy")
+
+    NEXTPNR_PARTITION_ROI=$r npnr "$OUT/m10-router2.log" --json "$OUT/placed.json" --no-pack --no-place \
+        --write-fixed-routes "$OUT/m10-router2.routes"
+    local rc=$?
+    local inside census
+    inside=$(geom count "$OUT/m10-router2.routes" static "$sx" "$sy" "$sx" "$sy" 2>/dev/null || echo '?')
+    census=$(grep -c 'partition keepout gate \[fatal\]:.* 0 unlicensed in 0 net' "$OUT/m10-router2.log")
+    if [ "$rc" -eq 0 ] && [ "$inside" = 0 ] && [ "$census" -eq 1 ]; then
+        report "PASS static keepout, router2 control: rc 0, 0 static pips in tile ($sx,$sy) against $base_in unconfined, gate census clean"
+    else
+        report "FAIL static keepout, router2 control: rc $rc, $inside static pip(s) in tile ($sx,$sy), $census clean gate census line(s)"
+    fi
+
+    NEXTPNR_PARTITION_ROI=$r npnr "$OUT/m10-fixed.log" --json "$OUT/placed.json" --no-pack --no-place \
+        --fixed-routes "$OUT/all.routes" --write-fixed-routes "$OUT/m10-fixed.routes"
+    rc=$?
+    if refused_by_keepout_gate "$rc" "$OUT/m10-fixed.log"; then
+        report "PASS static keepout, --fixed-routes through the rectangle: refused at rc $rc"
+    else
+        inside=$(geom count "$OUT/m10-fixed.routes" static "$sx" "$sy" "$sx" "$sy" 2>/dev/null || echo '?')
+        report "FAIL static keepout, --fixed-routes through the rectangle: rc $rc, $inside static pip(s) left in tile ($sx,$sy)"
+    fi
+
+    NEXTPNR_PARTITION_ROI=$r NEXTPNR_ROUTE_FIXED_ONLY=1 npnr "$OUT/m10-import.log" --json "$OUT/routed.json" \
+        --no-pack --no-place
+    rc=$?
+    if refused_by_keepout_gate "$rc" "$OUT/m10-import.log"; then
+        report "PASS static keepout, imported routing through the rectangle: refused at rc $rc"
+    else
+        report "FAIL static keepout, imported routing through the rectangle: rc $rc, $base_in static pip(s) imported in tile ($sx,$sy)"
+    fi
+
+    NEXTPNR_PARTITION_ROI=$r NEXTPNR_PARTITION_KEEPOUT=off npnr "$OUT/m10-off.log" --json "$OUT/placed.json" \
+        --no-pack --no-place --fixed-routes "$OUT/all.routes"
+    rc=$?
+    census=$(grep -c 'partition keepout gate \[report only, keepout DISABLED\]:.* [1-9][0-9]* unlicensed' "$OUT/m10-off.log")
+    if [ "$rc" -eq 0 ] && [ "$census" -eq 1 ]; then
+        report "PASS static keepout, the same --fixed-routes run with NEXTPNR_PARTITION_KEEPOUT=off: rc 0, unlicensed pips reported"
+    else
+        report "FAIL static keepout, the same --fixed-routes run with NEXTPNR_PARTITION_KEEPOUT=off: rc $rc, $census report-only census line(s) naming unlicensed pips"
+    fi
+}
+
 arm_region_only_keeps_output
 arm_fixed_routes_command_line_wins
 arm_router1_refused_under_a_rectangle
+arm_static_keepout
 
 echo "artefacts kept in $OUT"
 exit "$rc_total"
