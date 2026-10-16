@@ -520,7 +520,7 @@ struct ClockConstraint
 
     IdString source;
     int64_t source_num = 0, source_den = 0;
-    delay_t offset = 0;
+    int64_t offset_num = 0, offset_den = 1;
 
     TimingConstrObjectId domain_tmg_id;
 };

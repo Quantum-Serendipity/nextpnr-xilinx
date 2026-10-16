@@ -601,6 +601,53 @@ void XC7Packer::pack_clocking()
 // CLKOUTn_DIVIDE / CLKFBOUT_MULT), to a fixpoint. A constraint the user put
 // on a downstream net themselves wins over a derived one.
 // -----------------------------------------------------------------------
+namespace {
+struct ExactFrac
+{
+    int64_t n = 0, d = 1;
+    bool ok = true;
+
+    static ExactFrac of(int64_t n, int64_t d)
+    {
+        ExactFrac f;
+        if (d == 0) {
+            f.ok = false;
+            return f;
+        }
+        if (d < 0) {
+            n = -n;
+            d = -d;
+        }
+        int64_t g = std::gcd(n, d);
+        f.n = n / g;
+        f.d = d / g;
+        return f;
+    }
+    ExactFrac operator+(const ExactFrac &o) const
+    {
+        int64_t a, b, c;
+        if (!ok || !o.ok || __builtin_mul_overflow(n, o.d, &a) || __builtin_mul_overflow(o.n, d, &b) ||
+            __builtin_add_overflow(a, b, &a) || __builtin_mul_overflow(d, o.d, &c))
+            return bad();
+        return of(a, c);
+    }
+    ExactFrac operator*(const ExactFrac &o) const
+    {
+        int64_t a, c;
+        if (!ok || !o.ok || __builtin_mul_overflow(n, o.n, &a) || __builtin_mul_overflow(d, o.d, &c))
+            return bad();
+        return of(a, c);
+    }
+    bool operator==(const ExactFrac &o) const { return ok && o.ok && n == o.n && d == o.d; }
+    static ExactFrac bad()
+    {
+        ExactFrac f;
+        f.ok = false;
+        return f;
+    }
+};
+} // namespace
+
 void XC7Packer::propagate_clock_constraints()
 {
     log_info("Propagating clock constraints...\n");
@@ -637,12 +684,12 @@ void XC7Packer::propagate_clock_constraints()
         CellInfo *cell = nullptr;
         NetInfo *from = nullptr;
         int64_t num = 0, den = 0;
-        double shift_ns = 0;
+        ExactFrac shift;
     };
     std::unordered_map<IdString, Derivation> derivation;
 
     auto set_derived = [&](CellInfo *ci, NetInfo *from, NetInfo *to, double ratio, int64_t num = 0, int64_t den = 0,
-                           double shift_ns = 0) {
+                           ExactFrac shift = ExactFrac()) {
         if (from == nullptr || from->clkconstr == nullptr || to == nullptr || ratio <= 0)
             return;
         delay_t period = delay_t(from->clkconstr->period.delay / ratio);
@@ -659,7 +706,7 @@ void XC7Packer::propagate_clock_constraints()
         to->clkconstr->low.delay = period / 2;
         log_info("    derived %.1f MHz for net '%s' (through %s '%s')\n", MHz(period), to->name.c_str(ctx),
                  ci->type.c_str(ctx), ci->name.c_str(ctx));
-        derivation[to->name] = Derivation{ci, from, num, den, shift_ns};
+        derivation[to->name] = Derivation{ci, from, num, den, shift};
         changed_nets.insert(to->name);
     };
     auto copy_through = [&](CellInfo *ci, const std::string &in, const std::string &out, int64_t num = 1,
@@ -671,8 +718,12 @@ void XC7Packer::propagate_clock_constraints()
     auto param_phase = [&](CellInfo *ci, const std::string &name) {
         auto known = ctx->idstring_str_to_idx->find(name);
         if (known == ctx->idstring_str_to_idx->end() || !ci->params.count(IdString(known->second)))
-            return 0.0;
-        return param_double(ci, name, 0.0);
+            return ExactFrac();
+        double deg = param_double(ci, name, std::nan(""));
+        double milli = deg * 1000;
+        if (!std::isfinite(milli) || std::abs(milli - std::nearbyint(milli)) > 1e-6)
+            return ExactFrac::bad();
+        return ExactFrac::of(int64_t(std::llround(milli)), 360000);
     };
     auto eighths = [&](double v) -> int64_t {
         double e = v * 8;
@@ -741,9 +792,9 @@ void XC7Packer::propagate_clock_constraints()
                 int64_t mult8 = eighths(mult), divclk8 = eighths(divclk);
                 bool exact = mult8 != 0 && divclk8 != 0 && divclk8 % 8 == 0;
                 int64_t divclk_n = exact ? divclk8 / 8 : 0;
-                double in_period_ns = ctx->getDelayNS(in->clkconstr->period.delay);
-                double fb_period_ns = in_period_ns * divclk;
-                double fb_shift_ns = -param_phase(ci, "CLKFBOUT_PHASE") / 360.0 * fb_period_ns;
+                ExactFrac fb_period = ExactFrac::of(divclk_n, 1);
+                ExactFrac fb_shift = ExactFrac::of(-1, 1) * param_phase(ci, "CLKFBOUT_PHASE") * fb_period;
+                const ExactFrac half = ExactFrac::of(1, 2);
                 int nout = is_mmcm ? 7 : 6;
                 for (int n = 0; n < nout; n++) {
                     std::string port = "CLKOUT" + std::to_string(n);
@@ -759,20 +810,20 @@ void XC7Packer::propagate_clock_constraints()
                         continue;
                     int64_t div8 = eighths(div);
                     bool out_exact = exact && div8 != 0;
-                    double out_period_ns = in_period_ns * div / vco_ratio;
-                    double shift_ns = fb_shift_ns + param_phase(ci, port + "_PHASE") / 360.0 * out_period_ns;
+                    ExactFrac out_period = ExactFrac::of(divclk_n * div8, mult8);
+                    ExactFrac shift = fb_shift + param_phase(ci, port + "_PHASE") * out_period;
                     set_derived(ci, in, get_net_or_empty(ci, ctx->id(port)), vco_ratio / div, out_exact ? mult8 : 0,
-                                out_exact ? divclk_n * div8 : 0, shift_ns);
+                                out_exact ? divclk_n * div8 : 0, shift);
                     if (is_mmcm && n <= 3)
                         set_derived(ci, in, get_net_or_empty(ci, ctx->id(port + "B")), vco_ratio / div,
                                     out_exact ? mult8 : 0, out_exact ? divclk_n * div8 : 0,
-                                    shift_ns + out_period_ns / 2);
+                                    shift + out_period * half);
                 }
                 set_derived(ci, in, get_net_or_empty(ci, ctx->id("CLKFBOUT")), 1.0 / divclk, exact ? 1 : 0, divclk_n,
-                            fb_shift_ns);
+                            fb_shift);
                 if (is_mmcm)
                     set_derived(ci, in, get_net_or_empty(ci, ctx->id("CLKFBOUTB")), 1.0 / divclk, exact ? 1 : 0,
-                                divclk_n, fb_shift_ns + fb_period_ns / 2);
+                                divclk_n, fb_shift + fb_period * half);
             }
         }
     }
@@ -784,10 +835,10 @@ void XC7Packer::propagate_clock_constraints()
     {
         NetInfo *source = nullptr;
         int64_t num = 0, den = 0;
-        double offset_ns = 0;
+        ExactFrac offset;
         bool operator==(const Relation &o) const
         {
-            return source == o.source && num == o.num && den == o.den && std::abs(offset_ns - o.offset_ns) < 1e-6;
+            return source == o.source && num == o.num && den == o.den && offset == o.offset;
         }
     };
     std::unordered_map<IdString, Relation> relation;
@@ -817,13 +868,14 @@ void XC7Packer::propagate_clock_constraints()
                 if (i0 != nullptr && i1 != nullptr && i0 != i1 && !constant(i0) && !constant(i1))
                     ambiguous = !(relate(i0) == relate(i1));
             }
-            if (in.source != nullptr && d.num > 0 && d.den > 0 && !ambiguous) {
+            ExactFrac offset = in.offset + d.shift * ExactFrac::of(in.den, in.num);
+            if (in.source != nullptr && d.num > 0 && d.den > 0 && !ambiguous && offset.ok) {
                 int64_t num = in.num * d.num, den = in.den * d.den;
                 int64_t g = std::gcd(num, den);
                 r.source = in.source;
                 r.num = num / g;
                 r.den = den / g;
-                r.offset_ns = in.offset_ns + d.shift_ns;
+                r.offset = offset;
             }
             visiting.erase(net->name);
         }
@@ -845,7 +897,8 @@ void XC7Packer::propagate_clock_constraints()
         ni->clkconstr->source = r.source->name;
         ni->clkconstr->source_num = r.num;
         ni->clkconstr->source_den = r.den;
-        ni->clkconstr->offset = ctx->getDelayFromNS(r.offset_ns).maxDelay();
+        ni->clkconstr->offset_num = r.offset.n;
+        ni->clkconstr->offset_den = r.offset.d;
     }
 }
 

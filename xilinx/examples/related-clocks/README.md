@@ -6,6 +6,10 @@ at 25 MHz with no phase. A 16x16 LUT multiplier on `b0` is captured on `b1` and 
 setup budget of `b0 -> b1` is the smallest positive gap from a `b0` edge to the next `b1` edge,
 5 ns, which is tighter than either clock's period; `b0 -> b2` has 10 ns.
 
+`coincident.v` is a second design on the same pins: `b0` at 240 MHz and `b1` at 120 MHz with
+`CLKOUT1_PHASE` 180, so every `b1` rising edge lands exactly on a `b0` rising edge. A register on
+`b1` is captured on `b0`, and the budget of `b1 -> b0` is one full `b0` period, not zero.
+
 ```
 CHIPDB=/path/to/xc7a100tfgg484.bin YOSYS=yosys NEXTPNR=/path/to/nextpnr-xilinx ./run.sh
 ```
@@ -19,4 +23,6 @@ default).
 | `b0 -> b2` | every row for the pair has `period_ns` 10 |
 | `b0 -> b0` | every intra-domain row has `period_ns` 10 |
 | cross-domain verdict | the log's `b0 -> b1` max-delay line carries a verdict against the 5.00 ns edge separation |
+| coincident `b1 -> b0` | every row of `coincident.v` for the pair has `period_ns` 4.166 |
+| coincident cross-domain verdict | the `b1 -> b0` max-delay line grades against a 4.17 ns edge separation |
 | feedback clock | `fb`, the MMCM's `CLKFBOUT`, is derived at 100 MHz (input / `DIVCLK_DIVIDE`), not the VCO rate |

@@ -56,6 +56,44 @@ struct ClockPair
 
     bool operator==(const ClockPair &other) const { return start == other.start && end == other.end; }
 };
+
+__int128 floor_div(__int128 a, __int128 b)
+{
+    if (b < 0) {
+        a = -a;
+        b = -b;
+    }
+    __int128 q = a / b;
+    if (a % b != 0 && a < 0)
+        --q;
+    return q;
+}
+
+struct Frac
+{
+    __int128 n = 0, d = 1;
+
+    static Frac of(__int128 n, __int128 d)
+    {
+        if (d < 0) {
+            n = -n;
+            d = -d;
+        }
+        __int128 a = n < 0 ? -n : n, b = d;
+        while (b != 0) {
+            __int128 t = a % b;
+            a = b;
+            b = t;
+        }
+        Frac f;
+        f.n = n / a;
+        f.d = d / a;
+        return f;
+    }
+    Frac operator+(const Frac &o) const { return of(n * o.d + o.n * d, d * o.d); }
+    Frac operator-(const Frac &o) const { return of(n * o.d - o.n * d, d * o.d); }
+    Frac operator*(const Frac &o) const { return of(n * o.n, d * o.d); }
+};
 } // namespace
 
 NEXTPNR_NAMESPACE_END
@@ -448,20 +486,27 @@ struct Timing
         auto si = ctx->nets.find(lc->source);
         if (si == ctx->nets.end() || si->second->clkconstr == nullptr)
             return false;
+        const ClockConstraint &sc = *si->second->clkconstr;
+        if (sc.period.delay <= 0 || lc->offset_den <= 0 || cc->offset_den <= 0)
+            return false;
         int64_t n = std::lcm(lc->source_num, cc->source_num);
         int64_t pl = lc->source_den * (n / lc->source_num), pc = cc->source_den * (n / cc->source_num);
-        double grid = double(si->second->clkconstr->period.delay) * double(std::gcd(pl, pc)) / double(n);
-        if (!(grid > 0))
-            return false;
-        double off_l = double(lc->offset) + (launch_edge == FALLING_EDGE ? double(lc->high.delay) : 0.0);
-        double off_c = double(cc->offset) + (capture_edge == FALLING_EDGE ? double(cc->high.delay) : 0.0);
-        double sep = std::fmod(off_c - off_l, grid);
-        if (sep < 0)
-            sep += grid;
-        if (sep < 0.5)
+        const Frac grid = Frac::of(std::gcd(pl, pc), n);
+        auto edge_offset = [&](IdString net, const ClockConstraint *c, ClockEdge edge) {
+            Frac off = Frac::of(c->offset_num, c->offset_den);
+            if (edge != FALLING_EDGE)
+                return off;
+            if (net == c->source)
+                return off + Frac::of(sc.high.delay, sc.period.delay);
+            return off + Frac::of(c->source_den, 2 * c->source_num);
+        };
+        Frac diff = edge_offset(capture, cc, capture_edge) - edge_offset(launch, lc, launch_edge);
+        Frac sep = diff - grid * Frac::of(floor_div(diff.n * grid.d, diff.d * grid.n), 1);
+        if (sep.n == 0)
             sep = grid;
-        setup_req = delay_t(std::llround(sep));
-        hold_req = setup_req - delay_t(std::llround(grid));
+        Frac hold = sep - grid;
+        setup_req = delay_t(floor_div(sep.n * sc.period.delay, sep.d));
+        hold_req = delay_t(-floor_div(-hold.n * sc.period.delay, hold.d));
         if (source != nullptr)
             *source = lc->source;
         return true;
