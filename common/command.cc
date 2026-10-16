@@ -152,7 +152,8 @@ po::options_description CommandHandler::getGeneralOptions()
     general.add_options()("no-place", "process design without placement");
     general.add_options()("no-pack", "process design without packing");
 
-    general.add_options()("ignore-loops", "ignore combinational loops in timing analysis");
+    general.add_options()("ignore-loops", "cut combinational loops and time their fanout through the cut (the default)");
+    general.add_options()("no-ignore-loops", "fail timing analysis on a combinational loop");
 
     general.add_options()("version,V", "show version");
     general.add_options()("test", "check architecture database integrity");
@@ -216,6 +217,11 @@ void CommandHandler::setupContext(Context *ctx)
 
     if (vm.count("ignore-loops")) {
         ctx->settings[ctx->id("timing/ignoreLoops")] = true;
+    }
+    if (vm.count("no-ignore-loops")) {
+        if (vm.count("ignore-loops"))
+            log_error("--ignore-loops and --no-ignore-loops cannot both be given\n");
+        ctx->settings[ctx->id("timing/ignoreLoops")] = false;
     }
 
     if (vm.count("timing-allow-fail")) {

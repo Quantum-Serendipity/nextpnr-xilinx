@@ -28,6 +28,7 @@
 #include <map>
 #include <sstream>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include "log.h"
 #include "util.h"
@@ -440,8 +441,6 @@ struct Timing
     {
         const auto clk_period = ctx->getDelayFromNS(1.0e9 / ctx->setting<float>("target_freq")).maxDelay();
 
-        // First, compute the topographical order of nets to walk through the circuit, assuming it is a _acyclic_ graph
-        // TODO(eddieh): Handle the case where it is cyclic, e.g. combinatorial loops
         std::vector<NetInfo *> topographical_order;
         std::unordered_map<const NetInfo *, std::unordered_map<ClockEvent, TimingData>> net_data;
         // In lieu of deleting edges from the graph, simply count the number of fanins to each output port
@@ -544,87 +543,217 @@ struct Timing
         }
 
         std::deque<NetInfo *> queue(topographical_order.begin(), topographical_order.end());
-        // Now walk the design, from the start points identified previously, building up a topographical order
-        while (!queue.empty()) {
-            const auto net = queue.front();
-            queue.pop_front();
+        std::unordered_set<const PortInfo *> cut_ports;
+        auto follows_arc = [&](const PortRef &usr) {
+            int user_clocks;
+            TimingPortClass usrClass = ctx->getPortTimingClass(usr.cell, usr.port, user_clocks);
+            return usrClass != TMG_IGNORE && usrClass != TMG_CLOCK_INPUT;
+        };
+        auto comb_successor = [&](const NetInfo *net, const PortRef &usr, const std::pair<const IdString, PortInfo> &port) {
+            if (port.second.type != PORT_OUT || !port.second.net)
+                return false;
+            int port_clocks;
+            TimingPortClass portClass = ctx->getPortTimingClass(usr.cell, port.first, port_clocks);
+            if (portClass == TMG_REGISTER_OUTPUT || portClass == TMG_STARTPOINT || portClass == TMG_IGNORE ||
+                portClass == TMG_GEN_CLOCK)
+                return false;
+            if (port.second.net == net)
+                return false;
+            DelayInfo comb_delay;
+            return ctx->getCellDelay(usr.cell, usr.port, port.first, comb_delay);
+        };
+        auto drain = [&]() {
+            while (!queue.empty()) {
+                const auto net = queue.front();
+                queue.pop_front();
 
-            for (auto &usr : net->users) {
-                int user_clocks;
-                TimingPortClass usrClass = ctx->getPortTimingClass(usr.cell, usr.port, user_clocks);
-                if (usrClass == TMG_IGNORE || usrClass == TMG_CLOCK_INPUT)
+                for (auto &usr : net->users) {
+                    if (!follows_arc(usr))
+                        continue;
+                    for (auto &port : usr.cell->ports) {
+                        if (!comb_successor(net, usr, port))
+                            continue;
+                        auto it = port_fanin.find(&port.second);
+                        if (it == port_fanin.end()) {
+                            if (cut_ports.count(&port.second))
+                                continue;
+                            log_error("Internal timing error (negative fanin count) for %s.%s\n",
+                                      ctx->nameOf(usr.cell), ctx->nameOf(port.first));
+                        }
+                        if (--it->second == 0) {
+                            topographical_order.emplace_back(port.second.net);
+                            queue.emplace_back(port.second.net);
+                            port_fanin.erase(it);
+                        }
+                    }
+                }
+            }
+        };
+        drain();
+
+        int loop_count = 0, loop_cuts = 0, unfed_cuts = 0, stranded_ports = int(port_fanin.size()),
+            stranded_endpoints = 0;
+        auto port_key = [&](const PortInfo *p) {
+            return std::make_pair(std::string(p->net->driver.cell->name.c_str(ctx)), std::string(p->name.c_str(ctx)));
+        };
+        bool first_round = true;
+        while (!port_fanin.empty()) {
+            std::vector<const PortInfo *> nodes;
+            for (auto &pf : port_fanin)
+                nodes.push_back(pf.first);
+            std::sort(nodes.begin(), nodes.end(),
+                      [&](const PortInfo *a, const PortInfo *b) { return port_key(a) < port_key(b); });
+            std::unordered_map<const PortInfo *, int> index;
+            for (int i = 0; i < int(nodes.size()); i++)
+                index[nodes.at(i)] = i;
+            std::vector<std::vector<int>> succ(nodes.size());
+            std::vector<int> indegree(nodes.size(), 0);
+            for (int i = 0; i < int(nodes.size()); i++) {
+                const NetInfo *net = nodes.at(i)->net;
+                for (auto &usr : net->users) {
+                    if (first_round) {
+                        int user_clocks;
+                        TimingPortClass usrClass = ctx->getPortTimingClass(usr.cell, usr.port, user_clocks);
+                        if (usrClass == TMG_REGISTER_INPUT || usrClass == TMG_ENDPOINT)
+                            ++stranded_endpoints;
+                    }
+                    if (!follows_arc(usr))
+                        continue;
+                    for (auto &port : usr.cell->ports) {
+                        auto fnd = index.find(&port.second);
+                        if (fnd == index.end() || !comb_successor(net, usr, port))
+                            continue;
+                        succ.at(i).push_back(fnd->second);
+                        ++indegree.at(fnd->second);
+                    }
+                }
+            }
+
+            std::vector<int> scc_of(nodes.size(), -1), low(nodes.size(), 0), order(nodes.size(), -1);
+            std::vector<bool> on_stack(nodes.size(), false);
+            std::vector<int> stack, scc_size;
+            int next_order = 0;
+            for (int root = 0; root < int(nodes.size()); root++) {
+                if (order.at(root) >= 0)
                     continue;
-                for (auto &port : usr.cell->ports) {
-                    if (port.second.type != PORT_OUT || !port.second.net)
+                std::vector<std::pair<int, size_t>> work{{root, 0}};
+                order.at(root) = low.at(root) = next_order++;
+                stack.push_back(root);
+                on_stack.at(root) = true;
+                while (!work.empty()) {
+                    int v = work.back().first;
+                    size_t &edge = work.back().second;
+                    if (edge < succ.at(v).size()) {
+                        int w = succ.at(v).at(edge++);
+                        if (order.at(w) < 0) {
+                            order.at(w) = low.at(w) = next_order++;
+                            stack.push_back(w);
+                            on_stack.at(w) = true;
+                            work.emplace_back(w, 0);
+                        } else if (on_stack.at(w)) {
+                            low.at(v) = std::min(low.at(v), order.at(w));
+                        }
                         continue;
-                    int port_clocks;
-                    TimingPortClass portClass = ctx->getPortTimingClass(usr.cell, port.first, port_clocks);
-
-                    // Skip if this is a clocked output (but allow non-clocked ones)
-                    if (portClass == TMG_REGISTER_OUTPUT || portClass == TMG_STARTPOINT || portClass == TMG_IGNORE ||
-                        portClass == TMG_GEN_CLOCK)
-                        continue;
-                    // Skip the same self-net arcs that were skipped when
-                    // counting fanin above (input bound to the same net as
-                    // the output), keeping both sides symmetrical.
-                    if (port.second.net == net)
-                        continue;
-                    DelayInfo comb_delay;
-                    bool is_path = ctx->getCellDelay(usr.cell, usr.port, port.first, comb_delay);
-                    if (!is_path)
-                        continue;
-                    // Decrement the fanin count, and only add to topographical order if all its fanins have already
-                    // been visited
-                    auto it = port_fanin.find(&port.second);
-                    if (it == port_fanin.end()) {
-                        log_error("Internal timing error (negative fanin count) for %s.%s\n", ctx->nameOf(usr.cell),
-                                  ctx->nameOf(port.first));
                     }
-                    if (--it->second == 0) {
-                        topographical_order.emplace_back(port.second.net);
-                        queue.emplace_back(port.second.net);
-                        port_fanin.erase(it);
+                    if (low.at(v) == order.at(v)) {
+                        int id = int(scc_size.size());
+                        scc_size.push_back(0);
+                        int w;
+                        do {
+                            w = stack.back();
+                            stack.pop_back();
+                            on_stack.at(w) = false;
+                            scc_of.at(w) = id;
+                            ++scc_size.at(id);
+                        } while (w != v);
                     }
+                    work.pop_back();
+                    if (!work.empty())
+                        low.at(work.back().first) = std::min(low.at(work.back().first), low.at(v));
                 }
             }
-        }
 
-        // Sanity check to ensure that all ports where fanins were recorded were indeed visited.
-        // Combinational loops are IGNORED BY DEFAULT: they typically come from abc9's
-        // mapped-network reintegration (yosys $auto$abc9_ops cells), do not change the
-        // bitstream, and are present in several open-flow designs that otherwise place
-        // and route cleanly.  The strict failure stays available via the
-        // timing/ignoreLoops=false setting.  If the loops are unintended (a genuine
-        // feedback path), re-synthesize without -abc9.
-        bool ignore_loops = bool_or_default(ctx->settings, ctx->id("timing/ignoreLoops"), true);
-        if (!port_fanin.empty() && !ignore_loops) {
-            for (auto fanin : port_fanin) {
-                NetInfo *net = fanin.first->net;
-                if (net != nullptr) {
-                    log_info("   remaining fanin includes %s (net %s)\n", fanin.first->name.c_str(ctx),
-                             net->name.c_str(ctx));
-                    if (net->driver.cell != nullptr)
-                        log_info("        driver = %s.%s\n", net->driver.cell->name.c_str(ctx),
-                                 net->driver.port.c_str(ctx));
-                    for (auto net_user : net->users)
-                        log_info("        user: %s.%s\n", net_user.cell->name.c_str(ctx), net_user.port.c_str(ctx));
-                } else {
-                    log_info("   remaining fanin includes %s (no net)\n", fanin.first->name.c_str(ctx));
+            std::vector<int> cuts;
+            std::vector<bool> scc_cut(scc_size.size(), false);
+            for (int i = 0; i < int(nodes.size()); i++) {
+                int id = scc_of.at(i);
+                if (scc_size.at(id) > 1 && !scc_cut.at(id)) {
+                    scc_cut.at(id) = true;
+                    cuts.push_back(i);
                 }
             }
-            if (ctx->force)
-                log_warning("timing analysis failed due to presence of combinatorial loops, incomplete specification "
-                            "of timing ports, etc.\n");
-            else
-                log_error("timing analysis failed due to presence of combinatorial loops, incomplete specification of "
-                          "timing ports, etc.\n");
-        } else if (!port_fanin.empty()) {
-            log_warning("timing analysis: %d combinational loop(s) present in the netlist (commonly from abc9 "
-                        "mapped-network reintegration).  They are ignored by default: loops do not change the "
-                        "bitstream, but a genuine feedback path is a design error.  If unintended, re-synthesize "
-                        "without -abc9; set timing/ignoreLoops=false to make the timing analysis fail instead.\n",
-                        int(port_fanin.size()));
+            if (first_round) {
+                loop_count = int(cuts.size());
+                bool ignore_loops = bool_or_default(ctx->settings, ctx->id("timing/ignoreLoops"), true);
+                if (!ignore_loops) {
+                    std::vector<int> loop_number(scc_size.size(), 0);
+                    for (size_t c = 0; c < cuts.size(); c++)
+                        loop_number.at(scc_of.at(cuts.at(c))) = int(c) + 1;
+                    for (int i = 0; i < int(nodes.size()); i++) {
+                        if (scc_size.at(scc_of.at(i)) < 2)
+                            continue;
+                        const PortInfo *p = nodes.at(i);
+                        log_info("   loop %d: %s.%s (net %s)\n", loop_number.at(scc_of.at(i)),
+                                 ctx->nameOf(p->net->driver.cell), p->name.c_str(ctx), p->net->name.c_str(ctx));
+                    }
+                    if (ctx->force)
+                        log_warning("timing analysis: %d combinational loop(s) through %d output port(s), %d "
+                                    "output port(s) stranded in all\n",
+                                    loop_count, int(std::count_if(nodes.begin(), nodes.end(), [&](const PortInfo *p) {
+                                        return scc_size.at(scc_of.at(index.at(p))) > 1;
+                                    })),
+                                    stranded_ports);
+                    else
+                        log_error("timing analysis: %d combinational loop(s) through %d output port(s), %d output "
+                                  "port(s) stranded in all\n",
+                                  loop_count, int(std::count_if(nodes.begin(), nodes.end(), [&](const PortInfo *p) {
+                                      return scc_size.at(scc_of.at(index.at(p))) > 1;
+                                  })),
+                                  stranded_ports);
+                }
+                first_round = false;
+            }
+            if (cuts.empty()) {
+                for (int i = 0; i < int(nodes.size()); i++)
+                    if (indegree.at(i) == 0)
+                        cuts.push_back(i);
+                unfed_cuts += int(cuts.size());
+            } else {
+                loop_cuts += int(cuts.size());
+            }
+            NPNR_ASSERT(!cuts.empty());
+            for (int i : cuts) {
+                const PortInfo *p = nodes.at(i);
+                port_fanin.erase(p);
+                cut_ports.insert(p);
+                topographical_order.emplace_back(p->net);
+                queue.emplace_back(p->net);
+            }
+            drain();
         }
+        if (loop_cuts > 0)
+            log_warning("timing analysis: %d combinational loop(s) cut at %d output port(s); %d output port(s) were "
+                        "stranded by them, feeding %d endpoint pin(s), and are timed through the cut. A loop is a "
+                        "design error unless it is deliberate; --no-ignore-loops makes it fatal.\n",
+                        loop_count, loop_cuts, stranded_ports, stranded_endpoints);
+        if (unfed_cuts > 0)
+            log_warning("timing analysis: %d output port(s) have a timing arc from a net that never receives an "
+                        "arrival, and were cut there so their fanout is still timed\n",
+                        unfed_cuts);
+
+        std::unordered_map<const NetInfo *, size_t> order_index;
+        if (!cut_ports.empty())
+            for (size_t i = 0; i < topographical_order.size(); i++)
+                order_index.emplace(topographical_order.at(i), i);
+        auto cut_arc = [&](const NetInfo *from, const CellInfo *cell, IdString out_port) {
+            if (cut_ports.empty())
+                return false;
+            const PortInfo &out = cell->ports.at(out_port);
+            if (!cut_ports.count(&out))
+                return false;
+            auto f = order_index.find(from), t = order_index.find(out.net);
+            return f == order_index.end() || t == order_index.end() || f->second >= t->second;
+        };
 
         // Go forwards topographically to find the maximum arrival time and max path length for each net
         for (auto net : topographical_order) {
@@ -661,7 +790,7 @@ struct Timing
                             DelayInfo comb_delay;
                             // Look up delay through this path
                             bool is_path = ctx->getCellDelay(usr.cell, usr.port, port.first, comb_delay);
-                            if (!is_path)
+                            if (!is_path || cut_arc(net, usr.cell, port.first))
                                 continue;
                             auto &data = net_data[port.second.net][start_clk];
                             data.estimated = data.estimated || nd.estimated || (net_delays && net->wires.empty());
@@ -853,7 +982,7 @@ struct Timing
                                 continue;
                             DelayInfo comb_delay;
                             bool is_path = ctx->getCellDelay(usr.cell, usr.port, port.first, comb_delay);
-                            if (!is_path)
+                            if (!is_path || cut_arc(net, usr.cell, port.first))
                                 continue;
                             if (net_data.count(port.second.net) &&
                                 net_data.at(port.second.net).count(startdomain.first)) {
@@ -909,7 +1038,8 @@ struct Timing
                                 ctx->getPortTimingClass(crit_net->driver.cell, port.first, port_clocks);
                         if (portClass == TMG_CLOCK_INPUT || portClass == TMG_ENDPOINT || portClass == TMG_IGNORE)
                             continue;
-                        if (timing_ignored(port.second.net))
+                        if (timing_ignored(port.second.net) ||
+                            cut_arc(port.second.net, crit_net->driver.cell, crit_net->driver.port))
                             continue;
                         // And find the fanin net with the latest arrival time
                         if (net_data.count(port.second.net) &&
@@ -1034,6 +1164,8 @@ struct Timing
                         if (pclass != TMG_COMB_INPUT)
                             continue;
                         NetInfo *sink_net = port.second.net;
+                        if (cut_arc(sink_net, drv.cell, drv.port))
+                            continue;
                         if (net_data.count(sink_net) && net_data.at(sink_net).count(startdomain.first)) {
                             auto &sink_nd = net_data.at(sink_net).at(startdomain.first);
                             if (sink_nd.min_required.empty())
