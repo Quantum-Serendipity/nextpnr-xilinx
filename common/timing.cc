@@ -392,12 +392,13 @@ struct Timing
         unsigned max_path_length = 0;
         delay_t min_remaining_budget;
         bool false_startpoint = false;
+        bool estimated = false;
         std::vector<delay_t> min_required;
         std::unordered_map<ClockEvent, delay_t> arrival_time;
     };
 
     Timing(Context *ctx, bool net_delays, bool update, CriticalPathMap *crit_path = nullptr,
-           DelayFrequency *slack_histogram = nullptr, NetCriticalityMap *net_crit = nullptr)
+           DelayFrequency *slack_histogram = nullptr, NetCriticalityMap *net_crit = nullptr, bool export_setup = false)
             : ctx(ctx), net_delays(net_delays), update(update), min_slack(1.0e12 / ctx->setting<float>("target_freq")),
               crit_path(crit_path), slack_histogram(slack_histogram), net_crit(net_crit),
               async_clock(ctx->id("$async$"))
@@ -424,11 +425,13 @@ struct Timing
             if (!async_groups.empty())
                 log_info("timing: loaded %zu async clock group(s) from %s\n", async_groups.size(), fn);
         }
-        if (slack_histogram != nullptr) {
+        if (export_setup) {
             if (const char *sf = getenv("NEXTPNR_SETUP_EXPORT")) {
                 setup_export.open(sf);
-                if (setup_export)
-                    setup_export << "cell\tport\tslack_ns\tnet\tnet_delay_ns\tdriver_arrival_ns\tsetup_ns\tperiod_ns\tlaunch_clk\tcapture_clk\tpath_len\n";
+                if (!setup_export)
+                    log_error("cannot open NEXTPNR_SETUP_EXPORT file '%s' for writing\n", sf);
+                setup_export << "cell\tport\tslack_ns\tnet\tnet_delay_ns\tdriver_arrival_ns\tsetup_ns\tperiod_ns\tlaunch_"
+                                "clk\tcapture_clk\tpath_len\tdelay_source\n";
             }
         }
     }
@@ -661,6 +664,7 @@ struct Timing
                             if (!is_path)
                                 continue;
                             auto &data = net_data[port.second.net][start_clk];
+                            data.estimated = data.estimated || nd.estimated || (net_delays && net->wires.empty());
                             auto &arrival = data.max_arrival;
                             arrival = std::max(arrival, usr_arrival + comb_delay.maxDelay());
                             data.min_arrival = std::min(data.min_arrival, usr_min_arrival + comb_delay.minDelay());
@@ -776,7 +780,9 @@ struct Timing
                                     << ctx->getDelayNS(net_delay) << '\t' << ctx->getDelayNS(net_arrival) << '\t'
                                     << ctx->getDelayNS(setup) << '\t' << ctx->getDelayNS(period) << '\t'
                                     << startdomain.first.clock.c_str(ctx) << '\t' << clksig.c_str(ctx) << '\t'
-                                    << nd.max_path_length << '\n';
+                                    << nd.max_path_length << '\t'
+                                    << ((nd.estimated || (net_delays && net->wires.empty())) ? "estimate" : "routed")
+                                    << '\n';
                                 std::string key = std::string(usr.cell->name.c_str(ctx)) + '\t' + usr.port.c_str(ctx) +
                                                   '\t' + startdomain.first.clock.c_str(ctx) + '\t' +
                                                   std::to_string(int(startdomain.first.edge)) + '\t' +
@@ -1350,7 +1356,7 @@ void timing_analysis(Context *ctx, bool print_histogram, bool print_fmax, bool p
     DelayFrequency slack_histogram;
 
     Timing timing(ctx, true /* net_delays */, false /* update */, (print_path || print_fmax) ? &crit_paths : nullptr,
-                  print_histogram ? &slack_histogram : nullptr);
+                  print_histogram ? &slack_histogram : nullptr, nullptr, true);
     timing.walk_paths();
     if (timing.have_exceptions) {
         CriticalPathMap merged;
