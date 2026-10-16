@@ -72,7 +72,31 @@ arm_region_only_keeps_output() {
     fi
 }
 
+arm_fixed_routes_command_line_wins() {
+    local a=$OUT/m11-a.routes b=$OUT/m11-b.routes
+    printf '# nextpnr-xilinx fixed-routes: <net> <tile>/<src_idx>.<dst_idx>\n' >"$a"
+    cp "$a" "$b"
+    if ! npnr "$OUT/m11-a.log" --json "$OUT/placed.json" --no-pack --no-place --no-route --fixed-routes "$a" \
+            --write "$OUT/m11-a.json"; then
+        report "FAIL fixed-routes precedence: the run that stores lock A failed: $(grep -m1 '^ERROR' "$OUT/m11-a.log")"
+        return
+    fi
+    local stored
+    stored=$(grep -c "\"fixed-routes\": \"$a\"" "$OUT/m11-a.json")
+    npnr "$OUT/m11-b.log" --json "$OUT/m11-a.json" --no-pack --no-place --fixed-routes "$b"
+    local rc=$?
+    local used_a used_b
+    used_a=$(grep -cF "Applying fixed routes from '$a'" "$OUT/m11-b.log")
+    used_b=$(grep -cF "Applying fixed routes from '$b'" "$OUT/m11-b.log")
+    if [ "$stored" -gt 0 ] && [ "$rc" -eq 0 ] && [ "$used_b" -eq 1 ] && [ "$used_a" -eq 0 ]; then
+        report "PASS fixed-routes precedence: lock A stored in the netlist, --fixed-routes B applied"
+    else
+        report "FAIL fixed-routes precedence: lock A stored $stored time(s), rc $rc, applied A $used_a time(s), B $used_b time(s)"
+    fi
+}
+
 arm_region_only_keeps_output
+arm_fixed_routes_command_line_wins
 
 echo "artefacts kept in $OUT"
 exit "$rc_total"

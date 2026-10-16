@@ -14,3 +14,4 @@ fails and leaves its outputs in `$OUT` (a fresh `mktemp -d` by default).
 | arm | passes when |
 |---|---|
 | `--region-only` without a rectangle | `--write-fixed-routes` is refused, and the file it names is byte-identical afterwards |
+| `--fixed-routes` precedence | a netlist written by a run with `--fixed-routes A` stores A in its settings, and reloading it with `--fixed-routes B` applies B and never A |
