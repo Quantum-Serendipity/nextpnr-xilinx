@@ -196,10 +196,46 @@ arm_static_keepout() {
     fi
 }
 
+arm_const_containment() {
+    local cx cy
+    read -r cx cy < <(geom pick-const "$OUT/all.routes") || {
+        report "FAIL constant containment: no constant INT pip to put a rectangle on"
+        return
+    }
+    local r=$OUT/const.roi.json
+    roi "$r" "$cx" "$cy" "$cx" "$cy"
+    local base_in
+    base_in=$(geom count "$OUT/all.routes" const "$cx" "$cy" "$cx" "$cy")
+
+    NEXTPNR_PARTITION_ROI=$r NEXTPNR_ROUTE_FIXED_ONLY=1 npnr "$OUT/m12-import.log" --json "$OUT/routed.json" \
+        --no-pack --no-place
+    local rc=$?
+    if refused_by_keepout_gate "$rc" "$OUT/m12-import.log" &&
+            grep -q "^Warning: partition keepout gate: constant net" "$OUT/m12-import.log"; then
+        report "PASS constant containment, imported ties through tile ($cx,$cy) for sinks outside it: refused at rc $rc"
+    else
+        report "FAIL constant containment, imported ties through tile ($cx,$cy) for sinks outside it: rc $rc, $base_in constant pip(s) imported there"
+    fi
+
+    NEXTPNR_PARTITION_ROI=$r npnr "$OUT/m12-bridge.log" --json "$OUT/placed.json" --no-pack --no-place \
+        --write-fixed-routes "$OUT/m12-bridge.routes"
+    rc=$?
+    local inside='-'
+    [ -f "$OUT/m12-bridge.routes" ] && inside=$(geom count "$OUT/m12-bridge.routes" const "$cx" "$cy" "$cx" "$cy")
+    if [ "$rc" -eq 0 ] && [ "$inside" = 0 ]; then
+        report "PASS constant containment, fresh bridge: rc 0, no constant pip in tile ($cx,$cy) against $base_in unconfined"
+    elif [ "$rc" -ne 0 ] && grep -q '^ERROR: routeVcc: .* constant sink(s) could not be bridged' "$OUT/m12-bridge.log"; then
+        report "PASS constant containment, fresh bridge: the sinks outside tile ($cx,$cy) have no tie that avoids it, refused at rc $rc"
+    else
+        report "FAIL constant containment, fresh bridge: rc $rc, $inside constant pip(s) in tile ($cx,$cy)"
+    fi
+}
+
 arm_region_only_keeps_output
 arm_fixed_routes_command_line_wins
 arm_router1_refused_under_a_rectangle
 arm_static_keepout
+arm_const_containment
 
 echo "artefacts kept in $OUT"
 exit "$rc_total"

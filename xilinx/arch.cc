@@ -1108,7 +1108,20 @@ static bool const_sink_is_config_delivered(const PortRef &usr)
 // routeBufhcePassthroughCE() (a synthetic sink with no netlist user at all).
 // iters_out, if given, receives the number of BFS iterations actually used
 // (success or failure) so callers can track a "worst case" figure.
-bool Arch::bridgeConstToWire(NetInfo *net, int pseudo_intent, WireId sink, int iter_max, int *iters_out)
+bool Arch::const_path_in_rect(const NetInfo *net, WireId wire, int rect) const
+{
+    for (size_t hops = 0; hops <= net->wires.size(); hops++) {
+        auto it = net->wires.find(wire);
+        if (it == net->wires.end() || it->second.pip == PipId())
+            return true;
+        if (partition_rect_at(getPipLocation(it->second.pip)) != rect)
+            return false;
+        wire = getPipSrcWire(it->second.pip);
+    }
+    return false;
+}
+
+bool Arch::bridgeConstToWire(NetInfo *net, int pseudo_intent, WireId sink, int sink_rect, int iter_max, int *iters_out)
 {
     std::queue<WireId> visit;
     std::unordered_map<WireId, PipId> backtrace;
@@ -1119,7 +1132,9 @@ bool Arch::bridgeConstToWire(NetInfo *net, int pseudo_intent, WireId sink, int i
         ++iter;
         WireId curr = visit.front();
         visit.pop();
-        bool curr_is_dest = (getBoundWireNet(curr) == net) || (wireIntent(curr) == pseudo_intent);
+        bool curr_is_dest = (getBoundWireNet(curr) == net &&
+                             (curr == sink || !roi_active() || const_path_in_rect(net, curr, sink_rect))) ||
+                            (wireIntent(curr) == pseudo_intent);
         if (curr_is_dest) {
             dest = curr;
             break;
@@ -1133,6 +1148,8 @@ bool Arch::bridgeConstToWire(NetInfo *net, int pseudo_intent, WireId sink, int i
             continue;
         for (auto uh : getPipsUphill(curr)) {
             if (!checkPipAvail(uh))
+                continue;
+            if (partition_rect_at(getPipLocation(uh)) != sink_rect)
                 continue;
             WireId s = getPipSrcWire(uh);
             bool src_already_visited = (backtrace.count(s) != 0);
@@ -1258,8 +1275,9 @@ std::vector<Arch::ConstHoldout> Arch::routeVcc()
                     log_error("Pin '%s' of bel '%s' has no associated wire\n", usr.port.c_str(this),
                               nameOfBel(usr.cell->bel));
                 const int budget = (passes == 1) ? iter_max : iter_max_retry;
+                const int sink_rect = partition_rect_at(getBelLocation(usr.cell->bel));
                 int iter = 0;
-                bool bridged = bridgeConstToWire(net, pseudo_intent, sink, budget, &iter);
+                bool bridged = bridgeConstToWire(net, pseudo_intent, sink, sink_rect, budget, &iter);
                 if (iter > max_iter_seen)
                     max_iter_seen = iter;
                 if (!bridged) {
@@ -1383,7 +1401,8 @@ void Arch::routeBufhcePassthroughCE()
                 ++already_driven;
                 continue;
             }
-            bool bridged = bridgeConstToWire(vcc, ID_PSEUDO_VCC, ce_wire, 50000);
+            bool bridged =
+                    bridgeConstToWire(vcc, ID_PSEUDO_VCC, ce_wire, partition_rect_at(getPipLocation(pip)), 50000);
             if (bridged) {
                 ++tied;
             } else {
@@ -5367,6 +5386,54 @@ void Arch::check_partition_keepout() const
     int nets_checked = 0, bad_nets = 0;
     int64_t pips_inside = 0, pips_bad = 0;
     std::vector<std::pair<std::string, std::string>> offenders;
+    int64_t const_pips = 0;
+    std::set<std::pair<std::string, std::string>> const_offenders;
+    for (IdString cn : {gnd_net, vcc_net}) {
+        auto nit = nets.find(cn);
+        if (nit == nets.end())
+            continue;
+        const NetInfo *net = nit->second.get();
+        std::unordered_map<WireId, int> sink_rect;
+        for (auto &usr : net->users) {
+            if (usr.cell == nullptr || usr.cell->bel == BelId())
+                continue;
+            WireId w = getCtx()->getNetinfoSinkWire(net, usr);
+            if (w != WireId())
+                sink_rect[w] = partition_rect_at(getBelLocation(usr.cell->bel));
+        }
+        std::unordered_set<WireId> drives;
+        for (auto &w : net->wires)
+            if (w.second.pip != PipId()) {
+                drives.insert(getPipSrcWire(w.second.pip));
+                const_pips++;
+            }
+        for (auto &w : net->wires) {
+            if (w.second.pip == PipId())
+                continue;
+            auto sit = sink_rect.find(w.first);
+            if (sit == sink_rect.end() && drives.count(w.first))
+                continue;
+            const int want = sit != sink_rect.end() ? sit->second : partition_rect_at(getPipLocation(w.second.pip));
+            WireId cur = w.first;
+            for (size_t hops = 0; hops <= net->wires.size(); hops++) {
+                auto it = net->wires.find(cur);
+                if (it == net->wires.end() || it->second.pip == PipId())
+                    break;
+                const PipId pip = it->second.pip;
+                const Loc l = getPipLocation(pip);
+                const int kr = partition_rect_at(l);
+                if (kr != want)
+                    const_offenders.emplace(
+                            std::string(net->name.c_str(this)),
+                            stringf("%s at tile (%d,%d), in %s, on the path to a %s %s", nameOfPip(pip), l.x, l.y,
+                                    kr < 0 ? "no rectangle" : stringf("rectangle %d", kr).c_str(),
+                                    sit != sink_rect.end() ? "sink" : "route end",
+                                    want < 0 ? "outside every rectangle" : stringf("in rectangle %d", want).c_str()));
+                cur = getPipSrcWire(pip);
+            }
+        }
+    }
+    const int64_t const_bad = int64_t(const_offenders.size());
     for (auto np : sorted(nets)) {
         NetInfo *net = np.second;
         if (net->name == gnd_net || net->name == vcc_net)
@@ -5409,10 +5476,27 @@ void Arch::check_partition_keepout() const
     if (offenders.size() > report_cap)
         log_warning("partition keepout gate: %d further unlicensed pip(s) not listed\n",
                     int(offenders.size() - report_cap));
+    size_t const_listed = 0;
+    for (const auto &o : const_offenders)
+        if (const_listed++ < report_cap)
+            log_warning("partition keepout gate: constant net '%s' binds pip %s\n", o.first.c_str(), o.second.c_str());
+    if (const_offenders.size() > report_cap)
+        log_warning("partition keepout gate: %d further constant pip(s) on a path that crosses a rectangle edge not "
+                    "listed\n",
+                    int(const_offenders.size() - report_cap));
     log_info("partition keepout gate [%s]: %d static net(s) in scope, %lld of their pip(s) inside a rectangle, "
              "%lld unlicensed in %d net(s)\n",
              keepout_off ? "report only, keepout DISABLED" : "fatal", nets_checked, (long long)pips_inside,
              (long long)pips_bad, bad_nets);
+    log_info("partition keepout gate [%s]: %lld constant pip(s), %lld on a path whose sink is on the other side of a "
+             "rectangle edge\n",
+             keepout_off ? "report only, keepout DISABLED" : "fatal", (long long)const_pips, (long long)const_bad);
+    if (const_bad > 0 && !keepout_off)
+        log_error("partition keepout gate: %lld constant pip(s) sit on a path that crosses a rectangle edge (listed "
+                  "above). A constant sink inside a rectangle must be tied from inside it and one outside every "
+                  "rectangle from outside them all; otherwise --region-only drops the tie, or a partial loaded "
+                  "into the rectangle overwrites it.\n",
+                  (long long)const_bad);
     if (pips_bad > 0 && !keepout_off)
         log_error("partition keepout gate: %d static net(s) bind pips inside a partition rectangle they hold no "
                   "licence for (listed above). router2's keepout refuses such pips during its own search, so these "

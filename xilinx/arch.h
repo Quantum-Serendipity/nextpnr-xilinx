@@ -1001,6 +1001,16 @@ struct Arch : BaseCtx
     {
         return x >= r.x0 && x <= r.x1 && y >= r.y0 && y <= r.y1;
     }
+    int partition_rect_at(Loc l) const
+    {
+        if (!roi_active())
+            return -1;
+        for (int i = 0; i < roi_rect_count(); i++)
+            if (rect_holds(roi_rect(i), l.x, l.y))
+                return i;
+        return -1;
+    }
+    bool const_path_in_rect(const NetInfo *net, WireId wire, int rect) const;
 
     // One veto counter per enforcement point, reported at the end of
     // Arch::place().  These exist because "0 RM cells outside the rectangle" is
@@ -2106,7 +2116,8 @@ struct Arch : BaseCtx
     void ripupConstNets();
     void routeClock();
     void routeBufhcePassthroughCE();
-    bool bridgeConstToWire(NetInfo *net, int pseudo_intent, WireId sink, int iter_max, int *iters_out = nullptr);
+    bool bridgeConstToWire(NetInfo *net, int pseudo_intent, WireId sink, int sink_rect, int iter_max,
+                           int *iters_out = nullptr);
     bool isGlobalClockNet(const NetInfo *clk_net, bool &lenient) const;
     std::unordered_set<IdString> fixedRouteClocks(const std::string &filename) const;
     void applyFixedRoutes(const std::string &filename, std::function<void()> route_unlocked_clocks);
