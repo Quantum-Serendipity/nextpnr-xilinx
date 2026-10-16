@@ -231,11 +231,29 @@ arm_const_containment() {
     fi
 }
 
+arm_frozen_cell_not_moved() {
+    local bel
+    bel=$(geom cell-tiles "$OUT/placed.json" SLICE_LUTX | awk 'NR == 1 { print $1 }')
+    printf '%s\n' "$bel" >"$OUT/m8.bel"
+    roi "$OUT/far.roi.json" 40 180 44 190
+    NEXTPNR_PARTITION_ROI=$OUT/far.roi.json NEXTPNR_BEL_BLACKLIST=$OUT/m8.bel npnr "$OUT/m8.log" \
+        --json "$OUT/placed.json" --no-pack --no-route --write "$OUT/m8.json"
+    local rc=$?
+    if [ "$rc" -ne 0 ] && grep -q "^ERROR: post-place repair: .* invalid at their own bels" "$OUT/m8.log"; then
+        report "PASS static cell on a blacklisted bel under a rectangle: refused at rc $rc, not moved"
+    else
+        local now='-'
+        [ -f "$OUT/m8.json" ] && now=$(geom cell-tiles "$OUT/m8.json" SLICE_LUTX | awk 'NR == 1 { print $1 " at tile (" $2 "," $3 ")" }')
+        report "FAIL static cell on a blacklisted bel under a rectangle: rc $rc, $bel now $now, rectangle (40,180)-(44,190)"
+    fi
+}
+
 arm_region_only_keeps_output
 arm_fixed_routes_command_line_wins
 arm_router1_refused_under_a_rectangle
 arm_static_keepout
 arm_const_containment
+arm_frozen_cell_not_moved
 
 echo "artefacts kept in $OUT"
 exit "$rc_total"

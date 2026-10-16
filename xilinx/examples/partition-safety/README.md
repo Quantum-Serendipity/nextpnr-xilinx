@@ -25,3 +25,4 @@ fails and leaves its outputs in `$OUT` (a fresh `mktemp -d` by default).
 | static keepout, keepout off | the `--fixed-routes` replay with `NEXTPNR_PARTITION_KEEPOUT=off` exits rc 0 and the gate's report-only census names the unlicensed pips |
 | constant containment, imported | a one-tile rectangle on the INT tile carrying the most constant pips of the base route, whose sinks are all outside it, is refused by the keepout gate when the routed netlist is kept as-is |
 | constant containment, fresh bridge | routing the placed netlist under that rectangle either ties every constant sink without a pip inside it, or refuses because no tie avoids it; rc 0 with a constant pip inside fails |
+| frozen cell not moved | under a rectangle elsewhere on the die, a placement of the placed netlist with `NEXTPNR_BEL_BLACKLIST` naming the bel a static LUT sits on is refused by the post-place repair, not relocated |

@@ -54,6 +54,22 @@ def count(routes, x0, y0, x1, y1, which):
     print(n)
 
 
+def cell_tiles(grid, placed, cell_type):
+    with open(placed) as f:
+        cells = json.load(f)["modules"]["top"]["cells"]
+    site_xy = {}
+    for t in grid.values():
+        for site in t.get("sites", {}):
+            site_xy[site] = (t["grid_x"], t["grid_y"])
+    for name in sorted(cells):
+        c = cells[name]
+        if c["type"] != cell_type:
+            continue
+        bel = c["attributes"].get("NEXTPNR_BEL", "")
+        x, y = site_xy.get(bel.split("/", 1)[0], (-1, -1))
+        print(bel, x, y)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--tilegrid", required=True)
@@ -67,6 +83,9 @@ def main():
     p.add_argument("which", choices=("static", "const"))
     for k in ("x0", "y0", "x1", "y1"):
         p.add_argument(k, type=int)
+    p = sub.add_parser("cell-tiles")
+    p.add_argument("placed")
+    p.add_argument("cell_type")
     a = ap.parse_args()
     with open(a.tilegrid) as f:
         grid = json.load(f)
@@ -76,6 +95,8 @@ def main():
         pick_const(read_routes(a.routes, grid))
     elif a.cmd == "count":
         count(read_routes(a.routes, grid), a.x0, a.y0, a.x1, a.y1, a.which)
+    elif a.cmd == "cell-tiles":
+        cell_tiles(grid, a.placed, a.cell_type)
 
 
 if __name__ == "__main__":
