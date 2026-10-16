@@ -152,7 +152,8 @@ po::options_description CommandHandler::getGeneralOptions()
     general.add_options()("no-place", "process design without placement");
     general.add_options()("no-pack", "process design without packing");
 
-    general.add_options()("ignore-loops", "ignore combinational loops in timing analysis");
+    general.add_options()("ignore-loops", "cut combinational loops and time their fanout through the cut (the default)");
+    general.add_options()("no-ignore-loops", "fail timing analysis on a combinational loop");
 
     general.add_options()("version,V", "show version");
     general.add_options()("test", "check architecture database integrity");
@@ -217,6 +218,11 @@ void CommandHandler::setupContext(Context *ctx)
     if (vm.count("ignore-loops")) {
         ctx->settings[ctx->id("timing/ignoreLoops")] = true;
     }
+    if (vm.count("no-ignore-loops")) {
+        if (vm.count("ignore-loops"))
+            log_error("--ignore-loops and --no-ignore-loops cannot both be given\n");
+        ctx->settings[ctx->id("timing/ignoreLoops")] = false;
+    }
 
     if (vm.count("timing-allow-fail")) {
         ctx->settings[ctx->id("timing/allowFail")] = true;
@@ -252,16 +258,20 @@ void CommandHandler::setupContext(Context *ctx)
     }
     if (vm.count("freq")) {
         auto freq = vm["freq"].as<double>();
-        if (freq > 0)
+        if (freq > 0) {
             ctx->settings[ctx->id("target_freq")] = std::to_string(freq * 1e6);
+            ctx->target_freq_is_default = false;
+        }
     }
 
     if (vm.count("no-tmdriv"))
         ctx->settings[ctx->id("timing_driven")] = false;
 
     // Setting default values
-    if (ctx->settings.find(ctx->id("target_freq")) == ctx->settings.end())
+    if (ctx->settings.find(ctx->id("target_freq")) == ctx->settings.end()) {
         ctx->settings[ctx->id("target_freq")] = std::to_string(12e6);
+        ctx->target_freq_is_default = true;
+    }
     if (ctx->settings.find(ctx->id("timing_driven")) == ctx->settings.end())
         ctx->settings[ctx->id("timing_driven")] = true;
     if (ctx->settings.find(ctx->id("slack_redist_iter")) == ctx->settings.end())

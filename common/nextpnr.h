@@ -518,6 +518,10 @@ struct ClockConstraint
 
     std::string name;
 
+    IdString source;
+    int64_t source_num = 0, source_den = 0;
+    int64_t offset_num = 0, offset_den = 1;
+
     TimingConstrObjectId domain_tmg_id;
 };
 
@@ -697,6 +701,7 @@ struct BaseCtx
 
     // Project settings and config switches
     std::unordered_map<IdString, Property> settings;
+    bool target_freq_is_default = false;
 
     // Placed nets and cells.
     std::unordered_map<IdString, std::unique_ptr<NetInfo>> nets;

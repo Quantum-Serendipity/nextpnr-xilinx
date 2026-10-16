@@ -280,6 +280,8 @@ template <typename FrontendType> struct GenericFrontend
             // Import settings
             impl.foreach_setting(data, [&](const std::string &name, const Property &value) {
                 ctx->settings[ctx->id(name)] = value;
+                if (name == "target_freq")
+                    ctx->target_freq_is_default = false;
             });
         }
         import_module_netnames(m, data);

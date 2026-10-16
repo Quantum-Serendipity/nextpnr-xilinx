@@ -46,10 +46,12 @@ std::string get_string(std::string str)
 std::string get_name(IdString name, Context *ctx) { return get_string(name.c_str(ctx)); }
 
 void write_parameters(std::ostream &f, Context *ctx, const std::unordered_map<IdString, Property> &parameters,
-                      bool for_module = false)
+                      bool for_module = false, IdString omit = IdString())
 {
     bool first = true;
     for (auto &param : parameters) {
+        if (omit != IdString() && param.first == omit)
+            continue;
         f << stringf("%s\n", first ? "" : ",");
         f << stringf("        %s%s: ", for_module ? "" : "    ", get_name(param.first, ctx).c_str());
         f << get_string(param.second.to_string());
@@ -123,7 +125,7 @@ void write_module(std::ostream &f, Context *ctx)
     else
         f << stringf("    %s: {\n", get_string("top").c_str());
     f << stringf("      \"settings\": {");
-    write_parameters(f, ctx, ctx->settings, true);
+    write_parameters(f, ctx, ctx->settings, true, ctx->target_freq_is_default ? ctx->id("target_freq") : IdString());
     f << stringf("\n      },\n");
     f << stringf("      \"attributes\": {");
     write_parameters(f, ctx, ctx->attrs, true);
