@@ -2694,6 +2694,23 @@ struct FasmBackend
         }
     }
 
+    std::string param_choice(const CellInfo *ci, const std::string &param, const std::vector<std::string> &legal)
+    {
+        auto found = ci->params.find(ctx->id(param));
+        if (found == ci->params.end())
+            return legal.front();
+        const Property &value = found->second;
+        if (value.is_string && std::find(legal.begin(), legal.end(), value.str) != legal.end())
+            return value.str;
+        if (!value.is_string && legal.size() == 2 && legal.at(0) == "FALSE" && legal.at(1) == "TRUE" &&
+            value.str.size() == 1 && value.is_fully_def())
+            return legal.at(value.as_bool());
+        log_error("%s '%s' at %s has %s=%s; it must be one of %s.\n",
+                  str_or_default(ci->attrs, ctx->id("X_ORIG_TYPE"), ci->type.str(ctx)).c_str(), ctx->nameOf(ci),
+                  get_tile_name(ci->bel.tile).c_str(), param.c_str(),
+                  value.is_string ? value.str.c_str() : value.to_string().c_str(), boost::join(legal, ", ").c_str());
+    }
+
     void write_bram_half(int tile, int half, CellInfo *ci)
     {
         cur_tile = tile;
@@ -2740,7 +2757,7 @@ struct FasmBackend
                 write_bit("ZINV_REGCLKB",
                           !bool_or_default(ci->params, ctx->id("IS_CLKBWRCLK_INVERTED"), false));
             // golden per-half defaults (dcp2fasm campaign):
-            if (str_or_default(ci->params, ctx->id("RDADDR_COLLISION_HWCONFIG"), "DELAYED_WRITE") == "PERFORMANCE")
+            if (param_choice(ci, "RDADDR_COLLISION_HWCONFIG", {"DELAYED_WRITE", "PERFORMANCE"}) == "PERFORMANCE")
                 write_bit("RDADDR_COLLISION_HWCONFIG_PERFORMANCE");
             for (std::string ab : {"A", "B"})
                 write_bit("RSTREG_PRIORITY_" + ab + "_" +
@@ -2771,10 +2788,12 @@ struct FasmBackend
                 }
                 for (std::string port : {"A", "B"}) {
                     const std::string extension =
-                            str_or_default(ci->params, ctx->id("RAM_EXTENSION_" + port), "NONE");
+                            param_choice(ci, "RAM_EXTENSION_" + port, {"NONE", "LOWER", "UPPER"});
                     const bool lower_of_a_pair = extension == "LOWER";
                     write_bit("RAM_EXTENSION_" + port + "_LOWER", lower_of_a_pair);
                 }
+                for (std::string rw : {"READ", "WRITE"})
+                    write_bit("EN_ECC_" + rw, param_choice(ci, "EN_ECC_" + rw, {"FALSE", "TRUE"}) == "TRUE");
                 pop();
             }
             auto used_rdaddrcasc = used_wires_starting_with(tile, "BRAM_CASCOUT_ADDRARDADDR", false);
@@ -2787,21 +2806,6 @@ struct FasmBackend
             // (proven by the dcp2fasm bit-equivalence campaign)
             write_vector("ZALMOST_EMPTY_OFFSET[12:0]", std::vector<bool>(13, true));
             write_vector("ZALMOST_FULL_OFFSET[12:0]", std::vector<bool>(13, true));
-            push("RAMB36");
-            // BRAM36_*_WIDTH_X_1 are RAMB36-mode (tile-level) width bits.  Set
-            // them ONLY for an actual RAMB36E1 whose port X width is 1 -- NOT for
-            // a RAMB18E1 (its width lives in RAMB18_Y0/Y1.*_WIDTH, where width-1
-            // is the no-bit default) and NOT for a RAMB36 port wider than 1.  The
-            // previous code wrote the A-port bits UNCONDITIONALLY on every used
-            // BRAM tile, setting bits 27_184/27_180 that golden never sets for a
-            // width-1 RAMB18 or a width-18 RAMB36 -- silently corrupting every
-            // RAMB18 and every width>1 RAMB36 (isolated on a single-RAMB JTAG
-            // tester: dropping just those two bits restored read/write).
-            if (ci->type == id_RAMB36E1_RAMB36E1)
-                for (std::string rw : {"READ_WIDTH_A", "WRITE_WIDTH_A", "READ_WIDTH_B", "WRITE_WIDTH_B"})
-                    if (int_or_default(ci->params, ctx->id(rw), 0) == 1)
-                        write_bit("BRAM36_" + rw + "_1");
-            pop();
         }
         pop();
     }
@@ -5679,31 +5683,34 @@ void write_gtx_channel(CellInfo *ci)
             }
         };
 
-        auto dsp_str = [&](const char *pname, std::string def) -> std::string {
-            auto it = ci->params.find(ctx->id(pname));
-            if (it == ci->params.end())
-                return def;
-            return it->second.str;
-        };
-
         auto areg = int_or_default(ci->params, ctx->id("AREG"), 1);
-        if (areg >= 0 && areg <= 2) write_bit("AREG_" + std::to_string(areg));
+        auto breg = int_or_default(ci->params, ctx->id("BREG"), 1);
+        auto acascreg = int_or_default(ci->params, ctx->id("ACASCREG"), 1);
+        auto bcascreg = int_or_default(ci->params, ctx->id("BCASCREG"), 1);
+        for (auto &reg : {std::make_tuple("A", areg, acascreg), std::make_tuple("B", breg, bcascreg)}) {
+            const char *in = std::get<0>(reg);
+            const int r = std::get<1>(reg), casc = std::get<2>(reg);
+            const bool legal = (r == 0 && casc == 0) || (r == 1 && casc == 1) || (r == 2 && (casc == 1 || casc == 2));
+            if (!legal)
+                log_error("DSP48E1 '%s' at %s has %sREG=%d and %sCASCREG=%d; the legal pairs are 0/0, 1/1, 2/1 "
+                          "and 2/2.\n",
+                          ctx->nameOf(ci), tile_name.c_str(), in, r, in, casc);
+        }
 
-        auto ainput = dsp_str("A_INPUT", "DIRECT");
+        write_bit("AREG_" + std::to_string(areg));
+
+        auto ainput = param_choice(ci, "A_INPUT", {"DIRECT", "CASCADE"});
         if (ainput == "CASCADE") write_bit("A_INPUT[0]");
 
-        auto breg = int_or_default(ci->params, ctx->id("BREG"), 1);
-        if (breg >= 0 && breg <= 2) write_bit("BREG_" + std::to_string(breg));
+        write_bit("BREG_" + std::to_string(breg));
 
-        auto binput = dsp_str("B_INPUT", "DIRECT");
+        auto binput = param_choice(ci, "B_INPUT", {"DIRECT", "CASCADE"});
         if (binput == "CASCADE") write_bit("B_INPUT[0]");
 
-        // USE_DPORT may arrive as the string "TRUE"/"FALSE" (Vivado/RapidWright)
-        // or as a 1-bit numeric "1"/"0" (SVS normalises the boolean), so accept both.
-        auto use_dport = dsp_str("USE_DPORT", "FALSE");
-        if (use_dport == "TRUE" || use_dport == "1") write_bit("USE_DPORT[0]");
+        const bool use_dport = param_choice(ci, "USE_DPORT", {"FALSE", "TRUE"}) == "TRUE";
+        if (use_dport) write_bit("USE_DPORT[0]");
 
-        auto use_simd = dsp_str("USE_SIMD", "ONE48");
+        auto use_simd = param_choice(ci, "USE_SIMD", {"ONE48", "TWO24", "FOUR12"});
         if (use_simd == "TWO24")  write_bit("USE_SIMD_FOUR12_TWO24");
         if (use_simd == "FOUR12") write_bit("USE_SIMD_FOUR12");
 
@@ -5731,23 +5738,21 @@ void write_gtx_channel(CellInfo *ci)
         if (ci->params.count(ctx->id("PATTERN")))
             write_vector("PATTERN[47:0]", dsp_bits48("PATTERN", 0));
 
-        auto autoreset_patdet = dsp_str("AUTORESET_PATDET", "NO_RESET");
+        auto autoreset_patdet = param_choice(ci, "AUTORESET_PATDET", {"NO_RESET", "RESET_MATCH", "RESET_NOT_MATCH"});
         if (autoreset_patdet == "RESET_MATCH")     write_bit("AUTORESET_PATDET_RESET");
         if (autoreset_patdet == "RESET_NOT_MATCH") write_bit("AUTORESET_PATDET_RESET_NOT_MATCH");
 
         write_vector("MASK[47:0]", dsp_bits48("MASK", 0x3FFFFFFFFFFFULL));
 
-        auto sel_mask = dsp_str("SEL_MASK", "MASK");
+        auto sel_mask = param_choice(ci, "SEL_MASK", {"MASK", "C", "ROUNDING_MODE1", "ROUNDING_MODE2"});
         if (sel_mask == "C")              write_bit("SEL_MASK_C");
         if (sel_mask == "ROUNDING_MODE1") write_bit("SEL_MASK_ROUNDING_MODE1");
         if (sel_mask == "ROUNDING_MODE2") write_bit("SEL_MASK_ROUNDING_MODE2");
 
         const bool dport_used =
-                (use_dport == "TRUE" || use_dport == "1") && dsp_str("USE_MULT", "MULTIPLY") != "NONE";
+                use_dport && param_choice(ci, "USE_MULT", {"MULTIPLY", "DYNAMIC", "NONE"}) != "NONE";
         write_bit("ZADREG[0]", !dport_used || !bool_or_default(ci->params, ctx->id("ADREG"), true));
         write_bit("ZALUMODEREG[0]", !bool_or_default(ci->params, ctx->id("ALUMODEREG"), true));
-        auto acascreg = int_or_default(ci->params, ctx->id("ACASCREG"), 1);
-        auto bcascreg = int_or_default(ci->params, ctx->id("BCASCREG"), 1);
         write_bit("ZAREG_2_ACASCREG_1", !(areg == 2 && acascreg == 1));
         write_bit("ZBREG_2_BCASCREG_1", !(breg == 2 && bcascreg == 1));
         write_bit("ZCARRYINREG[0]", !bool_or_default(ci->params, ctx->id("CARRYINREG"), true));
@@ -5761,7 +5766,6 @@ void write_gtx_channel(CellInfo *ci)
         write_bit("ZMREG[0]", !bool_or_default(ci->params, ctx->id("MREG"), true));
         write_bit("ZOPMODEREG[0]", !bool_or_default(ci->params, ctx->id("OPMODEREG"), true));
         write_bit("ZPREG[0]", !bool_or_default(ci->params, ctx->id("PREG"), true));
-        write_bit("USE_DPORT[0]", (use_dport == "TRUE" || use_dport == "1"));
         write_bit("ZIS_CLK_INVERTED", !bool_or_default(ci->params, ctx->id("IS_CLK_INVERTED")));
         write_bit("ZIS_CARRYIN_INVERTED", !bool_or_default(ci->params, ctx->id("IS_CARRYIN_INVERTED")));
         pop(2);

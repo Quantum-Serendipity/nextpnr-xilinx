@@ -99,5 +99,22 @@ if builds dsp_default; then
     lines dsp_default '\.PATTERN\[' 0
     feature dsp_default '\.MASK\[' "DSP48.DSP_0.MASK[47:0] = 48'b00$(printf '1%.0s' $(seq 46))"
 fi
+refuses dsp_areg3 'AREG=3 and ACASCREG=1'
+refuses dsp_areg0_acascreg1 'AREG=0 and ACASCREG=1'
+refuses dsp_breg1_bcascreg2 'BREG=1 and BCASCREG=2'
+refuses dsp_simd_bogus 'USE_SIMD=FOUR'
+
+if builds bram_sdp; then
+    lines bram_sdp 'EN_ECC' 0
+fi
+if builds bram_ecc; then
+    feature bram_ecc 'EN_ECC' 'RAMB36.EN_ECC_READ RAMB36.EN_ECC_WRITE'
+fi
+if builds bram_w1; then
+    lines bram_w1 'BRAM36_READ_WIDTH_A_1' 1
+fi
+refuses bram_ext_lowercase 'RAM_EXTENSION_A=lower'
+refuses bram_collision_bogus 'RDADDR_COLLISION_HWCONFIG=PERF'
+
 echo "artefacts kept in $OUT"
 exit "$rc_total"
