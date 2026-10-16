@@ -19,9 +19,11 @@
 
 #include <algorithm>
 #include <cmath>
+#include <functional>
 #include <boost/optional.hpp>
 #include <boost/algorithm/string.hpp>
 #include <iterator>
+#include <numeric>
 #include <queue>
 #include <unordered_set>
 #include "cells.h"
@@ -630,8 +632,17 @@ void XC7Packer::propagate_clock_constraints()
     if (changed_nets.empty())
         return;
 
-    // Give `to` the constraint of `from` scaled by ratio (f_to = f_from * ratio).
-    auto set_derived = [&](CellInfo *ci, NetInfo *from, NetInfo *to, double ratio) {
+    struct Derivation
+    {
+        CellInfo *cell = nullptr;
+        NetInfo *from = nullptr;
+        int64_t num = 0, den = 0;
+        double shift_ns = 0;
+    };
+    std::unordered_map<IdString, Derivation> derivation;
+
+    auto set_derived = [&](CellInfo *ci, NetInfo *from, NetInfo *to, double ratio, int64_t num = 0, int64_t den = 0,
+                           double shift_ns = 0) {
         if (from == nullptr || from->clkconstr == nullptr || to == nullptr || ratio <= 0)
             return;
         delay_t period = delay_t(from->clkconstr->period.delay / ratio);
@@ -648,12 +659,25 @@ void XC7Packer::propagate_clock_constraints()
         to->clkconstr->low.delay = period / 2;
         log_info("    derived %.1f MHz for net '%s' (through %s '%s')\n", MHz(period), to->name.c_str(ctx),
                  ci->type.c_str(ctx), ci->name.c_str(ctx));
+        derivation[to->name] = Derivation{ci, from, num, den, shift_ns};
         changed_nets.insert(to->name);
     };
-    auto copy_through = [&](CellInfo *ci, const std::string &in, const std::string &out, double ratio = 1.0) {
+    auto copy_through = [&](CellInfo *ci, const std::string &in, const std::string &out, int64_t num = 1,
+                            int64_t den = 1) {
         NetInfo *from = get_net_or_empty(ci, ctx->id(in));
         NetInfo *to = get_net_or_empty(ci, ctx->id(out));
-        set_derived(ci, from, to, ratio);
+        set_derived(ci, from, to, double(num) / double(den), num, den);
+    };
+    auto param_phase = [&](CellInfo *ci, const std::string &name) {
+        auto known = ctx->idstring_str_to_idx->find(name);
+        if (known == ctx->idstring_str_to_idx->end() || !ci->params.count(IdString(known->second)))
+            return 0.0;
+        return param_double(ci, name, 0.0);
+    };
+    auto eighths = [&](double v) -> int64_t {
+        double e = v * 8;
+        int64_t r = int64_t(std::llround(e));
+        return (r > 0 && std::abs(e - double(r)) < 1e-6) ? r : 0;
     };
 
     const IdString t_IBUF = ctx->id("IBUF"), t_IBUFDS = ctx->id("IBUFDS"), t_IBUFG = ctx->id("IBUFG"),
@@ -663,8 +687,6 @@ void XC7Packer::propagate_clock_constraints()
                    t_BUFIO = ctx->id("BUFIO"), t_PLLE2_ADV = ctx->id("PLLE2_ADV"), t_PLLE2_BASE = ctx->id("PLLE2_BASE"),
                    t_MMCME2_ADV = ctx->id("MMCME2_ADV"), t_MMCME2_BASE = ctx->id("MMCME2_BASE");
 
-    // Iterate while constraints keep appearing (buffer after PLL after buffer...);
-    // the bound guards against a loop through a self-fed PLL.
     int iter = 0;
     const int itermax = 1000;
     while (!changed_nets.empty() && iter < itermax) {
@@ -685,17 +707,21 @@ void XC7Packer::propagate_clock_constraints()
                 copy_through(ci, "I1", "O");
             } else if (t == t_BUFR) {
                 std::string div = str_or_default(ci->params, ctx->id("BUFR_DIVIDE"), "BYPASS");
-                double ratio = 1.0;
+                int64_t den = 1;
                 if (div != "BYPASS") {
                     try {
-                        ratio = 1.0 / std::stod(div);
+                        den = std::stoll(div);
                     } catch (...) {
+                        den = 0;
+                    }
+                    if (den <= 0) {
                         log_warning("    BUFR '%s': unrecognised BUFR_DIVIDE '%s', assuming BYPASS for the "
                                     "constraint\n",
                                     ci->name.c_str(ctx), div.c_str());
+                        den = 1;
                     }
                 }
-                copy_through(ci, "I", "O", ratio);
+                copy_through(ci, "I", "O", 1, den);
             } else if (t == t_PLLE2_ADV || t == t_PLLE2_BASE || t == t_MMCME2_ADV || t == t_MMCME2_BASE) {
                 bool is_mmcm = (t == t_MMCME2_ADV || t == t_MMCME2_BASE);
                 NetInfo *in = get_net_or_empty(ci, ctx->id("CLKIN1"));
@@ -709,10 +735,15 @@ void XC7Packer::propagate_clock_constraints()
                 double divclk = param_double(ci, "DIVCLK_DIVIDE", 1.0);
                 if (mult <= 0 || divclk <= 0)
                     continue;
-                // f_vco = f_in * mult / divclk ; f_out_n = f_vco / CLKOUTn_DIVIDE
                 double vco_ratio = mult / divclk;
                 log_info("    %s '%s': input %.1f MHz, VCO %.1f MHz\n", ci->type.c_str(ctx), ci->name.c_str(ctx),
                          MHz(in->clkconstr->period.delay), MHz(in->clkconstr->period.delay) * vco_ratio);
+                int64_t mult8 = eighths(mult), divclk8 = eighths(divclk);
+                bool exact = mult8 != 0 && divclk8 != 0 && divclk8 % 8 == 0;
+                int64_t divclk_n = exact ? divclk8 / 8 : 0;
+                double in_period_ns = ctx->getDelayNS(in->clkconstr->period.delay);
+                double fb_period_ns = in_period_ns * divclk;
+                double fb_shift_ns = -param_phase(ci, "CLKFBOUT_PHASE") / 360.0 * fb_period_ns;
                 int nout = is_mmcm ? 7 : 6;
                 for (int n = 0; n < nout; n++) {
                     std::string port = "CLKOUT" + std::to_string(n);
@@ -721,27 +752,101 @@ void XC7Packer::propagate_clock_constraints()
                         div = param_double(ci, "CLKOUT0_DIVIDE_F", 1.0);
                     else
                         div = param_double(ci, port + "_DIVIDE", 1.0);
-                    // MMCM: CLKOUT4 may be cascaded through CLKOUT6's divider
                     if (is_mmcm && n == 4 &&
                         str_or_default(ci->params, ctx->id("CLKOUT4_CASCADE"), "FALSE") == "TRUE")
                         div *= param_double(ci, "CLKOUT6_DIVIDE", 1.0);
                     if (div <= 0)
                         continue;
-                    set_derived(ci, in, get_net_or_empty(ci, ctx->id(port)), vco_ratio / div);
-                    // the inverted outputs (MMCM CLKOUT0B..3B) run at the same rate
+                    int64_t div8 = eighths(div);
+                    bool out_exact = exact && div8 != 0;
+                    double out_period_ns = in_period_ns * div / vco_ratio;
+                    double shift_ns = fb_shift_ns + param_phase(ci, port + "_PHASE") / 360.0 * out_period_ns;
+                    set_derived(ci, in, get_net_or_empty(ci, ctx->id(port)), vco_ratio / div, out_exact ? mult8 : 0,
+                                out_exact ? divclk_n * div8 : 0, shift_ns);
                     if (is_mmcm && n <= 3)
-                        set_derived(ci, in, get_net_or_empty(ci, ctx->id(port + "B")), vco_ratio / div);
+                        set_derived(ci, in, get_net_or_empty(ci, ctx->id(port + "B")), vco_ratio / div,
+                                    out_exact ? mult8 : 0, out_exact ? divclk_n * div8 : 0,
+                                    shift_ns + out_period_ns / 2);
                 }
-                // CLKFBOUT runs at the VCO rate
-                set_derived(ci, in, get_net_or_empty(ci, ctx->id("CLKFBOUT")), vco_ratio);
+                set_derived(ci, in, get_net_or_empty(ci, ctx->id("CLKFBOUT")), 1.0 / divclk, exact ? 1 : 0, divclk_n,
+                            fb_shift_ns);
                 if (is_mmcm)
-                    set_derived(ci, in, get_net_or_empty(ci, ctx->id("CLKFBOUTB")), vco_ratio);
+                    set_derived(ci, in, get_net_or_empty(ci, ctx->id("CLKFBOUTB")), 1.0 / divclk, exact ? 1 : 0,
+                                divclk_n, fb_shift_ns + fb_period_ns / 2);
             }
         }
     }
     if (iter >= itermax)
         log_warning("    clock constraint propagation did not settle after %d iterations (loop through a PLL?)\n",
                     itermax);
+
+    struct Relation
+    {
+        NetInfo *source = nullptr;
+        int64_t num = 0, den = 0;
+        double offset_ns = 0;
+        bool operator==(const Relation &o) const
+        {
+            return source == o.source && num == o.num && den == o.den && std::abs(offset_ns - o.offset_ns) < 1e-6;
+        }
+    };
+    std::unordered_map<IdString, Relation> relation;
+    std::unordered_set<IdString> visiting;
+    std::function<Relation(NetInfo *)> relate = [&](NetInfo *net) -> Relation {
+        auto fnd = relation.find(net->name);
+        if (fnd != relation.end())
+            return fnd->second;
+        Relation r;
+        if (user_constrained.count(net->name)) {
+            r.source = net;
+            r.num = 1;
+            r.den = 1;
+        } else if (derivation.count(net->name) && !visiting.count(net->name)) {
+            visiting.insert(net->name);
+            const Derivation &d = derivation.at(net->name);
+            Relation in = relate(d.from);
+            bool ambiguous = false;
+            if (d.cell->type == t_BUFGCTRL) {
+                auto constant = [&](NetInfo *n) {
+                    if (n->driver.cell == nullptr)
+                        return false;
+                    const std::string &dt = n->driver.cell->type.str(ctx);
+                    return dt == "GND" || dt == "VCC" || dt == "PSEUDO_GND" || dt == "PSEUDO_VCC";
+                };
+                NetInfo *i0 = get_net_or_empty(d.cell, ctx->id("I0")), *i1 = get_net_or_empty(d.cell, ctx->id("I1"));
+                if (i0 != nullptr && i1 != nullptr && i0 != i1 && !constant(i0) && !constant(i1))
+                    ambiguous = !(relate(i0) == relate(i1));
+            }
+            if (in.source != nullptr && d.num > 0 && d.den > 0 && !ambiguous) {
+                int64_t num = in.num * d.num, den = in.den * d.den;
+                int64_t g = std::gcd(num, den);
+                r.source = in.source;
+                r.num = num / g;
+                r.den = den / g;
+                r.offset_ns = in.offset_ns + d.shift_ns;
+            }
+            visiting.erase(net->name);
+        }
+        relation[net->name] = r;
+        return r;
+    };
+    for (auto &net : ctx->nets) {
+        NetInfo *ni = net.second.get();
+        if (ni->clkconstr == nullptr)
+            continue;
+        Relation r = relate(ni);
+        if (r.source == nullptr) {
+            if (derivation.count(ni->name))
+                log_info("    net '%s' has no exact relation to its source clock; paths between it and another "
+                         "clock are graded against the capture period\n",
+                         ni->name.c_str(ctx));
+            continue;
+        }
+        ni->clkconstr->source = r.source->name;
+        ni->clkconstr->source_num = r.num;
+        ni->clkconstr->source_den = r.den;
+        ni->clkconstr->offset = ctx->getDelayFromNS(r.offset_ns).maxDelay();
+    }
 }
 
 NEXTPNR_NAMESPACE_END

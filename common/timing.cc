@@ -20,12 +20,14 @@
 
 #include "timing.h"
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <boost/range/adaptor/reversed.hpp>
 #include <cstdlib>
 #include <deque>
 #include <fstream>
 #include <map>
+#include <numeric>
 #include <sstream>
 #include <unordered_map>
 #include <unordered_set>
@@ -429,6 +431,64 @@ struct Timing
         if (res.skip_setup)
             res.has_max = false;
         return res;
+    }
+
+    bool related_requirement(IdString launch, ClockEdge launch_edge, IdString capture, ClockEdge capture_edge,
+                             delay_t &setup_req, delay_t &hold_req, IdString *source = nullptr) const
+    {
+        if (launch == capture || launch == async_clock || capture == async_clock)
+            return false;
+        auto li = ctx->nets.find(launch), ci = ctx->nets.find(capture);
+        if (li == ctx->nets.end() || ci == ctx->nets.end())
+            return false;
+        const ClockConstraint *lc = li->second->clkconstr.get(), *cc = ci->second->clkconstr.get();
+        if (lc == nullptr || cc == nullptr || lc->source == IdString() || lc->source != cc->source ||
+            lc->source_num <= 0 || lc->source_den <= 0 || cc->source_num <= 0 || cc->source_den <= 0)
+            return false;
+        auto si = ctx->nets.find(lc->source);
+        if (si == ctx->nets.end() || si->second->clkconstr == nullptr)
+            return false;
+        int64_t n = std::lcm(lc->source_num, cc->source_num);
+        int64_t pl = lc->source_den * (n / lc->source_num), pc = cc->source_den * (n / cc->source_num);
+        double grid = double(si->second->clkconstr->period.delay) * double(std::gcd(pl, pc)) / double(n);
+        if (!(grid > 0))
+            return false;
+        double off_l = double(lc->offset) + (launch_edge == FALLING_EDGE ? double(lc->high.delay) : 0.0);
+        double off_c = double(cc->offset) + (capture_edge == FALLING_EDGE ? double(cc->high.delay) : 0.0);
+        double sep = std::fmod(off_c - off_l, grid);
+        if (sep < 0)
+            sep += grid;
+        if (sep < 0.5)
+            sep = grid;
+        setup_req = delay_t(std::llround(sep));
+        hold_req = setup_req - delay_t(std::llround(grid));
+        if (source != nullptr)
+            *source = lc->source;
+        return true;
+    }
+
+    delay_t setup_requirement(const ClockEvent &launch, IdString capture, ClockEdge edge, delay_t clk_period,
+                              delay_t *hold_req = nullptr) const
+    {
+        delay_t related_setup, related_hold;
+        if (related_requirement(launch.clock, launch.edge, capture, edge, related_setup, related_hold)) {
+            if (hold_req != nullptr)
+                *hold_req = related_hold;
+            return related_setup;
+        }
+        if (hold_req != nullptr)
+            *hold_req = 0;
+        delay_t period = (edge == launch.edge) ? clk_period : clk_period / 2;
+        if (capture != async_clock && ctx->nets.at(capture)->clkconstr) {
+            const ClockConstraint &cc = *ctx->nets.at(capture)->clkconstr;
+            if (edge == launch.edge)
+                period = cc.period.minDelay();
+            else if (edge == RISING_EDGE)
+                period = cc.low.minDelay();
+            else if (edge == FALLING_EDGE)
+                period = cc.high.minDelay();
+        }
+        return period;
     }
 
     bool timing_ignored(const NetInfo *net) const
@@ -905,27 +965,7 @@ struct Timing
                             }
                             const auto net_arrival = nd.max_arrival;
                             const auto endpoint_arrival = net_arrival + net_delay + setup;
-                            delay_t period;
-                            // Set default period
-                            if (edge == startdomain.first.edge) {
-                                period = clk_period;
-                            } else {
-                                period = clk_period / 2;
-                            }
-                            if (clksig != async_clock) {
-                                if (ctx->nets.at(clksig)->clkconstr) {
-                                    if (edge == startdomain.first.edge) {
-                                        // same edge
-                                        period = ctx->nets.at(clksig)->clkconstr->period.minDelay();
-                                    } else if (edge == RISING_EDGE) {
-                                        // falling -> rising
-                                        period = ctx->nets.at(clksig)->clkconstr->low.minDelay();
-                                    } else if (edge == FALLING_EDGE) {
-                                        // rising -> falling
-                                        period = ctx->nets.at(clksig)->clkconstr->high.minDelay();
-                                    }
-                                }
-                            }
+                            delay_t period = setup_requirement(startdomain.first, clksig, edge, clk_period);
                             double this_mcp = 1.0;
                             if (exc.has_max) {
                                 if (crit_path && !update)
@@ -1011,12 +1051,12 @@ struct Timing
                                                  exc);
                                 if (exc.skip_hold && crit_path && !update)
                                     ++exc_hold_skipped;
-                                // HOLD: earliest data (min_arrival incl launch clk->Q_min + fast
-                                // data + fast route) must clear the capture FF's hold window.
-                                // hold_slack = min_arrival + net_min_delay - hold_time.
                                 if (!exc.skip_hold && nd.min_arrival < (std::numeric_limits<delay_t>::max() / 8)) {
+                                    delay_t hold_req;
+                                    setup_requirement(startdomain.first, clksig, clknet ? clkInfo.edge : RISING_EDGE,
+                                                      clk_period, &hold_req);
                                     delay_t hold_slack =
-                                            nd.min_arrival + net_delay_min - clkInfo.hold.maxDelay();
+                                            nd.min_arrival + net_delay_min - clkInfo.hold.maxDelay() - hold_req;
                                     worst_hold_slack = std::min(worst_hold_slack, hold_slack);
                                     if (crit_path)  // reporting analysis only
                                         hold_endpoints.push_back({net, usr.cell->name, usr.port, hold_slack});
@@ -1157,27 +1197,7 @@ struct Timing
                                 ExceptionResult exc = match_exceptions(startdomain.first, clksig, usr.cell, usr.port);
                                 if (exc.skip_setup)
                                     return;
-                                delay_t period;
-                                // Set default period
-                                if (edge == startdomain.first.edge) {
-                                    period = clk_period;
-                                } else {
-                                    period = clk_period / 2;
-                                }
-                                if (clksig != async_clock) {
-                                    if (ctx->nets.at(clksig)->clkconstr) {
-                                        if (edge == startdomain.first.edge) {
-                                            // same edge
-                                            period = ctx->nets.at(clksig)->clkconstr->period.minDelay();
-                                        } else if (edge == RISING_EDGE) {
-                                            // falling -> rising
-                                            period = ctx->nets.at(clksig)->clkconstr->low.minDelay();
-                                        } else if (edge == FALLING_EDGE) {
-                                            // rising -> falling
-                                            period = ctx->nets.at(clksig)->clkconstr->high.minDelay();
-                                        }
-                                    }
-                                }
+                                delay_t period = setup_requirement(startdomain.first, clksig, edge, clk_period);
                                 // set_multicycle_path: relax setup by the multicycle factor on the capture reg
                                 if (exc.has_max) {
                                     period = exc.max_value;
@@ -1861,7 +1881,26 @@ void timing_analysis(Context *ctx, bool print_histogram, bool print_fmax, bool p
             const ClockEvent &b = xclock.end;
             auto &path = crit_paths.at(xclock);
             auto ev_a = format_event(a, start_field_width), ev_b = format_event(b, end_field_width);
-            log_info("Max delay %s -> %s: %0.02f ns\n", ev_a.c_str(), ev_b.c_str(), ctx->getDelayNS(path.path_delay));
+            delay_t sep, hold_sep;
+            IdString source;
+            if (!timing.related_requirement(a.clock, a.edge, b.clock, b.edge, sep, hold_sep, &source)) {
+                log_info("Max delay %s -> %s: %0.02f ns\n", ev_a.c_str(), ev_b.c_str(),
+                         ctx->getDelayNS(path.path_delay));
+                continue;
+            }
+            bool passed = path.path_delay <= path.path_period;
+            std::string what = path.path_period == sep ? "edge separation" : "requirement set by a timing exception";
+            std::string msg = stringf("Max delay %s -> %s: %0.02f ns (%s against a %0.02f ns %s; related through "
+                                      "'%s')\n",
+                                      ev_a.c_str(), ev_b.c_str(), ctx->getDelayNS(path.path_delay),
+                                      passed ? "PASS" : "FAIL", ctx->getDelayNS(path.path_period), what.c_str(),
+                                      source.c_str(ctx));
+            if (!warn_on_failure || passed)
+                log_info("%s", msg.c_str());
+            else if (bool_or_default(ctx->settings, ctx->id("timing/allowFail"), false))
+                log_warning("%s", msg.c_str());
+            else
+                log_nonfatal_error("%s", msg.c_str());
         }
         log_break();
     }

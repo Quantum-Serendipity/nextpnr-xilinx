@@ -518,6 +518,10 @@ struct ClockConstraint
 
     std::string name;
 
+    IdString source;
+    int64_t source_num = 0, source_den = 0;
+    delay_t offset = 0;
+
     TimingConstrObjectId domain_tmg_id;
 };
 
