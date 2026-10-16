@@ -138,10 +138,13 @@ struct XilinxPacker
 
     // DistRAM
     std::unordered_map<IdString, XFormRule> dram_rules, dram32_6_rules, dram32_5_rules;
-    CellInfo *create_dram_lut(const std::string &name, CellInfo *base, const DRAMControlSet &ctrlset,
-                              std::vector<NetInfo *> address, NetInfo *di, NetInfo *dout, int z);
-    CellInfo *create_dram32_lut(const std::string &name, CellInfo *base, const DRAMControlSet &ctrlset,
-                                std::vector<NetInfo *> address, NetInfo *di, NetInfo *dout, bool o5, int z);
+    void inherit_timing_exceptions(const CellInfo *src, CellInfo *dst);
+    CellInfo *create_dram_lut(const CellInfo *src, const std::string &name, CellInfo *base,
+                              const DRAMControlSet &ctrlset, std::vector<NetInfo *> address, NetInfo *di,
+                              NetInfo *dout, int z);
+    CellInfo *create_dram32_lut(const CellInfo *src, const std::string &name, CellInfo *base,
+                                const DRAMControlSet &ctrlset, std::vector<NetInfo *> address, NetInfo *di,
+                                NetInfo *dout, bool o5, int z);
     void pack_dram();
 
     // Constant pins

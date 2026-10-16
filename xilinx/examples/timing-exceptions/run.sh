@@ -126,5 +126,61 @@ print(len(b.get("src_slow", [])), len(v.get("src_slow", [])), sum(len(x) for x i
     esac
 fi
 
+if ! "$YOSYS" -q -l "$OUT/dram.yosys.log" \
+        -p "read_verilog \"$HERE/dram.v\"; synth_xilinx -flatten -abc9 -arch xc7 -top top; write_json \"$OUT/dram.json\"" \
+        >/dev/null 2>&1; then
+    report "FAIL dram: yosys"
+else
+    dram_rows() {
+        "$PYTHON" -B -c '
+import csv, sys
+rows = [r for r in csv.DictReader(open(sys.argv[1]), delimiter="\t") if r["cell"].startswith("mem")]
+print(len(rows), len([r for r in rows if abs(float(r["period_ns"]) - 30.0) < 1e-6]))
+' "$1"
+    }
+    dram_pnr() {
+        local name=$1
+        shift
+        NEXTPNR_SETUP_EXPORT="$OUT/$name.tsv" "$NEXTPNR" --chipdb "$CHIPDB" --xdc "$HERE/dram.xdc" "$@" \
+            --json "$OUT/dram.json" --write "$OUT/$name.routed.json" --log "$OUT/$name.log" -q --seed 1 \
+            >/dev/null 2>&1
+    }
+    if dram_pnr dram_base; then
+        base=$(dram_rows "$OUT/dram_base.tsv")
+        case $base in
+            [1-9]*" 0") report "PASS dram_base: distributed-RAM rows, rows at 30 ns: $base" ;;
+            *) report "FAIL dram_base: distributed-RAM rows, rows at 30 ns: $base" ;;
+        esac
+        if dram_pnr dram_fp --xdc "$HERE/xdc/dram_fp_to.xdc" --xdc-strict; then
+            n=$(dram_rows "$OUT/dram_fp.tsv")
+            [ "$n" = "0 0" ] && report "PASS dram_fp: no distributed-RAM row under set_false_path -to" ||
+                report "FAIL dram_fp: distributed-RAM rows, rows at 30 ns: $n, want 0 0"
+            if NEXTPNR_TIMING_ONLY=1 NEXTPNR_SETUP_EXPORT="$OUT/dram_fp_replay.tsv" "$NEXTPNR" --chipdb "$CHIPDB" \
+                    --xdc "$HERE/dram.xdc" --xdc "$HERE/dram_replay.xdc" --xdc "$HERE/xdc/dram_fp_to.xdc" --xdc-strict \
+                    --json "$OUT/dram_fp.routed.json" --no-pack --no-place --no-route --log "$OUT/dram_fp_replay.log" \
+                    -q >/dev/null 2>&1; then
+                n=$(dram_rows "$OUT/dram_fp_replay.tsv")
+                [ "$n" = "0 0" ] && report "PASS dram_fp_replay: the replay accepts the exception and grades no distributed-RAM row" ||
+                    report "FAIL dram_fp_replay: distributed-RAM rows, rows at 30 ns: $n, want 0 0"
+            else
+                report "FAIL dram_fp_replay: the replay refused the exception under --xdc-strict"
+            fi
+        else
+            report "FAIL dram_fp: place and route exited non-zero"
+        fi
+        if dram_pnr dram_maxdelay --xdc "$HERE/xdc/dram_maxdelay.xdc" --xdc-strict; then
+            n=$(dram_rows "$OUT/dram_maxdelay.tsv")
+            case $n in
+                "${base%% *} ${base%% *}") report "PASS dram_maxdelay: every distributed-RAM row graded against 30 ns: $n" ;;
+                *) report "FAIL dram_maxdelay: distributed-RAM rows, rows at 30 ns: $n, want ${base%% *} ${base%% *}" ;;
+            esac
+        else
+            report "FAIL dram_maxdelay: place and route exited non-zero"
+        fi
+    else
+        report "FAIL dram_base: place and route exited non-zero"
+    fi
+fi
+
 echo "outputs in $OUT"
 exit $rc_total

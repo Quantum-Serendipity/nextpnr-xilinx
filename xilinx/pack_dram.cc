@@ -32,8 +32,18 @@
 
 NEXTPNR_NAMESPACE_BEGIN
 
-CellInfo *XilinxPacker::create_dram_lut(const std::string &name, CellInfo *base, const DRAMControlSet &ctrlset,
-                                        std::vector<NetInfo *> address, NetInfo *di, NetInfo *dout, int z)
+void XilinxPacker::inherit_timing_exceptions(const CellInfo *src, CellInfo *dst)
+{
+    for (auto attr : {ctx->id("NEXTPNR_TEXC_FROM"), ctx->id("NEXTPNR_TEXC_TO")}) {
+        auto found = src->attrs.find(attr);
+        if (found != src->attrs.end())
+            dst->attrs[attr] = found->second;
+    }
+}
+
+CellInfo *XilinxPacker::create_dram_lut(const CellInfo *src, const std::string &name, CellInfo *base,
+                                        const DRAMControlSet &ctrlset, std::vector<NetInfo *> address, NetInfo *di,
+                                        NetInfo *dout, int z)
 {
     std::unique_ptr<CellInfo> dram_lut = create_cell(ctx, ctx->id("RAMD64E"), ctx->id(name));
     for (int i = 0; i < int(address.size()); i++)
@@ -47,6 +57,7 @@ CellInfo *XilinxPacker::create_dram_lut(const std::string &name, CellInfo *base,
     dram_lut->params[ctx->id("IS_WCLK_INVERTED")] = ctrlset.wclk_inv ? 1 : 0;
 
     xform_cell(dram_rules, dram_lut.get());
+    inherit_timing_exceptions(src, dram_lut.get());
 
     dram_lut->constr_abs_z = true;
     dram_lut->constr_z = (z << 4) | BEL_6LUT;
@@ -63,8 +74,9 @@ CellInfo *XilinxPacker::create_dram_lut(const std::string &name, CellInfo *base,
     return dl;
 }
 
-CellInfo *XilinxPacker::create_dram32_lut(const std::string &name, CellInfo *base, const DRAMControlSet &ctrlset,
-                                          std::vector<NetInfo *> address, NetInfo *di, NetInfo *dout, bool o5, int z)
+CellInfo *XilinxPacker::create_dram32_lut(const CellInfo *src, const std::string &name, CellInfo *base,
+                                          const DRAMControlSet &ctrlset, std::vector<NetInfo *> address, NetInfo *di,
+                                          NetInfo *dout, bool o5, int z)
 {
     std::unique_ptr<CellInfo> dram_lut = create_cell(ctx, ctx->id("RAMD32"), ctx->id(name));
     for (int i = 0; i < int(address.size()); i++)
@@ -78,6 +90,7 @@ CellInfo *XilinxPacker::create_dram32_lut(const std::string &name, CellInfo *bas
     dram_lut->params[ctx->id("IS_WCLK_INVERTED")] = ctrlset.wclk_inv ? 1 : 0;
 
     xform_cell(o5 ? dram32_5_rules : dram32_6_rules, dram_lut.get());
+    inherit_timing_exceptions(src, dram_lut.get());
 
     dram_lut->constr_abs_z = true;
     dram_lut->constr_z = (z << 4) | (o5 ? BEL_5LUT : BEL_6LUT);
@@ -281,7 +294,7 @@ void XilinxPacker::pack_dram()
                     z = (height - 1);
                     // Topmost cell is the write address input
                     std::vector<NetInfo *> address(cs.wa.begin(), cs.wa.begin() + std::min<size_t>(cs.wa.size(), 6));
-                    base = create_dram_lut(cell->name.str(ctx) + "/ADDR", nullptr, cs, address, nullptr, nullptr, z);
+                    base = create_dram_lut(cell, cell->name.str(ctx) + "/ADDR", nullptr, cs, address, nullptr, nullptr, z);
                     z--;
                 }
 
@@ -301,7 +314,7 @@ void XilinxPacker::pack_dram()
                     } else {
                         std::vector<NetInfo *> address(cs.wa.begin(),
                                                        cs.wa.begin() + std::min<size_t>(cs.wa.size(), 6));
-                        CellInfo *dpr = create_dram_lut(cell->name.str(ctx) + "/SP", base, cs, address, di, spo, z);
+                        CellInfo *dpr = create_dram_lut(cell, cell->name.str(ctx) + "/SP", base, cs, address, di, spo, z);
                         if (cell->params.count(ctx->id("INIT")))
                             dpr->params[ctx->id("INIT")] = cell->params[ctx->id("INIT")];
                         z--;
@@ -312,7 +325,7 @@ void XilinxPacker::pack_dram()
                     std::vector<NetInfo *> address;
                     for (int i = 0; i < 6; i++)
                         address.push_back(get_net_or_empty(cell, ctx->id("DPRA" + std::to_string(i))));
-                    CellInfo *dpr = create_dram_lut(cell->name.str(ctx) + "/DP", base, cs, address, di, dpo, z);
+                    CellInfo *dpr = create_dram_lut(cell, cell->name.str(ctx) + "/DP", base, cs, address, di, dpo, z);
                     if (cell->params.count(ctx->id("INIT")))
                         dpr->params[ctx->id("INIT")] = cell->params[ctx->id("INIT")];
                     z--;
@@ -337,7 +350,7 @@ void XilinxPacker::pack_dram()
                     // Topmost cell is the write address input
                     std::vector<NetInfo *> address(cs.wa.begin(), cs.wa.begin() + std::min<size_t>(cs.wa.size(), 5));
                     address.push_back(ctx->nets[ctx->id("$PACKER_GND_NET")].get());
-                    base = create_dram_lut(cell->name.str(ctx) + "/ADDR", nullptr, cs, address, nullptr, nullptr, z);
+                    base = create_dram_lut(cell, cell->name.str(ctx) + "/ADDR", nullptr, cs, address, nullptr, nullptr, z);
                     z--;
                 }
 
@@ -358,7 +371,7 @@ void XilinxPacker::pack_dram()
                         std::vector<NetInfo *> address(cs.wa.begin(),
                                                        cs.wa.begin() + std::min<size_t>(cs.wa.size(), 5));
                         address.push_back(ctx->nets[ctx->id("$PACKER_GND_NET")].get());
-                        CellInfo *dpr = create_dram_lut(cell->name.str(ctx) + "/SP", base, cs, address, di, spo, z);
+                        CellInfo *dpr = create_dram_lut(cell, cell->name.str(ctx) + "/SP", base, cs, address, di, spo, z);
                         if (cell->params.count(ctx->id("INIT")))
                             dpr->params[ctx->id("INIT")] = cell->params[ctx->id("INIT")];
                         z--;
@@ -370,7 +383,7 @@ void XilinxPacker::pack_dram()
                     for (int i = 0; i < 5; i++)
                         address.push_back(get_net_or_empty(cell, ctx->id("DPRA" + std::to_string(i))));
                     address.push_back(ctx->nets[ctx->id("$PACKER_GND_NET")].get());
-                    CellInfo *dpr = create_dram_lut(cell->name.str(ctx) + "/DP", base, cs, address, di, dpo, z);
+                    CellInfo *dpr = create_dram_lut(cell, cell->name.str(ctx) + "/DP", base, cs, address, di, dpo, z);
                     if (cell->params.count(ctx->id("INIT")))
                         dpr->params[ctx->id("INIT")] = cell->params[ctx->id("INIT")];
                     z--;
@@ -401,7 +414,7 @@ void XilinxPacker::pack_dram()
                 // Combined write address/SPO read cells
                 for (int i = 0; i < (m256 ? 4 : 2); i++) {
                     NetInfo *spo_i = create_internal_net(ci->name, "SPO_" + std::to_string(i), false);
-                    CellInfo *spr = create_dram_lut(ci->name.str(ctx) + "/ADDR" + std::to_string(i), base, cs,
+                    CellInfo *spr = create_dram_lut(ci, ci->name.str(ctx) + "/ADDR" + std::to_string(i), base, cs,
                                                     addressw_64, get_net_or_empty(ci, ctx->id("D")), spo_i, z);
                     if (base == nullptr)
                         base = spr;
@@ -420,7 +433,7 @@ void XilinxPacker::pack_dram()
                 // Read-only port cells
                 for (int i = 0; i < (m256 ? 4 : 2); i++) {
                     NetInfo *dpo_i = create_internal_net(ci->name, "DPO_" + std::to_string(i), false);
-                    CellInfo *dpr = create_dram_lut(ci->name.str(ctx) + "/DPR" + std::to_string(i), base, cs,
+                    CellInfo *dpr = create_dram_lut(ci, ci->name.str(ctx) + "/DPR" + std::to_string(i), base, cs,
                                                     addressr_64, get_net_or_empty(ci, ctx->id("D")), dpo_i, z);
                     dpo_pre.push_back(dpo_i);
                     dpr->params[ctx->id("INIT")] = init.extract(i * 64, 64);
@@ -452,7 +465,7 @@ void XilinxPacker::pack_dram()
                 CellInfo *base = nullptr;
                 for (int i = 0; i < (m256 ? 4 : 2); i++) {
                     NetInfo *o_i = create_internal_net(ci->name, "O_" + std::to_string(i), false);
-                    CellInfo *spr = create_dram_lut(ci->name.str(ctx) + "/ADDR" + std::to_string(i),
+                    CellInfo *spr = create_dram_lut(ci, ci->name.str(ctx) + "/ADDR" + std::to_string(i),
                             base, cs, addressw_64, get_net_or_empty(ci, ctx->id("D")), o_i, z);
                     if (base == nullptr) base = spr;
                     o_pre.push_back(o_i);
@@ -495,7 +508,7 @@ void XilinxPacker::pack_dram()
                 auto init = get_or_default(ci->params, ctx->id("INIT"), Property(0, 64));
                 NetInfo *o = get_net_or_empty(ci, ctx->id("O"));
                 disconnect_port(ctx, ci, ctx->id("O"));
-                CellInfo *spr = create_dram_lut(ci->name.str(ctx) + "/SP", base, cs, cs.wa,
+                CellInfo *spr = create_dram_lut(ci, ci->name.str(ctx) + "/SP", base, cs, cs.wa,
                                                 get_net_or_empty(ci, ctx->id("D")), o, z);
                 const bool is_first_cell_in_site = (base == nullptr);
                 if (is_first_cell_in_site)
@@ -592,7 +605,7 @@ void XilinxPacker::pack_dram()
                     NetInfo *dout = get_net_or_empty(ci, ctx->id(stringf("DO%c", 'A' + i)));
                     disconnect_port(ctx, ci, ctx->id(stringf("DI%c", 'A' + i)));
                     disconnect_port(ctx, ci, ctx->id(stringf("DO%c", 'A' + i)));
-                    CellInfo *dram = create_dram_lut(stringf("%s/DPR%d", ctx->nameOf(ci), i),
+                    CellInfo *dram = create_dram_lut(ci, stringf("%s/DPR%d", ctx->nameOf(ci), i),
                                                      pinned ? nullptr : base, dcs, address, di,
                                                      dout, zoffset + i);
                     if (pinned)
@@ -608,7 +621,7 @@ void XilinxPacker::pack_dram()
                         NetInfo *dout = get_net_or_empty(ci, ctx->id(stringf("DO%c[%d]", 'A' + i, j)));
                         disconnect_port(ctx, ci, ctx->id(stringf("DI%c[%d]", 'A' + i, j)));
                         disconnect_port(ctx, ci, ctx->id(stringf("DO%c[%d]", 'A' + i, j)));
-                        CellInfo *dram = create_dram32_lut(stringf("%s/DPR%d_%d", ctx->nameOf(ci), i, j),
+                        CellInfo *dram = create_dram32_lut(ci, stringf("%s/DPR%d_%d", ctx->nameOf(ci), i, j),
                                                            pinned ? nullptr : base, dcs,
                                                            address, di, dout, (j == 0), zoffset + i);
                         if (pinned)

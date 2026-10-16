@@ -43,6 +43,13 @@ route gives all of them one (`pnr_crit`). Every `src_slow` path is excepted ther
 the arm that sees the placer and router criticality pass; `pnr_groups` grades only the final
 analysis.
 
+`dram.v` holds a `RAM64X1D` and a `RAM32M`, both named `mem*`, written and read by registers on one
+clock. It is placed and routed three times with `dram.xdc`: with no exception, where some
+distributed-RAM write pin is graded (`dram_base`); with `xdc/dram_fp_to.xdc` under `--xdc-strict`,
+where none is (`dram_fp`); and with `xdc/dram_maxdelay.xdc`, where every one of them is graded
+against 30 ns (`dram_maxdelay`). The routed JSON of `dram_fp` is then replayed with the same XDC
+under `--xdc-strict`, which must accept it and grade no distributed-RAM row (`dram_fp_replay`).
+
 ## What the reader accepts
 
 - `set_false_path [-setup|-hold] [-from <objs>] [-to <objs>]`
@@ -69,7 +76,8 @@ continues through them.
 A clock pattern must match a clock that exists when the line is read: a `create_clock -name`, a net
 with a `create_clock`, or a net driven by a buffer, PLL or MMCM. Combinational cells (LUTs, carry,
 wide muxes, constant drivers) are dropped from a `-from` or `-to` cell list, since no check starts
-or ends at them. An exception or clock group in which any of these matches nothing is dropped with a
+or ends at them; a LUT used as distributed RAM is not combinational, and an exception on a RAM
+macro applies to every LUT the packer splits it into. An exception or clock group in which any of these matches nothing is dropped with a
 warning, and refused under `--xdc-strict`. A false path wins over a max delay, and a max delay over
 a multicycle path.
 
