@@ -252,16 +252,20 @@ void CommandHandler::setupContext(Context *ctx)
     }
     if (vm.count("freq")) {
         auto freq = vm["freq"].as<double>();
-        if (freq > 0)
+        if (freq > 0) {
             ctx->settings[ctx->id("target_freq")] = std::to_string(freq * 1e6);
+            ctx->settings[ctx->id("timing/defaultTargetFreq")] = false;
+        }
     }
 
     if (vm.count("no-tmdriv"))
         ctx->settings[ctx->id("timing_driven")] = false;
 
     // Setting default values
-    if (ctx->settings.find(ctx->id("target_freq")) == ctx->settings.end())
+    if (ctx->settings.find(ctx->id("target_freq")) == ctx->settings.end()) {
         ctx->settings[ctx->id("target_freq")] = std::to_string(12e6);
+        ctx->settings[ctx->id("timing/defaultTargetFreq")] = true;
+    }
     if (ctx->settings.find(ctx->id("timing_driven")) == ctx->settings.end())
         ctx->settings[ctx->id("timing_driven")] = true;
     if (ctx->settings.find(ctx->id("slack_redist_iter")) == ctx->settings.end())
