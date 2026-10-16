@@ -109,6 +109,8 @@ Arch::Arch(ArchArgs args) : args(args)
     }
     id_ff_din = id("DIN");
     id_slicem_inst = id("SLICEM");
+    id_lut5_shfreg = id("LUT_OR_MEM5SHFREG");
+    id_lut6_shfreg = id("LUT_OR_MEM6SHFREG");
     const TimingDataPOD *td = chip_info->timing_data.get();
     for (int t = 0; td != nullptr && t < td->num_tile_types && !chipdb_has_timing_checks; t++) {
         const TileCellTimingPOD &tt = td->tile_cell_timings[t];
@@ -4034,7 +4036,8 @@ bool Arch::getCellDelay(const CellInfo *cell, IdString fromPort, IdString toPort
 TimingPortClass Arch::getPortTimingClass(const CellInfo *cell, IdString port, int &clockInfoCount) const
 {
     if (cell->type == id_SLICE_LUTX) {
-        if (get_net_or_empty(cell, id_O5) == nullptr && get_net_or_empty(cell, id_O6) == nullptr)
+        if (get_net_or_empty(cell, id_O5) == nullptr && get_net_or_empty(cell, id_O6) == nullptr &&
+            get_net_or_empty(cell, id_MC31) == nullptr)
             return TMG_IGNORE;
         if (port == id_A1 || port == id_A2 || port == id_A3 || port == id_A4 || port == id_A5 || port == id_A6)
             return TMG_COMB_INPUT;
@@ -4209,16 +4212,19 @@ Arch::SyncPinTiming Arch::dramPinTiming(const CellInfo *cell, IdString port, boo
     if (is_out || port == id_A1 || port == id_A2 || port == id_A3 || port == id_A4 || port == id_A5 ||
         port == id_A6)
         t.kind = is_out ? SYNC_PIN_COMB_OUTPUT : SYNC_PIN_COMB_INPUT;
-    if (!xc7 || !cell->attrs.count(id_X_LUT_AS_DRAM))
+    bool is_srl = cell->lutInfo.is_srl;
+    if (!xc7 || !(cell->lutInfo.is_memory || is_srl))
         return t;
     t.clock = id_CLK;
     if (port == id_CLK) {
         t.kind = SYNC_PIN_CLOCK;
         return t;
     }
-    if (is_out) {
-        t.clk_to_q_max = 1.190;
-        t.clk_to_q_min = 0.340;
+    if (is_out || (is_srl && port == id_MC31)) {
+        if (port == id_MC31)
+            t.kind = SYNC_PIN_OUTPUT;
+        t.clk_to_q_max = is_srl ? 1.481 : 1.190;
+        t.clk_to_q_min = is_srl ? 0.236 : 0.340;
         if (lookup)
             dramClockToOut(cell, port, t.clk_to_q_max, t.clk_to_q_min);
         return t;
@@ -4228,8 +4234,8 @@ Arch::SyncPinTiming Arch::dramPinTiming(const CellInfo *cell, IdString port, boo
     if (std::find(std::begin(write_pins), std::end(write_pins), port) == std::end(write_pins))
         return t;
     t.kind = SYNC_PIN_INPUT;
-    t.setup = 0.654;
-    t.hold = 0.745;
+    t.setup = is_srl ? 0.638 : 0.654;
+    t.hold = is_srl ? 0.269 : 0.745;
     if (!lookup)
         return t;
     double v;
@@ -4247,7 +4253,8 @@ bool Arch::dramCheck(const CellInfo *cell, IdString port, TimingCheckType type, 
     int tt_id = locInfo(cell->bel).timing_index;
     int inst_id = locInfo(cell->bel).bel_data[cell->bel.index].timing_inst;
     bool is_lut5 = (locInfo(cell->bel).bel_data[cell->bel.index].z & 0xF) == BEL_5LUT;
-    IdString variant = is_lut5 ? id_LUT_OR_MEM5LRAM : id_LUT_OR_MEM6LRAM;
+    IdString variant = cell->lutInfo.is_srl ? (is_lut5 ? id_lut5_shfreg : id_lut6_shfreg)
+                                            : (is_lut5 ? id_LUT_OR_MEM5LRAM : id_LUT_OR_MEM6LRAM);
     if (port != id_DI1 && port != id_DI2)
         inst_id = xc7_timing_instance(tt_id, id_slicem_inst);
     delay_t vmax = 0, vmin = 0;
@@ -4259,15 +4266,17 @@ bool Arch::dramCheck(const CellInfo *cell, IdString port, TimingCheckType type, 
     IdString tile_type = getBelTileType(cell->bel);
     if (chipdb_has_timing_checks)
         log_error("prjxray has no %s check for %s.%s in tile type %s (cell '%s' at %s), and this chipdb carries "
-                  "timing checks, so the distributed-RAM write pin would be timed against a guess\n",
+                  "timing checks, so the %s write pin would be timed against a guess\n",
                   type == TIMING_CHECK_SETUP ? "setup" : "hold", variant.c_str(this), port.c_str(this),
-                  tile_type.c_str(this), cell->name.c_str(this), getBelName(cell->bel).c_str(this));
+                  tile_type.c_str(this), cell->name.c_str(this), getBelName(cell->bel).c_str(this),
+                  cell->lutInfo.is_srl ? "shift-register" : "distributed-RAM");
     if (ff_timing_fallback_logged.emplace(tile_type, variant, port, int(type)).second)
         log_warning("chipdb carries no timing checks, so %s.%s in tile type %s (first cell '%s' at %s) uses the "
                     "fixed %s %.3fns\n",
                     variant.c_str(this), port.c_str(this), tile_type.c_str(this), cell->name.c_str(this),
                     getBelName(cell->bel).c_str(this), type == TIMING_CHECK_SETUP ? "setup" : "hold",
-                    type == TIMING_CHECK_SETUP ? 0.654 : 0.745);
+                    cell->lutInfo.is_srl ? (type == TIMING_CHECK_SETUP ? 0.638 : 0.269)
+                                         : (type == TIMING_CHECK_SETUP ? 0.654 : 0.745));
     return false;
 }
 
@@ -4278,8 +4287,9 @@ bool Arch::dramClockToOut(const CellInfo *cell, IdString port, double &max_ns, d
     int tt_id = locInfo(cell->bel).timing_index;
     int inst_id = locInfo(cell->bel).bel_data[cell->bel.index].timing_inst;
     bool is_lut5 = (locInfo(cell->bel).bel_data[cell->bel.index].z & 0xF) == BEL_5LUT;
-    IdString variant = is_lut5 ? id_LUT_OR_MEM5LRAM : id_LUT_OR_MEM6LRAM;
-    IdString to = is_lut5 ? id_O5 : port;
+    IdString variant = cell->lutInfo.is_srl ? (is_lut5 ? id_lut5_shfreg : id_lut6_shfreg)
+                                            : (is_lut5 ? id_LUT_OR_MEM5LRAM : id_LUT_OR_MEM6LRAM);
+    IdString to = is_lut5 && port != id_MC31 ? id_O5 : port;
     DelayInfo d;
     delay_t dmin = 0;
     if (xc7_cell_timing_lookup(tt_id, inst_id, variant, id_CLK, to, d, &dmin)) {
@@ -4288,10 +4298,11 @@ bool Arch::dramClockToOut(const CellInfo *cell, IdString port, double &max_ns, d
         return true;
     }
     if (inst_id != -1)
-        log_error("prjxray has no CLK->%s delay for %s in tile type %s (cell '%s' at %s), so the distributed-RAM "
+        log_error("prjxray has no CLK->%s delay for %s in tile type %s (cell '%s' at %s), so the %s "
                   "read output would be timed against a guess\n",
                   to.c_str(this), variant.c_str(this), getBelTileType(cell->bel).c_str(this),
-                  cell->name.c_str(this), getBelName(cell->bel).c_str(this));
+                  cell->name.c_str(this), getBelName(cell->bel).c_str(this),
+                  cell->lutInfo.is_srl ? "shift-register" : "distributed-RAM");
     return false;
 }
 

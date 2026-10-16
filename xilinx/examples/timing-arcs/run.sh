@@ -20,7 +20,7 @@ YOSYS=$(resolve_tool "${YOSYS:-yosys}")
 NEXTPNR=$(resolve_tool "${NEXTPNR:-$HERE/../../../build/nextpnr-xilinx}")
 CHIPDB=$(abspath "${CHIPDB:?set CHIPDB to an xc7a100tfgg484.bin}")
 PYTHON=$(resolve_tool "${PYTHON:-python3}")
-ARMS=${ARMS:-negedge latch}
+ARMS=${ARMS:-negedge latch srl}
 OUT=$(abspath "${OUT:-$(mktemp -d)}")
 mkdir -p "$OUT" || exit 1
 cd "$HERE" || exit 1

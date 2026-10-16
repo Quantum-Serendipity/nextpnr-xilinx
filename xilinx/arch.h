@@ -1969,6 +1969,7 @@ struct Arch : BaseCtx
                              bool expected, double fallback_ns) const;
     bool chipdb_has_timing_checks = false;
     IdString id_ff_variant[3], id_ff_variant_qh[3], id_ff_variant_ql[3], id_ff_din, id_slicem_inst;
+    IdString id_lut5_shfreg, id_lut6_shfreg;
     mutable std::set<std::tuple<IdString, IdString, IdString, int>> ff_timing_fallback_logged;
 
     // Whether or not a given cell can be placed at a given Bel

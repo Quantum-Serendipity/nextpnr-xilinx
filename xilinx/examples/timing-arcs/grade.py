@@ -32,12 +32,48 @@ def load(routed, tsv):
     return cells, drivers, users, rows
 
 
+def is_srl(c):
+    return c["type"] == "SLICE_LUTX" and "X_LUT_AS_SRL" in c.get("attributes", {})
+
+
+def is_dram(c):
+    return c["type"] == "SLICE_LUTX" and "X_LUT_AS_DRAM" in c.get("attributes", {})
+
+
 def is_latch(c):
     return c["type"] == "SLICE_FFX" and "X_FF_AS_LATCH" in c.get("attributes", {})
 
 
 def clk_inverted(c):
     return as_int(c.get("parameters", {}).get("IS_CLK_INVERTED", 0)) == 1
+
+
+def is_comb(c):
+    if c["type"] == "SLICE_LUTX":
+        return not is_srl(c) and not is_dram(c)
+    return c["type"] in ("CARRY4", "F7MUX", "F8MUX", "SELMUX2_1")
+
+
+def cone_sinks(cells, drivers, users, sources):
+    seen, sinks = set(), set()
+    frontier = []
+    for name, ports in sources:
+        for p in ports:
+            frontier.extend(b for b in cells[name]["connections"].get(p, []) if isinstance(b, int))
+    while frontier:
+        b = frontier.pop()
+        if b in seen:
+            continue
+        seen.add(b)
+        for name, port in users.get(b, []):
+            c = cells[name]
+            if c["type"] == "SLICE_FFX" and port in ("D", "CE", "SR"):
+                sinks.add((name, port))
+            elif is_comb(c):
+                for p, d in c.get("port_directions", {}).items():
+                    if d == "output":
+                        frontier.extend(x for x in c["connections"].get(p, []) if isinstance(x, int))
+    return sinks
 
 
 def row_periods(rows, pred):
@@ -72,6 +108,26 @@ def main():
         report(5.0 in pos and 10.0 in pos,
                "flop D rows after the latch: %d half-period (closing launch), %d full-period (opening launch)"
                % (pos.count(5.0), pos.count(10.0)))
+    elif arm == "srl":
+        srls = [n for n, c in cells.items() if is_srl(c)]
+        write = [r for r in rows if r["cell"] in srls and r["port"] in ("DI1", "DI2", "WE")]
+        report(bool(srls) and len({r["cell"] for r in write if r["port"] in ("DI1", "DI2")}) == len(srls),
+               "%d SRL cell(s), %d with a DI row, %d WE row(s)"
+               % (len(srls), len({r["cell"] for r in write if r["port"] in ("DI1", "DI2")}),
+                  sum(r["port"] == "WE" for r in write)))
+        sinks = cone_sinks(cells, drivers, users, [(n, ("O5", "O6", "MC31")) for n in srls])
+        have = {(r["cell"], r["port"]) for r in rows}
+        missing = sorted(sinks - have)
+        report(bool(sinks) and not missing,
+               "%d flop pin(s) fed by an SRL output, %d without a row%s"
+               % (len(sinks), len(missing), (" e.g. %s.%s" % missing[0]) if missing else ""))
+        mc31 = [n for n in srls if any(isinstance(b, int) and b in users
+                                       for b in cells[n]["connections"].get("MC31", []))]
+        casc = [r for r in rows if r["cell"] in srls and r["port"] == "DI1"
+                and any(drivers.get(b, (None, None))[1] == "MC31"
+                        for b in cells[r["cell"]]["connections"].get("DI1", []) if isinstance(b, int))]
+        report(bool(mc31) and bool(casc), "%d SRL(s) drive MC31, %d DI1 row(s) launched from MC31"
+               % (len(mc31), len(casc)))
     else:
         report(False, "unknown arm")
     print("\n".join(out))
