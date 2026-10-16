@@ -1950,7 +1950,9 @@ struct Arch : BaseCtx
     Dsp48e1Config dsp48e1Config(const CellInfo *cell) const;
     Dsp48e1Stage dsp48e1InputStage(const Dsp48e1Config &cfg, const std::string &base) const;
     SyncPinTiming dsp48e1PinTiming(const CellInfo *cell, IdString port) const;
-    TimingPortClass syncPinClass(const CellInfo *cell, const SyncPinTiming &t, int &clockInfoCount) const;
+    TimingPortClass syncPinClass(const CellInfo *cell, IdString port, const SyncPinTiming &t,
+                                 int &clockInfoCount) const;
+    mutable std::unordered_set<IdString> undriven_clock_logged, unclocked_cell_logged;
     // Get the TimingClockingInfo of a port
     TimingClockingInfo getPortClockingInfo(const CellInfo *cell, IdString port, int index) const;
 

@@ -3920,22 +3920,41 @@ Arch::SyncPinTiming Arch::dsp48e1PinTiming(const CellInfo *cell, IdString port) 
     return t;
 }
 
-TimingPortClass Arch::syncPinClass(const CellInfo *cell, const SyncPinTiming &t, int &clockInfoCount) const
+TimingPortClass Arch::syncPinClass(const CellInfo *cell, IdString port, const SyncPinTiming &t,
+                                   int &clockInfoCount) const
 {
     if (t.kind == SYNC_PIN_NONE)
         return TMG_IGNORE;
     if (t.kind == SYNC_PIN_COMB_INPUT)
         return TMG_COMB_INPUT;
     const NetInfo *clk = get_net_or_empty(cell, t.clock);
-    bool clk_live = clk != nullptr && clk->driver.cell != nullptr && clk->driver.cell->type != id_PSEUDO_VCC &&
-                    clk->driver.cell->type != id_PSEUDO_GND;
+    bool clk_const = clk != nullptr && clk->driver.cell != nullptr &&
+                     (clk->driver.cell->type == id_PSEUDO_VCC || clk->driver.cell->type == id_PSEUDO_GND);
+    bool clk_live = clk != nullptr && !clk_const;
+    if (clk_live && clk->driver.cell == nullptr && !undriven_clock_logged.count(clk->name) &&
+        undriven_clock_logged.insert(clk->name).second)
+        log_info("timing: clock net '%s' has no driver; the %s pins on it are timed against it by name (first "
+                 "'%s' pin %s)\n",
+                 clk->name.c_str(this), cell->type.c_str(this), cell->name.c_str(this), t.clock.c_str(this));
     if (t.kind == SYNC_PIN_COMB_OUTPUT) {
         if (clk_live && t.clk_to_q_max > 0)
             clockInfoCount = 1;
         return TMG_COMB_OUTPUT;
     }
-    if (!clk_live)
+    if (!clk_live) {
+        const NetInfo *pn = get_net_or_empty(cell, port);
+        bool live = pn != nullptr &&
+                    (t.kind == SYNC_PIN_OUTPUT
+                             ? !pn->users.empty()
+                             : pn->driver.cell != nullptr && pn->driver.cell->type != id_PSEUDO_VCC &&
+                                       pn->driver.cell->type != id_PSEUDO_GND);
+        if (live && t.kind != SYNC_PIN_CLOCK && !unclocked_cell_logged.count(cell->name) &&
+            unclocked_cell_logged.insert(cell->name).second)
+            log_info("timing: '%s' (%s) pin %s carries a signal but is not timed, because its clock pin %s is %s\n",
+                     cell->name.c_str(this), cell->type.c_str(this), port.c_str(this), t.clock.c_str(this),
+                     clk == nullptr ? "unconnected" : "on a constant");
         return TMG_IGNORE;
+    }
     if (t.kind == SYNC_PIN_CLOCK)
         return TMG_CLOCK_INPUT;
     clockInfoCount = 1;
@@ -4041,7 +4060,7 @@ TimingPortClass Arch::getPortTimingClass(const CellInfo *cell, IdString port, in
             return TMG_IGNORE;
         if (port == id_A1 || port == id_A2 || port == id_A3 || port == id_A4 || port == id_A5 || port == id_A6)
             return TMG_COMB_INPUT;
-        return syncPinClass(cell, dramPinTiming(cell, port, false), clockInfoCount);
+        return syncPinClass(cell, port, dramPinTiming(cell, port, false), clockInfoCount);
     } else if (cell->type == id_CARRY4 && cell->bel != BelId()) {
         return cell->ports.at(port).type == PORT_OUT ? TMG_COMB_OUTPUT : TMG_COMB_INPUT;
     } else if (cell->type == id_SLICE_FFX) {
@@ -4080,11 +4099,11 @@ TimingPortClass Arch::getPortTimingClass(const CellInfo *cell, IdString port, in
                 return TMG_COMB_INPUT;
             return TMG_IGNORE;
         }
-        return syncPinClass(cell, dsp48e1PinTiming(cell, port), clockInfoCount);
+        return syncPinClass(cell, port, dsp48e1PinTiming(cell, port), clockInfoCount);
     } else if (cell->type == id_RAMB18E1_RAMB18E1 || cell->type == id_RAMB36E1_RAMB36E1) {
-        return syncPinClass(cell, bramPinTiming(cell, port), clockInfoCount);
+        return syncPinClass(cell, port, bramPinTiming(cell, port), clockInfoCount);
     } else if (cell->type == id_ICAP_ICAP) {
-        return syncPinClass(cell, icapPinTiming(cell, port), clockInfoCount);
+        return syncPinClass(cell, port, icapPinTiming(cell, port), clockInfoCount);
     }
     return TMG_IGNORE;
 }

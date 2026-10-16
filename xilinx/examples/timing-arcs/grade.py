@@ -128,6 +128,19 @@ def main():
                         for b in cells[r["cell"]]["connections"].get("DI1", []) if isinstance(b, int))]
         report(bool(mc31) and bool(casc), "%d SRL(s) drive MC31, %d DI1 row(s) launched from MC31"
                % (len(mc31), len(casc)))
+    elif arm == "undriven-clock":
+        rams = [n for n, c in cells.items() if c["type"].startswith("RAMB")]
+        ram_rows = [r for r in rows if r["cell"] in rams]
+        report(bool(rams) and bool(ram_rows),
+               "%d block RAM(s), %d block-RAM input row(s)" % (len(rams), len(ram_rows)))
+        outs = []
+        for n in rams:
+            outs.append((n, tuple(p for p, d in cells[n]["port_directions"].items() if d == "output")))
+        sinks = cone_sinks(cells, drivers, users, outs)
+        have = {(r["cell"], r["port"]) for r in rows}
+        missing = sorted(sinks - have)
+        report(bool(sinks) and not missing,
+               "%d flop pin(s) fed by a block-RAM output, %d without a row" % (len(sinks), len(missing)))
     else:
         report(False, "unknown arm")
     print("\n".join(out))
