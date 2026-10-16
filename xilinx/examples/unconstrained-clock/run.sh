@@ -57,6 +57,17 @@ case $line in
     *) report "FAIL replay with no clock constraint: '$line'" ;;
 esac
 
+if ! NEXTPNR_TIMING_ONLY=1 "$NEXTPNR" --chipdb "$CHIPDB" --xdc "$HERE/pins.xdc" --json "$OUT/routed.json" \
+        --no-pack --no-place --no-route --freq 100 --log "$OUT/replay-freq.log" -q >/dev/null 2>&1; then
+    report "FAIL replay with --freq 100: $(grep -m1 '^ERROR' "$OUT/replay-freq.log")"
+else
+    line=$(fmax_line "$OUT/replay-freq.log")
+    case $line in
+        *"PASS at 100.00 MHz"* | *"FAIL at 100.00 MHz"*) report "PASS replay with --freq 100: $line" ;;
+        *) report "FAIL replay with --freq 100: '$line'" ;;
+    esac
+fi
+
 line=$(fmax_line "$OUT/full.log")
 case $line in
     *"PASS at 100.00 MHz"* | *"FAIL at 100.00 MHz"*) report "PASS create_clock run: $line" ;;
@@ -64,7 +75,7 @@ case $line in
 esac
 
 if ! "$NEXTPNR" --chipdb "$CHIPDB" --xdc "$HERE/pins.xdc" --json "$OUT/top.json" --freq 50 \
-        --log "$OUT/freq.log" -q --seed 1 >/dev/null 2>&1; then
+        --write "$OUT/freq.json" --log "$OUT/freq.log" -q --seed 1 >/dev/null 2>&1; then
     report "FAIL --freq run: $(grep -m1 '^ERROR' "$OUT/freq.log")"
 else
     line=$(fmax_line "$OUT/freq.log")
@@ -72,6 +83,17 @@ else
         *"PASS at 50.00 MHz"* | *"FAIL at 50.00 MHz"*) report "PASS --freq run: $line" ;;
         *) report "FAIL --freq run: '$line'" ;;
     esac
+fi
+
+if [ -s "$OUT/freq.json" ] && NEXTPNR_TIMING_ONLY=1 "$NEXTPNR" --chipdb "$CHIPDB" --xdc "$HERE/pins.xdc" \
+        --json "$OUT/freq.json" --no-pack --no-place --no-route --log "$OUT/replay-50.log" -q >/dev/null 2>&1; then
+    line=$(fmax_line "$OUT/replay-50.log")
+    case $line in
+        *"PASS at 50.00 MHz"* | *"FAIL at 50.00 MHz"*) report "PASS replay of the --freq 50 run: $line" ;;
+        *) report "FAIL replay of the --freq 50 run: '$line'" ;;
+    esac
+else
+    report "FAIL replay of the --freq 50 run: $(grep -m1 '^ERROR' "$OUT/replay-50.log" 2>/dev/null)"
 fi
 
 echo "artefacts kept in $OUT"
