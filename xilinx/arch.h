@@ -1914,6 +1914,10 @@ struct Arch : BaseCtx
     };
     SyncPinTiming bramPinTiming(const CellInfo *cell, IdString port) const;
     SyncPinTiming icapPinTiming(const CellInfo *cell, IdString port) const;
+    SyncPinTiming dramPinTiming(const CellInfo *cell, IdString port) const;
+    bool dramCheck(const CellInfo *cell, IdString port, TimingCheckType type, double &value_ns) const;
+    bool dramClockToOut(const CellInfo *cell, IdString port, double &max_ns, double &min_ns) const;
+    int xc7_timing_instance(int tt_id, IdString inst_name) const;
     struct Dsp48e1Config
     {
         bool areg, breg, creg, dreg, adreg, mreg, preg;
@@ -1959,11 +1963,12 @@ struct Arch : BaseCtx
     bool xc7_cell_timing_lookup(int tt_id, int inst_id, IdString variant, IdString from_port, IdString to_port,
                                 DelayInfo &delay, delay_t *min_delay = nullptr) const;
     bool xc7_cell_timing_check_lookup(int tt_id, int inst_id, IdString variant, TimingCheckType type,
-                                      IdString sig_port, IdString clock_port, delay_t &value) const;
+                                      IdString sig_port, IdString clock_port, delay_t &value,
+                                      delay_t *min_value = nullptr) const;
     void xc7FFTimingFallback(const CellInfo *cell, IdString variant, IdString port, TimingCheckType kind,
                              bool expected, double fallback_ns) const;
     bool chipdb_has_timing_checks = false;
-    IdString id_ff_variant[3], id_ff_variant_qh[3], id_ff_variant_ql[3], id_ff_din;
+    IdString id_ff_variant[3], id_ff_variant_qh[3], id_ff_variant_ql[3], id_ff_din, id_slicem_inst;
     mutable std::set<std::tuple<IdString, IdString, IdString, int>> ff_timing_fallback_logged;
 
     // Whether or not a given cell can be placed at a given Bel

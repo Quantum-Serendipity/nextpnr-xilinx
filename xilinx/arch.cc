@@ -108,6 +108,7 @@ Arch::Arch(ArchArgs args) : args(args)
         id_ff_variant_ql[i] = id(std::string(ff_variant_names[i]) + "_QL");
     }
     id_ff_din = id("DIN");
+    id_slicem_inst = id("SLICEM");
     const TimingDataPOD *td = chip_info->timing_data.get();
     for (int t = 0; td != nullptr && t < td->num_tile_types && !chipdb_has_timing_checks; t++) {
         const TileCellTimingPOD &tt = td->tile_cell_timings[t];
@@ -4037,8 +4038,7 @@ TimingPortClass Arch::getPortTimingClass(const CellInfo *cell, IdString port, in
             return TMG_IGNORE;
         if (port == id_A1 || port == id_A2 || port == id_A3 || port == id_A4 || port == id_A5 || port == id_A6)
             return TMG_COMB_INPUT;
-        else if (port == id_O5 || port == id_O6)
-            return TMG_COMB_OUTPUT;
+        return syncPinClass(cell, dramPinTiming(cell, port), clockInfoCount);
     } else if (cell->type == id_CARRY4 && cell->bel != BelId()) {
         return cell->ports.at(port).type == PORT_OUT ? TMG_COMB_OUTPUT : TMG_COMB_INPUT;
     } else if (cell->type == id_SLICE_FFX) {
@@ -4112,6 +4112,16 @@ TimingClockingInfo Arch::getPortClockingInfo(const CellInfo *cell, IdString port
         info.edge = bool_or_default(cell->params, id("IS_" + ck + "_INVERTED"), false) ? FALLING_EDGE : RISING_EDGE;
         return info;
     }
+    if (cell->type == id_SLICE_LUTX) {
+        SyncPinTiming t = dramPinTiming(cell, port);
+        info.setup = getDelayFromNS(t.setup);
+        info.hold = getDelayFromNS(t.hold);
+        info.clockToQ = getDelayFromNS(t.clk_to_q_max);
+        info.clockToQ.min = getDelayFromNS(t.clk_to_q_min).delay;
+        info.clock_port = id_CLK;
+        info.edge = bool_or_default(cell->params, id_IS_WCLK_INVERTED, false) ? FALLING_EDGE : RISING_EDGE;
+        return info;
+    }
     info.setup = getDelayFromNS(0.05);
     info.hold = getDelayFromNS(0.143);
     info.clockToQ = getDelayFromNS(0.259);
@@ -4175,6 +4185,107 @@ TimingClockingInfo Arch::getPortClockingInfo(const CellInfo *cell, IdString port
     else
         xc7FFTimingFallback(cell, variant, port, TIMING_CHECK_HOLD, expected, 0.143);
     return info;
+}
+
+Arch::SyncPinTiming Arch::dramPinTiming(const CellInfo *cell, IdString port) const
+{
+    SyncPinTiming t;
+    bool is_out = port == id_O5 || port == id_O6;
+    if (is_out || port == id_A1 || port == id_A2 || port == id_A3 || port == id_A4 || port == id_A5 ||
+        port == id_A6)
+        t.kind = is_out ? SYNC_PIN_COMB_OUTPUT : SYNC_PIN_COMB_INPUT;
+    if (!xc7 || !cell->attrs.count(id_X_LUT_AS_DRAM))
+        return t;
+    t.clock = id_CLK;
+    if (port == id_CLK) {
+        t.kind = SYNC_PIN_CLOCK;
+        return t;
+    }
+    if (is_out) {
+        t.clk_to_q_max = 1.190;
+        t.clk_to_q_min = 0.340;
+        dramClockToOut(cell, port, t.clk_to_q_max, t.clk_to_q_min);
+        return t;
+    }
+    static const IdString write_pins[] = {id_DI1, id_DI2, id_WE,  id_WA1, id_WA2, id_WA3,
+                                          id_WA4, id_WA5, id_WA6, id_WA7, id_WA8};
+    if (std::find(std::begin(write_pins), std::end(write_pins), port) == std::end(write_pins))
+        return t;
+    t.kind = SYNC_PIN_INPUT;
+    t.setup = 0.654;
+    t.hold = 0.745;
+    double v;
+    if (dramCheck(cell, port, TIMING_CHECK_SETUP, v))
+        t.setup = v;
+    if (dramCheck(cell, port, TIMING_CHECK_HOLD, v))
+        t.hold = std::max(v, 0.0);
+    return t;
+}
+
+bool Arch::dramCheck(const CellInfo *cell, IdString port, TimingCheckType type, double &value_ns) const
+{
+    if (cell->bel == BelId())
+        return false;
+    int tt_id = locInfo(cell->bel).timing_index;
+    int inst_id = locInfo(cell->bel).bel_data[cell->bel.index].timing_inst;
+    bool is_lut5 = (locInfo(cell->bel).bel_data[cell->bel.index].z & 0xF) == BEL_5LUT;
+    IdString variant = is_lut5 ? id_LUT_OR_MEM5LRAM : id_LUT_OR_MEM6LRAM;
+    if (port != id_DI1 && port != id_DI2)
+        inst_id = xc7_timing_instance(tt_id, id_slicem_inst);
+    delay_t vmax = 0, vmin = 0;
+    if (chipdb_has_timing_checks &&
+        xc7_cell_timing_check_lookup(tt_id, inst_id, variant, type, port, id_CLK, vmax, &vmin)) {
+        value_ns = getDelayNS(std::max(vmax, vmin));
+        return true;
+    }
+    IdString tile_type = getBelTileType(cell->bel);
+    if (chipdb_has_timing_checks)
+        log_error("prjxray has no %s check for %s.%s in tile type %s (cell '%s' at %s), and this chipdb carries "
+                  "timing checks, so the distributed-RAM write pin would be timed against a guess\n",
+                  type == TIMING_CHECK_SETUP ? "setup" : "hold", variant.c_str(this), port.c_str(this),
+                  tile_type.c_str(this), cell->name.c_str(this), getBelName(cell->bel).c_str(this));
+    if (ff_timing_fallback_logged.emplace(tile_type, variant, port, int(type)).second)
+        log_warning("chipdb carries no timing checks, so %s.%s in tile type %s (first cell '%s' at %s) uses the "
+                    "fixed %s %.3fns\n",
+                    variant.c_str(this), port.c_str(this), tile_type.c_str(this), cell->name.c_str(this),
+                    getBelName(cell->bel).c_str(this), type == TIMING_CHECK_SETUP ? "setup" : "hold",
+                    type == TIMING_CHECK_SETUP ? 0.654 : 0.745);
+    return false;
+}
+
+bool Arch::dramClockToOut(const CellInfo *cell, IdString port, double &max_ns, double &min_ns) const
+{
+    if (cell->bel == BelId())
+        return false;
+    int tt_id = locInfo(cell->bel).timing_index;
+    int inst_id = locInfo(cell->bel).bel_data[cell->bel.index].timing_inst;
+    bool is_lut5 = (locInfo(cell->bel).bel_data[cell->bel.index].z & 0xF) == BEL_5LUT;
+    IdString variant = is_lut5 ? id_LUT_OR_MEM5LRAM : id_LUT_OR_MEM6LRAM;
+    IdString to = is_lut5 ? id_O5 : port;
+    DelayInfo d;
+    delay_t dmin = 0;
+    if (xc7_cell_timing_lookup(tt_id, inst_id, variant, id_CLK, to, d, &dmin)) {
+        max_ns = getDelayNS(std::max(d.delay, dmin));
+        min_ns = getDelayNS(std::min(d.delay, dmin));
+        return true;
+    }
+    if (inst_id != -1)
+        log_error("prjxray has no CLK->%s delay for %s in tile type %s (cell '%s' at %s), so the distributed-RAM "
+                  "read output would be timed against a guess\n",
+                  to.c_str(this), variant.c_str(this), getBelTileType(cell->bel).c_str(this),
+                  cell->name.c_str(this), getBelName(cell->bel).c_str(this));
+    return false;
+}
+
+int Arch::xc7_timing_instance(int tt_id, IdString inst_name) const
+{
+    if (tt_id == -1)
+        return -1;
+    const TileCellTimingPOD &tt = chip_info->timing_data->tile_cell_timings[tt_id];
+    for (int i = 0; i < tt.num_instances; i++)
+        if (tt.instances[i].inst_name == inst_name.index)
+            return i;
+    return -1;
 }
 
 void Arch::xc7FFTimingFallback(const CellInfo *cell, IdString variant, IdString port, TimingCheckType kind,
@@ -4290,7 +4401,8 @@ bool Arch::xc7_cell_timing_lookup(int tt_id, int inst_id, IdString variant, IdSt
 }
 
 bool Arch::xc7_cell_timing_check_lookup(int tt_id, int inst_id, IdString variant, TimingCheckType type,
-                                        IdString sig_port, IdString clock_port, delay_t &value) const
+                                        IdString sig_port, IdString clock_port, delay_t &value,
+                                        delay_t *min_value) const
 {
     const CellTimingPOD *found_var = xc7_cell_timing_variant(tt_id, inst_id, variant);
     if (found_var == nullptr)
@@ -4302,6 +4414,8 @@ bool Arch::xc7_cell_timing_check_lookup(int tt_id, int inst_id, IdString variant
     if (!found_check)
         return false;
     value = found_check->max_value;
+    if (min_value != nullptr)
+        *min_value = found_check->min_value;
     return true;
 }
 
