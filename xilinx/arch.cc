@@ -3145,6 +3145,19 @@ bool Arch::route()
     bool result = true;
     auto run_router = [&]() {
         if (router == "router1") {
+            if (roi_active()) {
+                const char *clamp_mode = getenv("NEXTPNR_PARTITION_CLAMP");
+                const char *keepout_mode = getenv("NEXTPNR_PARTITION_KEEPOUT");
+                const bool both_off = clamp_mode != nullptr && std::string(clamp_mode) == "off" &&
+                                      keepout_mode != nullptr && std::string(keepout_mode) == "off";
+                if (!both_off)
+                    log_error("router1 has neither the partition route clamp nor the static keepout, and "
+                              "NEXTPNR_PARTITION_ROI is set. Route with router2; the router may also come from a "
+                              "'router' setting stored in the input netlist. Running router1 under a rectangle "
+                              "needs NEXTPNR_PARTITION_CLAMP=off and NEXTPNR_PARTITION_KEEPOUT=off, which say that "
+                              "neither mechanism is wanted.\n");
+                log_warning("partition route clamp and static keepout: both DISABLED, routing with router1\n");
+            }
             result = router1(getCtx(), Router1Cfg(getCtx()));
         } else if (router == "router2") {
             auto cfg = Router2Cfg(getCtx());

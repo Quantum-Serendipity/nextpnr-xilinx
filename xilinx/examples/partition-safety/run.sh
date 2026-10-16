@@ -30,6 +30,11 @@ report() {
     case $1 in PASS*) ;; *) rc_total=1 ;; esac
 }
 
+roi() {
+    printf '{"info": {"GRID_X_MIN": %d, "GRID_X_MAX": %d, "GRID_Y_MIN": %d, "GRID_Y_MAX": %d}}\n' "$2" "$4" "$3" "$5" \
+        >"$1"
+}
+
 npnr() {
     local log=$1
     shift
@@ -95,8 +100,36 @@ arm_fixed_routes_command_line_wins() {
     fi
 }
 
+arm_router1_refused_under_a_rectangle() {
+    roi "$OUT/far.roi.json" 40 180 44 190
+    if ! npnr "$OUT/l24-place.log" --xdc "$HERE/top.xdc" --json "$OUT/top.json" --write "$OUT/placed-router1.json" \
+            --no-route --router router1 --seed 1; then
+        report "FAIL router1 under a rectangle: placement failed: $(grep -m1 '^ERROR' "$OUT/l24-place.log")"
+        return
+    fi
+    NEXTPNR_PARTITION_ROI=$OUT/far.roi.json npnr "$OUT/l24.log" --json "$OUT/placed-router1.json" --no-pack \
+        --no-place
+    local rc=$?
+    local refused
+    refused=$(grep -c 'router1 has neither the partition route clamp nor the static keepout' "$OUT/l24.log")
+    if [ "$rc" -ne 0 ] && [ "$refused" -eq 1 ]; then
+        report "PASS router1 under a rectangle: refused at rc $rc"
+    else
+        report "FAIL router1 under a rectangle: rc $rc, $refused refusal line(s)"
+    fi
+    NEXTPNR_PARTITION_ROI=$OUT/far.roi.json NEXTPNR_PARTITION_CLAMP=off NEXTPNR_PARTITION_KEEPOUT=off \
+        npnr "$OUT/l24-off.log" --json "$OUT/placed-router1.json" --no-pack --no-place
+    rc=$?
+    if [ "$rc" -eq 0 ]; then
+        report "PASS router1 under a rectangle with the clamp and the keepout both off: rc 0"
+    else
+        report "FAIL router1 under a rectangle with the clamp and the keepout both off: rc $rc: $(grep -m1 '^ERROR' "$OUT/l24-off.log")"
+    fi
+}
+
 arm_region_only_keeps_output
 arm_fixed_routes_command_line_wins
+arm_router1_refused_under_a_rectangle
 
 echo "artefacts kept in $OUT"
 exit "$rc_total"

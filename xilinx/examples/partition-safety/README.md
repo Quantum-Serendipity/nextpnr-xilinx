@@ -15,3 +15,4 @@ fails and leaves its outputs in `$OUT` (a fresh `mktemp -d` by default).
 |---|---|
 | `--region-only` without a rectangle | `--write-fixed-routes` is refused, and the file it names is byte-identical afterwards |
 | `--fixed-routes` precedence | a netlist written by a run with `--fixed-routes A` stores A in its settings, and reloading it with `--fixed-routes B` applies B and never A |
+| router1 under a rectangle | a netlist placed with `--router router1`, which stores that router in its settings, is refused when it is routed with `NEXTPNR_PARTITION_ROI` set; with `NEXTPNR_PARTITION_CLAMP=off` and `NEXTPNR_PARTITION_KEEPOUT=off` as well it routes at rc 0 |
