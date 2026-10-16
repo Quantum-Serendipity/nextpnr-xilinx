@@ -15,5 +15,6 @@ non-zero if any arm fails and leaves its outputs in `$OUT` (a fresh `mktemp -d` 
 | arm | passes when |
 |---|---|
 | place and route | rc 0, and no `timed against a guess` error in the log (`sa`: place only) |
+| SLICEM half | no `not a SLICEM LUT bel` warning in the log: no timing analysis, during or after placement, saw a distributed-RAM cell on a SLICEL or a CLBLL bel |
 | sites (`heap` only) | at least one SLICEM `LUT.RAM` FASM feature, and no RAM, SMALL or SRL feature in a SLICEL, of a CLBLL or a CLBLM tile |
 | write pins | `NEXTPNR_SETUP_EXPORT` has a row for a `WE`, `WA*` or `DI*` pin of a distributed-RAM cell |

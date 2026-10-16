@@ -436,7 +436,8 @@ bool Arch::xc7_logic_tile_valid(IdString tileType, LogicTileStatus &lts) const
         if (any && all_frozen)
             return true;
     }
-    bool is_slicem = (tileType == id_CLBLM_L) || (tileType == id_CLBLM_R);
+    const bool has_slicem = (tileType == id_CLBLM_L) || (tileType == id_CLBLM_R);
+    auto slicem_eight = [has_slicem](int eight) { return has_slicem && eight < 4; };
     // SLICEM-only guard, run UNCONDITIONALLY (not behind the per-eight dirty
     // cache in the loop below).  A distributed-RAM / SRL LUT (is_memory /
     // is_srl) is legal only in a SLICEM.  The dirty-gated loop leaves this
@@ -444,14 +445,14 @@ bool Arch::xc7_logic_tile_valid(IdString tileType, LogicTileStatus &lts) const
     // can strand a memory/SRL LUT in a SLICEL -- surfacing much later as an
     // unroutable "Pin 'DI1'/'WE' of bel ... has no associated wire".  A cheap
     // O(16) scan here closes that hole for both the 6LUT and 5LUT bels.
-    if (!is_slicem) {
-        for (int i = 0; i < 8; i++) {
-            CellInfo *l6 = lts.cells[(i << 4) | BEL_6LUT];
-            CellInfo *l5 = lts.cells[(i << 4) | BEL_5LUT];
-            if ((l6 != nullptr && (l6->lutInfo.is_memory || l6->lutInfo.is_srl)) ||
-                (l5 != nullptr && (l5->lutInfo.is_memory || l5->lutInfo.is_srl)))
-                return false;
-        }
+    for (int i = 0; i < 8; i++) {
+        if (slicem_eight(i))
+            continue;
+        CellInfo *l6 = lts.cells[(i << 4) | BEL_6LUT];
+        CellInfo *l5 = lts.cells[(i << 4) | BEL_5LUT];
+        if ((l6 != nullptr && (l6->lutInfo.is_memory || l6->lutInfo.is_srl)) ||
+            (l5 != nullptr && (l5->lutInfo.is_memory || l5->lutInfo.is_srl)))
+            return false;
     }
     // A 5LUT bel has neither an A6 input nor an O6 output wire; a cell there
     // must not use either.  Enforce UNCONDITIONALLY -- the dirty-gated loop
@@ -594,7 +595,7 @@ bool Arch::xc7_logic_tile_valid(IdString tileType, LogicTileStatus &lts) const
 
             // Check 6LUT
             if (lut6 != nullptr) {
-                if (!is_slicem && (lut6->lutInfo.is_memory || lut6->lutInfo.is_srl)) {
+                if (!slicem_eight(i) && (lut6->lutInfo.is_memory || lut6->lutInfo.is_srl)) {
                     DBG_RT();
                     return false; // Memory and SRLs only valid in SLICEMs
                 }
@@ -701,7 +702,7 @@ bool Arch::xc7_logic_tile_valid(IdString tileType, LogicTileStatus &lts) const
                 }
             }
             if (lut5 != nullptr) {
-                if (!is_slicem && (lut5->lutInfo.is_memory || lut5->lutInfo.is_srl)) {
+                if (!slicem_eight(i) && (lut5->lutInfo.is_memory || lut5->lutInfo.is_srl)) {
                     DBG();
                     return false; // Memory and SRLs only valid in SLICEMs
                 }
@@ -1270,7 +1271,7 @@ bool Arch::isValidBelForCell(CellInfo *cell, BelId bel) const
         (cell->lutInfo.is_memory || cell->lutInfo.is_srl) &&
         !cell->attrs.count(id("BEL"))) {
         IdString tt = getBelTileType(bel);
-        if (tt != id_CLBLM_L && tt != id_CLBLM_R)
+        if ((tt != id_CLBLM_L && tt != id_CLBLM_R) || locInfo(bel).bel_data[bel.index].z >= 64)
             return false;
     }
     // A LUT that uses any 6LUT-only physical pin -- the A6 input or the O6

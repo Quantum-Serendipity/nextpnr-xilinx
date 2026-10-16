@@ -59,6 +59,12 @@ for s in $SEEDS; do
         report "FAIL $tag: rc $rc, $guess timed-against-a-guess error(s): $(grep -m1 '^ERROR' "$base.log")"
         continue
     fi
+    offm=$(grep -c 'which is not a SLICEM LUT bel' "$base.log")
+    if [ "$offm" -eq 0 ]; then
+        report "PASS $tag: no distributed-RAM cell timed on a bel outside a SLICEM"
+    else
+        report "FAIL $tag: $offm distributed-RAM cell(s) timed on a bel outside a SLICEM, first: $(grep -m1 'which is not a SLICEM LUT bel' "$base.log")"
+    fi
     if [ "$placer" = sa ]; then
         rows=$(awk -F'\t' 'NR > 1 && $1 ~ /\/DPR[0-9]*$|\/SP[0-9]*$/ && $2 ~ /^(WE|WA[1-8]|DI[12])$/' \
             "$base.setup.tsv" | wc -l)
