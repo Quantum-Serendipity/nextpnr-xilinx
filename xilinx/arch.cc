@@ -4364,8 +4364,14 @@ bool Arch::dramTimingSite(const CellInfo *cell, int &tt_id, int &inst_id, IdStri
         return false;
     const BelInfoPOD &bel = locInfo(cell->bel).bel_data[cell->bel.index];
     IdString tile_type = getBelTileType(cell->bel);
-    if ((tile_type != id_CLBLM_L && tile_type != id_CLBLM_R) || bel.z >= 64)
+    if ((tile_type != id_CLBLM_L && tile_type != id_CLBLM_R) || bel.z >= 64) {
+        if (off_slicem_logged.insert(cell->name).second)
+            log_warning("'%s' (%s %s) is placed at %s in tile type %s, which is not a SLICEM LUT bel, so its clocked "
+                        "pins are timed against fixed estimates\n",
+                        cell->name.c_str(this), cell->lutInfo.is_srl ? "shift-register" : "distributed-RAM",
+                        cell->type.c_str(this), getBelName(cell->bel).c_str(this), tile_type.c_str(this));
         return false;
+    }
     tt_id = locInfo(cell->bel).timing_index;
     inst_id = bel.timing_inst;
     is_lut5 = (bel.z & 0xF) == BEL_5LUT;

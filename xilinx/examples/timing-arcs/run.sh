@@ -20,7 +20,7 @@ YOSYS=$(resolve_tool "${YOSYS:-yosys}")
 NEXTPNR=$(resolve_tool "${NEXTPNR:-$HERE/../../../build/nextpnr-xilinx}")
 CHIPDB=$(abspath "${CHIPDB:?set CHIPDB to an xc7a100tfgg484.bin}")
 PYTHON=$(resolve_tool "${PYTHON:-python3}")
-ARMS=${ARMS:-negedge latch srl undriven-clock}
+ARMS=${ARMS:-negedge latch srl undriven-clock off-slicem}
 OUT=$(abspath "${OUT:-$(mktemp -d)}")
 mkdir -p "$OUT" || exit 1
 cd "$HERE" || exit 1
@@ -47,7 +47,38 @@ json.dump(j, open(sys.argv[2], "w"))
 EOF
 }
 
+off_slicem() {
+    local site=$1 define=$2 want=$3 name=off-slicem-$1
+    if ! "$YOSYS" -q -l "$OUT/$name.yosys.log" \
+            -p "read_verilog $define \"$HERE/off-slicem.v\"; synth_xilinx -flatten -abc9 -nodsp -arch xc7 -top top; write_json \"$OUT/$name.json\"" \
+            >/dev/null 2>&1; then
+        report "FAIL $name: yosys"
+        return
+    fi
+    "$NEXTPNR" --chipdb "$CHIPDB" --xdc "$HERE/timing-arcs.xdc" --json "$OUT/$name.json" --no-route \
+        --log "$OUT/$name.log" -q --seed 1 >/dev/null 2>&1
+    local rc=$?
+    if [ "$rc" -ne 0 ]; then
+        report "FAIL $name: place rc $rc: $(grep -m1 '^ERROR' "$OUT/$name.log")"
+        return
+    fi
+    local n
+    n=$(grep -c "is placed at SLICE_X${site}Y159/A6LUT in tile type CLBLM_L, which is not a SLICEM LUT bel" "$OUT/$name.log")
+    local all
+    all=$(grep -c "which is not a SLICEM LUT bel" "$OUT/$name.log")
+    if [ "$n" -eq "$want" ] && [ "$all" -eq "$want" ]; then
+        report "PASS $name: SRL16E pinned to SLICE_X${site}Y159/A6LUT, off-SLICEM warning(s) $all, want $want"
+    else
+        report "FAIL $name: SRL16E pinned to SLICE_X${site}Y159/A6LUT, off-SLICEM warning(s) $all ($n naming it), want $want"
+    fi
+}
+
 for arm in $ARMS; do
+    if [ "$arm" = off-slicem ]; then
+        off_slicem 43 "" 1
+        off_slicem 42 -DON_SLICEM 0
+        continue
+    fi
     xdc="$HERE/timing-arcs.xdc"
     flags="-abc9 -nodsp"
     json="$OUT/$arm.json"

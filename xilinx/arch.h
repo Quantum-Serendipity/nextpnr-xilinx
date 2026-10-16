@@ -1972,7 +1972,7 @@ struct Arch : BaseCtx
     SyncPinTiming dsp48e1PinTiming(const CellInfo *cell, IdString port) const;
     TimingPortClass syncPinClass(const CellInfo *cell, IdString port, const SyncPinTiming &t,
                                  int &clockInfoCount) const;
-    mutable std::unordered_set<IdString> undriven_clock_logged, unclocked_cell_logged;
+    mutable std::unordered_set<IdString> undriven_clock_logged, unclocked_cell_logged, off_slicem_logged;
     // Get the TimingClockingInfo of a port
     TimingClockingInfo getPortClockingInfo(const CellInfo *cell, IdString port, int index) const;
 
