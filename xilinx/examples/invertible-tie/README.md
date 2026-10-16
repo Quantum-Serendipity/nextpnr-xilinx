@@ -28,6 +28,10 @@ The ODDR designs pin their one fabric register with a `BEL` attribute, so that p
 
 `bufgce_i_isinv` sets `IS_I_INVERTED` on a BUFGCE. BUFGCTRL has no I0 or I1 inversion bit in the database, so the build must stop rather than drop the inversion.
 
+`bufgce_i_tie0` ties a BUFGCE's `I` to 0 and `bufgce_i_tie1isinv` ties it to 1 with `IS_I_INVERTED=1`. Both are a constant-0 clock input and must build to the same FASM, with `I0` on the opposite constant from `bufgce_i_tie1`. An inversion on a constant `I` is folded into the constant, so it never reaches the refusal above.
+
+`bufg_i_tie0` ties a BUFG's `I` to 0. The GND constant net then has a BUFGCTRL `I0` as its only user and must still be routed as a constant, not as a global clock.
+
 `pllbase_pwrdwn_tie0` and `pllbase_pwrdwn_tie1` check that `PLLE2_BASE` still gets `ZINV_PWRDWN` only when PWRDWN is tied to 0.
 
 `dsp_inmode1_tie0` and `dsp_inmode1_tie1` check the three bits of a pin the DSP tile ties itself: the tieoff of the pin's logical value, and `ZIS_INMODE_INVERTED[1]` set (site inverter off), as Vivado writes them.

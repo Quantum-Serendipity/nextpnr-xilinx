@@ -126,6 +126,27 @@ refuses() {
 
 refuses bufgce_i_isinv "IS_I0_INVERTED"
 
+if build bufg_i_tie0; then
+    report PASS "bufg_i_tie0: built with I0 on the GND constant"
+else
+    rc_total=1
+fi
+
+if build bufgce_i_tie0 && build bufgce_i_tie1 && build bufgce_i_tie1isinv; then
+    if how=$(same_fasm bufgce_i_tie1isinv bufgce_i_tie0); then
+        report PASS "bufgce_i_tie1isinv == bufgce_i_tie0 ($how)"
+    else
+        report FAIL "bufgce_i_tie1isinv != bufgce_i_tie0"
+    fi
+    if same_fasm bufgce_i_tie0 bufgce_i_tie1 >/dev/null; then
+        report FAIL "bufgce_i_tie0 == bufgce_i_tie1, want I0 on opposite constants"
+    else
+        report PASS "bufgce_i_tie0 != bufgce_i_tie1"
+    fi
+else
+    rc_total=1
+fi
+
 if build bufgmux_undrv; then
     s0=$(count bufgmux_undrv ZINV_S0)
     s1=$(count bufgmux_undrv ZINV_S1)
