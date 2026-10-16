@@ -54,7 +54,7 @@ void XC7Packer::prepare_clocking()
         };
         // Tag a port rename so downstream consumers (json2dcp / fasm.cc)
         // can reconstruct the source-RTL port name.  The general xform_cell
-        // path in pack.cc:70 does this automatically; this lambda mirrors
+        // path does this automatically; this lambda mirrors
         // that behaviour for the rename_port() calls in this loop that
         // bypass xform_cell.  Without these tags the json2dcp EDIF leaves
         // the packed cell's pins floating (e.g. clk_raw had no sink because
