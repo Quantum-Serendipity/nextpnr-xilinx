@@ -4038,7 +4038,7 @@ TimingPortClass Arch::getPortTimingClass(const CellInfo *cell, IdString port, in
             return TMG_IGNORE;
         if (port == id_A1 || port == id_A2 || port == id_A3 || port == id_A4 || port == id_A5 || port == id_A6)
             return TMG_COMB_INPUT;
-        return syncPinClass(cell, dramPinTiming(cell, port), clockInfoCount);
+        return syncPinClass(cell, dramPinTiming(cell, port, false), clockInfoCount);
     } else if (cell->type == id_CARRY4 && cell->bel != BelId()) {
         return cell->ports.at(port).type == PORT_OUT ? TMG_COMB_OUTPUT : TMG_COMB_INPUT;
     } else if (cell->type == id_SLICE_FFX) {
@@ -4113,7 +4113,7 @@ TimingClockingInfo Arch::getPortClockingInfo(const CellInfo *cell, IdString port
         return info;
     }
     if (cell->type == id_SLICE_LUTX) {
-        SyncPinTiming t = dramPinTiming(cell, port);
+        SyncPinTiming t = dramPinTiming(cell, port, true);
         info.setup = getDelayFromNS(t.setup);
         info.hold = getDelayFromNS(t.hold);
         info.clockToQ = getDelayFromNS(t.clk_to_q_max);
@@ -4187,7 +4187,7 @@ TimingClockingInfo Arch::getPortClockingInfo(const CellInfo *cell, IdString port
     return info;
 }
 
-Arch::SyncPinTiming Arch::dramPinTiming(const CellInfo *cell, IdString port) const
+Arch::SyncPinTiming Arch::dramPinTiming(const CellInfo *cell, IdString port, bool lookup) const
 {
     SyncPinTiming t;
     bool is_out = port == id_O5 || port == id_O6;
@@ -4204,7 +4204,8 @@ Arch::SyncPinTiming Arch::dramPinTiming(const CellInfo *cell, IdString port) con
     if (is_out) {
         t.clk_to_q_max = 1.190;
         t.clk_to_q_min = 0.340;
-        dramClockToOut(cell, port, t.clk_to_q_max, t.clk_to_q_min);
+        if (lookup)
+            dramClockToOut(cell, port, t.clk_to_q_max, t.clk_to_q_min);
         return t;
     }
     static const IdString write_pins[] = {id_DI1, id_DI2, id_WE,  id_WA1, id_WA2, id_WA3,
@@ -4214,6 +4215,8 @@ Arch::SyncPinTiming Arch::dramPinTiming(const CellInfo *cell, IdString port) con
     t.kind = SYNC_PIN_INPUT;
     t.setup = 0.654;
     t.hold = 0.745;
+    if (!lookup)
+        return t;
     double v;
     if (dramCheck(cell, port, TIMING_CHECK_SETUP, v))
         t.setup = v;

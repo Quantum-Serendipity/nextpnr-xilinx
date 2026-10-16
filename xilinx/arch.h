@@ -1914,7 +1914,7 @@ struct Arch : BaseCtx
     };
     SyncPinTiming bramPinTiming(const CellInfo *cell, IdString port) const;
     SyncPinTiming icapPinTiming(const CellInfo *cell, IdString port) const;
-    SyncPinTiming dramPinTiming(const CellInfo *cell, IdString port) const;
+    SyncPinTiming dramPinTiming(const CellInfo *cell, IdString port, bool lookup) const;
     bool dramCheck(const CellInfo *cell, IdString port, TimingCheckType type, double &value_ns) const;
     bool dramClockToOut(const CellInfo *cell, IdString port, double &max_ns, double &min_ns) const;
     int xc7_timing_instance(int tt_id, IdString inst_name) const;
