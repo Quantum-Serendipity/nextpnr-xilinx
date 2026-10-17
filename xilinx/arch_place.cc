@@ -2195,6 +2195,14 @@ void Arch::fixupRouting()
     // build that re-imports the JSON.
     int perm_label_no_net = 0; // X_ORIG_PORT suppressed because connect_port() had a null net
     int perm_dropped_nets = 0; // input connections this pass removed and did not put back
+    bool lut_perm_drop_fatal = false;
+    if (const char *pdm = getenv("NEXTPNR_LUT_PERM_DROP")) {
+        const std::string m(pdm);
+        if (m == "fatal")
+            lut_perm_drop_fatal = true;
+        else if (m != "warn")
+            log_error("NEXTPNR_LUT_PERM_DROP='%s' is neither 'fatal' nor 'warn'\n", pdm);
+    }
     std::string perm_dropped_first;
 
     for (auto net : sorted(nets)) {
@@ -2382,11 +2390,16 @@ void Arch::fixupRouting()
     if (perm_label_no_net > 0)
         log_info("LUT permutation rewrite: %d X_ORIG_PORT label(s) suppressed on pins left with no net\n",
                  perm_label_no_net);
-    if (perm_dropped_nets > 0)
+    if (perm_dropped_nets > 0) {
+        if (lut_perm_drop_fatal)
+            log_error("LUT permutation rewrite DROPPED %d LUT input connection(s) (first: %s). The written "
+                      "netlist would no longer match the design [NEXTPNR_LUT_PERM_DROP=fatal].\n",
+                      perm_dropped_nets, perm_dropped_first.c_str());
         log_warning("LUT permutation rewrite DROPPED %d LUT input connection(s) (first: %s). The written "
                     "netlist no longer matches the design; the FASM is unaffected, so this is invisible to a "
                     "FASM comparison and fatal to anything that re-imports the JSON.\n",
                     perm_dropped_nets, perm_dropped_first.c_str());
+    }
     /*
      * Route PAD nets which won't have been routed due to inout issues
      */

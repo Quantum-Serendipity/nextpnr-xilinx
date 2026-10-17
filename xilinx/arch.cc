@@ -145,6 +145,78 @@ Arch::Arch(ArchArgs args) : args(args)
 
 std::string Arch::getChipName() const { return chip_info->name.get(); }
 
+std::string Arch::chipdb_route_identity() const
+{
+    uint64_t h = 1469598103934665603ULL;
+    auto mix_bytes = [&](const void *p, size_t n) {
+        const unsigned char *b = static_cast<const unsigned char *>(p);
+        for (size_t i = 0; i < n; i++) {
+            h ^= b[i];
+            h *= 1099511628211ULL;
+        }
+    };
+    auto mix_int = [&](int64_t v) { mix_bytes(&v, sizeof(v)); };
+    auto mix_str = [&](const std::string &s) {
+        mix_int(int64_t(s.size()));
+        mix_bytes(s.data(), s.size());
+    };
+    mix_int(chip_info->num_tiletypes);
+    for (int t = 0; t < chip_info->num_tiletypes; t++) {
+        const auto &td = chip_info->tile_types[t];
+        mix_int(td.type);
+        mix_int(td.num_wires);
+        for (int w = 0; w < td.num_wires; w++)
+            mix_str(IdString(td.wire_data[w].name).str(this));
+        mix_int(td.num_pips);
+        for (int i = 0; i < td.num_pips; i++) {
+            const auto &pd = td.pip_data[i];
+            mix_int(pd.src_index);
+            mix_int(pd.dst_index);
+            mix_int(pd.flags);
+        }
+    }
+    mix_int(chip_info->num_tiles);
+    for (int i = 0; i < chip_info->num_tiles; i++) {
+        mix_str(chip_info->tile_insts[i].name.get());
+        mix_int(chip_info->tile_insts[i].type);
+    }
+    char hex[17];
+    snprintf(hex, sizeof(hex), "%016llx", (unsigned long long)h);
+    return getChipName() + " " + hex;
+}
+
+void Arch::record_partition_modes()
+{
+    auto env_or = [](const char *name, const char *dflt) {
+        const char *v = getenv(name);
+        return std::string(v != nullptr ? v : dflt);
+    };
+    auto on_off = [](const char *name) { return env_says_off(name) ? std::string("off") : std::string("on"); };
+    static const char *const knobs[] = {"NEXTPNR_PARTITION_ROI",          "NEXTPNR_PARTITION_CLAMP",
+                                        "NEXTPNR_PARTITION_KEEPOUT",      "NEXTPNR_PARTITION_KEEPOUT_NARROW",
+                                        "NEXTPNR_PARTITION_NETS",         "NEXTPNR_PARTITION_EXEMPT_NETS",
+                                        "NEXTPNR_BEL_BLACKLIST",          "NEXTPNR_SKIP_FAILED_ARCS",
+                                        "NEXTPNR_LUT_PERM_DROP"};
+    bool any = roi_active();
+    for (const char *k : knobs)
+        any = any || getenv(k) != nullptr;
+    if (!any) {
+        if (idstring_str_to_idx->count("partition_modes"))
+            settings.erase(id("partition_modes"));
+        return;
+    }
+    std::string modes = "roi=" + env_or("NEXTPNR_PARTITION_ROI", "none") + ";active=" + (roi_active() ? "1" : "0") +
+                        ";clamp=" + on_off("NEXTPNR_PARTITION_CLAMP") + ";keepout=" + on_off("NEXTPNR_PARTITION_KEEPOUT") +
+                        ";keepout_narrow=" + on_off("NEXTPNR_PARTITION_KEEPOUT_NARROW") +
+                        ";partition_nets=" + (env_or("NEXTPNR_PARTITION_NETS", "") == "warn" ? "warn" : "fatal") +
+                        ";exempt_nets=" + env_or("NEXTPNR_PARTITION_EXEMPT_NETS", "none") +
+                        ";bel_blacklist=" + env_or("NEXTPNR_BEL_BLACKLIST", "none") +
+                        ";skip_failed_arcs=" + (getenv("NEXTPNR_SKIP_FAILED_ARCS") != nullptr ? "set" : "unset") +
+                        ";lut_perm_drop=" + env_or("NEXTPNR_LUT_PERM_DROP", "warn") +
+                        ";rm_cells=" + std::to_string(rm_cells.size());
+    settings[id("partition_modes")] = modes;
+}
+
 // -----------------------------------------------------------------------
 
 IdString Arch::archArgsToId(ArchArgs args) const { return IdString(); }
@@ -1732,8 +1804,21 @@ void Arch::applyFixedRoutes(const std::string &filename, std::function<void()> r
     std::unordered_map<std::string, std::vector<std::pair<WireId, WireId>>> byname;
     std::vector<std::string> lines;
     {
+        const std::string id_tag = "# nextpnr-xilinx chipdb:";
+        std::string file_identity;
+        bool have_identity = false;
+        int index_form = 0;
         std::string pl;
         while (std::getline(in, pl)) {
+            if (pl.compare(0, id_tag.size(), id_tag) == 0) {
+                std::string got = trim(pl.substr(id_tag.size()));
+                if (have_identity && got != file_identity)
+                    log_error("fixed-routes: '%s' names two chipdb identities, '%s' and '%s'\n", filename.c_str(),
+                              file_identity.c_str(), got.c_str());
+                file_identity = got;
+                have_identity = true;
+                continue;
+            }
             auto h = pl.find('#');
             if (h != std::string::npos)
                 pl = pl.substr(0, h);
@@ -1744,9 +1829,26 @@ void Arch::applyFixedRoutes(const std::string &filename, std::function<void()> r
             size_t sp2 = pl.find_first_of(" \t");
             if (sp2 == std::string::npos)
                 continue;
+            if (pl.find("->", sp2) == std::string::npos)
+                index_form++;
             WireId s, d;
             if (resolve_sd(trim(pl.substr(sp2)), s, d))
                 byname[pl.substr(0, sp2)].push_back({s, d});
+        }
+        if (have_identity || index_form > 0) {
+            const std::string mine = chipdb_route_identity();
+            if (have_identity && file_identity != mine)
+                log_error("fixed-routes: '%s' was written against chipdb '%s' and this run loaded '%s'; its "
+                          "<tile>/<src_idx>.<dst_idx> lines name pips by this chipdb's wire indices and would bind "
+                          "different pips here\n",
+                          filename.c_str(), file_identity.c_str(), mine.c_str());
+            if (!have_identity && index_form > 0 && roi_active())
+                log_error("fixed-routes: '%s' carries %d index-form pip line(s) and no '%s' line, and "
+                          "NEXTPNR_PARTITION_ROI is set; nothing says these indices were cut against this chipdb "
+                          "('%s')\n",
+                          filename.c_str(), index_form, id_tag.c_str(), mine.c_str());
+            if (have_identity)
+                log_info("    fixed-routes: chipdb identity '%s' matches\n", mine.c_str());
         }
     }
     std::unordered_map<std::string, NetInfo *> topo_net;
@@ -2665,9 +2767,15 @@ void Arch::writeFixedRoutes(const std::string &filename, bool region_only) const
 {
     if (region_only && !roi_active())
         log_error("--region-only needs a partition rectangle; set NEXTPNR_PARTITION_ROI\n");
+    if (region_only && partition_nets().empty())
+        log_error("--region-only: the partition rectangle governs no nets, so --write-fixed-routes would cut every "
+                  "net at the rectangle edge with nothing checked; an RM partial needs an RM cell set, which a placed "
+                  "input netlist cannot supply\n");
+    const std::string identity = chipdb_route_identity();
     int npips = 0, nnets = 0, nskipped = 0;
     writeFileReplacing(filename, "fixed-routes", [&](std::ostream &out) {
         out << "# nextpnr-xilinx fixed-routes: <net> <tile>/<src_idx>.<dst_idx>\n";
+        out << "# nextpnr-xilinx chipdb: " << identity << "\n";
         for (auto &np : nets) {
             NetInfo *ni = np.second.get();
             bool any = false;
@@ -3207,6 +3315,10 @@ bool Arch::route()
             }
             result = router1(getCtx(), Router1Cfg(getCtx()));
         } else if (router == "router2") {
+            if (roi_active() && getenv("NEXTPNR_SKIP_FAILED_ARCS") != nullptr)
+                log_error("NEXTPNR_SKIP_FAILED_ARCS is set and NEXTPNR_PARTITION_ROI is set; router2 would accept a "
+                          "partial route and this run would write it as routed under a partition rectangle. Unset "
+                          "NEXTPNR_SKIP_FAILED_ARCS.\n");
             auto cfg = Router2Cfg(getCtx());
             cfg.bb_margin_x = 4;
             cfg.bb_margin_y = 4;
@@ -4605,8 +4717,9 @@ void Arch::load_bel_blacklist() const
         return;
     std::ifstream in(f);
     if (!in)
-        return;
+        log_error("NEXTPNR_BEL_BLACKLIST: cannot open '%s'\n", f);
     std::string ln;
+    std::string first_miss;
     int n = 0, miss = 0;
     while (std::getline(in, ln)) {
         while (!ln.empty() && (ln.back() == '\r' || ln.back() == ' '))
@@ -4615,13 +4728,18 @@ void Arch::load_bel_blacklist() const
             continue;
         BelId b = getBelByName(id(ln));
         if (b == BelId()) {
-            miss++;
+            if (miss++ == 0)
+                first_miss = ln;
             continue;
         }
         blacklist_bels.insert((int64_t(b.tile) << 32) | uint32_t(b.index));
         n++;
     }
     log_info("bel blacklist: reserved %d bel(s) from %s (%d unresolved)\n", n, f, miss);
+    if (miss > 0)
+        log_error("NEXTPNR_BEL_BLACKLIST: %d name(s) in '%s' name no bel of this chipdb (first: '%s'); a bel the "
+                  "file meant to reserve stays available\n",
+                  miss, f, first_miss.c_str());
 }
 
 // A structural scan of the ROI object. It records the byte offset of every

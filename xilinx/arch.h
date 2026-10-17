@@ -764,6 +764,8 @@ struct Arch : BaseCtx
     bool xc7;
 
     std::string getChipName() const;
+    std::string chipdb_route_identity() const;
+    void record_partition_modes();
 
     IdString archId() const { return id("xilinx"); }
     ArchArgs archArgs() const { return args; }
