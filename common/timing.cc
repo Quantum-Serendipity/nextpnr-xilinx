@@ -655,7 +655,11 @@ struct Timing
 
                     // Otherwise, for all driven input ports on this cell, if a timing arc exists between the input and
                     // the current output port, increment fanin counter
+                    const bool source =
+                            portClass == TMG_STARTPOINT || portClass == TMG_GEN_CLOCK || portClass == TMG_IGNORE;
                     for (auto i : input_ports) {
+                        if (source)
+                            break;
                         // A cell input pin can end up bound to the cell's own
                         // output net (e.g. the xc7 post-route LUT pin fixup
                         // when the router feeds the output back through an
@@ -667,7 +671,11 @@ struct Timing
                             continue;
                         DelayInfo comb_delay;
                         bool is_path = ctx->getCellDelay(cell.second.get(), i, o->name, comb_delay);
-                        if (is_path)
+                        if (!is_path)
+                            continue;
+                        int in_clocks;
+                        TimingPortClass inClass = ctx->getPortTimingClass(cell.second.get(), i, in_clocks);
+                        if (inClass != TMG_IGNORE && inClass != TMG_CLOCK_INPUT)
                             port_fanin[o]++;
                     }
                     if (portClass == TMG_COMB_OUTPUT && clocks > 0) {
