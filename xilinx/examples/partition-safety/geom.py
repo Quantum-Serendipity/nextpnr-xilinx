@@ -57,10 +57,7 @@ def count(routes, x0, y0, x1, y1, which):
 def cell_tiles(grid, placed, cell_type):
     with open(placed) as f:
         cells = json.load(f)["modules"]["top"]["cells"]
-    site_xy = {}
-    for t in grid.values():
-        for site in t.get("sites", {}):
-            site_xy[site] = (t["grid_x"], t["grid_y"])
+    site_xy = site_grid(grid)
     for name in sorted(cells):
         c = cells[name]
         if c["type"] != cell_type:

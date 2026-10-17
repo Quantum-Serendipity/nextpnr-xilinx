@@ -181,6 +181,16 @@ void UspCommandHandler::customAfterLoad(Context *ctx)
                   "An RM partial needs its RM cells unplaced in the input netlist; a placed netlist cannot supply "
                   "them.\n",
                   vm.count("no-place") ? " (--no-place with a placed input netlist)" : "");
+    if (!vm.count("region-only") && ctx->roi_active() && ctx->rm_cells.empty())
+        log_warning("partition rectangle: the RM cell set snapshotted at import is empty%s, so no RM net is governed "
+                    "and the route clamp and the partition routing check confine nothing. This is the shape of a "
+                    "static build; an RM build needs its RM cells unplaced in the input netlist.\n",
+                    vm.count("no-place") ? " (--no-place with a placed input netlist)" : "");
+    if (const char *blf = getenv("NEXTPNR_BEL_BLACKLIST")) {
+        std::ifstream probe(blf);
+        if (!probe)
+            log_error("NEXTPNR_BEL_BLACKLIST: cannot open '%s'\n", blf);
+    }
     if (vm.count("no-route") && vm.count("no-place") && !vm.count("route-clock-only"))
         log_info("routed import: recorded %d permuted LUT input pin(s) as routed sink wires\n",
                  ctx->recordLutPermutationPins());

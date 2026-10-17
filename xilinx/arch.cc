@@ -191,11 +191,38 @@ void Arch::record_partition_modes()
         const char *v = getenv(name);
         return std::string(v != nullptr ? v : dflt);
     };
+    auto file_digest = [](const char *name) {
+        const char *v = getenv(name);
+        if (v == nullptr)
+            return std::string("none");
+        std::ifstream in(v, std::ios::binary);
+        if (!in)
+            return std::string("unreadable");
+        uint64_t h = 1469598103934665603ULL;
+        char c;
+        while (in.get(c)) {
+            h ^= static_cast<unsigned char>(c);
+            h *= 1099511628211ULL;
+        }
+        char hex[24];
+        snprintf(hex, sizeof(hex), "fnv64:%016llx", (unsigned long long)h);
+        return std::string(hex);
+    };
     auto on_off = [](const char *name) { return env_says_off(name) ? std::string("off") : std::string("on"); };
-    static const char *const knobs[] = {"NEXTPNR_PARTITION_ROI",          "NEXTPNR_PARTITION_CLAMP",
-                                        "NEXTPNR_PARTITION_KEEPOUT",      "NEXTPNR_PARTITION_KEEPOUT_NARROW",
-                                        "NEXTPNR_PARTITION_NETS",         "NEXTPNR_PARTITION_EXEMPT_NETS",
-                                        "NEXTPNR_BEL_BLACKLIST",          "NEXTPNR_SKIP_FAILED_ARCS",
+    auto set_unset = [](const char *name) { return std::string(getenv(name) != nullptr ? "set" : "unset"); };
+    static const char *const knobs[] = {"NEXTPNR_PARTITION_ROI",
+                                        "NEXTPNR_PARTITION_CLAMP",
+                                        "NEXTPNR_PARTITION_KEEPOUT",
+                                        "NEXTPNR_PARTITION_KEEPOUT_NARROW",
+                                        "NEXTPNR_PARTITION_KEEPOUT_LICENCE",
+                                        "NEXTPNR_PARTITION_KEEPOUT_EXEMPT",
+                                        "NEXTPNR_PARTITION_NETS",
+                                        "NEXTPNR_PARTITION_EXEMPT_NETS",
+                                        "NEXTPNR_BEL_BLACKLIST",
+                                        "NEXTPNR_PIP_BLACKLIST",
+                                        "NEXTPNR_PIP_BLACKLIST_TILE",
+                                        "NEXTPNR_EXCLUDE_STAMPED_BBOX",
+                                        "NEXTPNR_SKIP_FAILED_ARCS",
                                         "NEXTPNR_LUT_PERM_DROP"};
     bool any = roi_active();
     for (const char *k : knobs)
@@ -205,13 +232,23 @@ void Arch::record_partition_modes()
             settings.erase(id("partition_modes"));
         return;
     }
-    std::string modes = "roi=" + env_or("NEXTPNR_PARTITION_ROI", "none") + ";active=" + (roi_active() ? "1" : "0") +
-                        ";clamp=" + on_off("NEXTPNR_PARTITION_CLAMP") + ";keepout=" + on_off("NEXTPNR_PARTITION_KEEPOUT") +
+    std::string rect0 = "none";
+    if (roi_active())
+        rect0 = std::to_string(roi_x0) + "," + std::to_string(roi_y0) + "-" + std::to_string(roi_x1) + "," +
+                std::to_string(roi_y1);
+    std::string modes = "roi=" + file_digest("NEXTPNR_PARTITION_ROI") + ";rect0=" + rect0 +
+                        ";active=" + (roi_active() ? "1" : "0") + ";clamp=" + on_off("NEXTPNR_PARTITION_CLAMP") +
+                        ";keepout=" + on_off("NEXTPNR_PARTITION_KEEPOUT") +
                         ";keepout_narrow=" + on_off("NEXTPNR_PARTITION_KEEPOUT_NARROW") +
+                        ";keepout_licence=" + file_digest("NEXTPNR_PARTITION_KEEPOUT_LICENCE") +
+                        ";keepout_exempt=" + file_digest("NEXTPNR_PARTITION_KEEPOUT_EXEMPT") +
                         ";partition_nets=" + (env_or("NEXTPNR_PARTITION_NETS", "") == "warn" ? "warn" : "fatal") +
-                        ";exempt_nets=" + env_or("NEXTPNR_PARTITION_EXEMPT_NETS", "none") +
-                        ";bel_blacklist=" + env_or("NEXTPNR_BEL_BLACKLIST", "none") +
-                        ";skip_failed_arcs=" + (getenv("NEXTPNR_SKIP_FAILED_ARCS") != nullptr ? "set" : "unset") +
+                        ";exempt_nets=" + file_digest("NEXTPNR_PARTITION_EXEMPT_NETS") +
+                        ";bel_blacklist=" + file_digest("NEXTPNR_BEL_BLACKLIST") +
+                        ";pip_blacklist=" + file_digest("NEXTPNR_PIP_BLACKLIST") +
+                        ";pip_blacklist_tile=" + file_digest("NEXTPNR_PIP_BLACKLIST_TILE") +
+                        ";exclude_stamped_bbox=" + set_unset("NEXTPNR_EXCLUDE_STAMPED_BBOX") +
+                        ";skip_failed_arcs=" + set_unset("NEXTPNR_SKIP_FAILED_ARCS") +
                         ";lut_perm_drop=" + env_or("NEXTPNR_LUT_PERM_DROP", "warn") +
                         ";rm_cells=" + std::to_string(rm_cells.size());
     settings[id("partition_modes")] = modes;
@@ -3302,6 +3339,21 @@ bool Arch::route()
     findSourceSinkLocations();
 
     bool result = true;
+    auto router1_skip_setting = [&]() {
+        if (!idstring_str_to_idx->count("router1/skipFailedArcs"))
+            return false;
+        auto found = settings.find(id("router1/skipFailedArcs"));
+        if (found == settings.end())
+            return false;
+        const Property &p = found->second;
+        return p.is_string ? (p.as_string() != "0" && p.as_string() != "false" && !p.as_string().empty())
+                           : p.as_int64() != 0;
+    };
+    if (roi_active() && (getenv("NEXTPNR_SKIP_FAILED_ARCS") != nullptr || router1_skip_setting()))
+        log_error("NEXTPNR_SKIP_FAILED_ARCS or the router1/skipFailedArcs setting is set and NEXTPNR_PARTITION_ROI is "
+                  "set; the router would accept a partial route and this run would write it as routed under a "
+                  "partition rectangle. Unset NEXTPNR_SKIP_FAILED_ARCS and remove router1/skipFailedArcs from the "
+                  "input netlist's settings.\n");
     auto run_router = [&]() {
         if (router == "router1") {
             if (roi_active()) {
@@ -3315,10 +3367,6 @@ bool Arch::route()
             }
             result = router1(getCtx(), Router1Cfg(getCtx()));
         } else if (router == "router2") {
-            if (roi_active() && getenv("NEXTPNR_SKIP_FAILED_ARCS") != nullptr)
-                log_error("NEXTPNR_SKIP_FAILED_ARCS is set and NEXTPNR_PARTITION_ROI is set; router2 would accept a "
-                          "partial route and this run would write it as routed under a partition rectangle. Unset "
-                          "NEXTPNR_SKIP_FAILED_ARCS.\n");
             auto cfg = Router2Cfg(getCtx());
             cfg.bb_margin_x = 4;
             cfg.bb_margin_y = 4;

@@ -371,6 +371,11 @@ arm_region_only_placed_input_refused() {
         report "FAIL region-only over a placed netlist: the unfiltered route under ($x0,$y0)-($x1,$y1) gives no net to cut (rc $frc, ${held:-?} net(s) with a cell inside, ${esc:-?} leaving)"
         return
     fi
+    if grep -q '^Warning: partition rectangle: the RM cell set snapshotted at import is empty (--no-place with a placed input netlist)' "$OUT/e-full.log"; then
+        report "PASS rectangle over a placed netlist without --region-only: accepted at rc $frc with a warning naming the empty RM cell set"
+    else
+        report "FAIL rectangle over a placed netlist without --region-only: rc $frc and no warning naming the empty RM cell set; $esc of $held net(s) with a cell inside bind $outp pip(s) outside it, governed by nothing"
+    fi
     sentinel_files "$OUT/e.fasm" "$OUT/e.routes"
     NEXTPNR_PARTITION_ROI=$r npnr "$OUT/e.log" --json "$OUT/placed.json" --no-pack --no-place \
         --fasm "$OUT/e.fasm" --write-fixed-routes "$OUT/e.routes" --region-only
@@ -437,6 +442,13 @@ arm_bel_blacklist_fails_closed() {
                     report "PASS bel blacklist naming a file that does not exist: refused at rc $rc"
                 else
                     report "FAIL bel blacklist naming a file that does not exist: rc $rc, no refusal"
+                fi
+                NEXTPNR_BEL_BLACKLIST=$f npnr "$OUT/bl-$tag-route.log" --json "$OUT/placed.json" --no-pack --no-place
+                rc=$?
+                if [ "$rc" -ne 0 ] && grep -q "^ERROR: NEXTPNR_BEL_BLACKLIST: cannot open" "$OUT/bl-$tag-route.log"; then
+                    report "PASS bel blacklist naming a file that does not exist, in a run that does not place: refused at rc $rc"
+                else
+                    report "FAIL bel blacklist naming a file that does not exist, in a run that does not place: rc $rc, no refusal"
                 fi ;;
             unresolved)
                 if [ "$rc" -ne 0 ] && grep -q "^ERROR: NEXTPNR_BEL_BLACKLIST: 1 name(s) .* name no bel" "$OUT/bl-$tag.log"; then
@@ -455,10 +467,38 @@ arm_skip_failed_arcs_under_a_rectangle() {
     NEXTPNR_PARTITION_ROI=$OUT/far.roi.json NEXTPNR_SKIP_FAILED_ARCS=1 npnr "$OUT/sfa.log" --json "$OUT/placed.json" \
         --no-pack --no-place --write "$OUT/sfa.json"
     local rc=$?
-    if [ "$rc0" -eq 0 ] && [ "$rc" -ne 0 ] && grep -q '^ERROR: NEXTPNR_SKIP_FAILED_ARCS is set and NEXTPNR_PARTITION_ROI is set' "$OUT/sfa.log"; then
+    if [ "$rc0" -eq 0 ] && [ "$rc" -ne 0 ] && grep -q '^ERROR: NEXTPNR_SKIP_FAILED_ARCS or the router1/skipFailedArcs setting is set and NEXTPNR_PARTITION_ROI is set' "$OUT/sfa.log"; then
         report "PASS NEXTPNR_SKIP_FAILED_ARCS: rc 0 without a rectangle, refused at rc $rc under one"
     else
         report "FAIL NEXTPNR_SKIP_FAILED_ARCS: rc $rc0 without a rectangle, rc $rc under one: $(grep -m1 '^ERROR' "$OUT/sfa.log")"
+    fi
+    if [ ! -f "$OUT/placed-router1.json" ] &&
+            ! npnr "$OUT/sfa-r1-place.log" --xdc "$HERE/top.xdc" --json "$OUT/top.json" \
+                --write "$OUT/placed-router1.json" --no-route --router router1 --seed 1; then
+        report "FAIL NEXTPNR_SKIP_FAILED_ARCS with router1: placement failed: $(grep -m1 '^ERROR' "$OUT/sfa-r1-place.log")"
+        return
+    fi
+    NEXTPNR_PARTITION_ROI=$OUT/far.roi.json NEXTPNR_PARTITION_CLAMP=off NEXTPNR_PARTITION_KEEPOUT=off \
+        NEXTPNR_SKIP_FAILED_ARCS=1 npnr "$OUT/sfa-r1.log" --json "$OUT/placed-router1.json" --no-pack --no-place
+    rc=$?
+    if [ "$rc" -ne 0 ] && grep -q '^ERROR: NEXTPNR_SKIP_FAILED_ARCS or the router1/skipFailedArcs setting is set and NEXTPNR_PARTITION_ROI is set' "$OUT/sfa-r1.log"; then
+        report "PASS NEXTPNR_SKIP_FAILED_ARCS with router1 under a rectangle, clamp and keepout off: refused at rc $rc"
+    else
+        report "FAIL NEXTPNR_SKIP_FAILED_ARCS with router1 under a rectangle, clamp and keepout off: rc $rc: $(grep -m1 '^ERROR' "$OUT/sfa-r1.log")"
+    fi
+    "$PYTHON" -c 'import json,sys; d=json.load(open(sys.argv[1])); d["modules"]["top"]["settings"]["router1/skipFailedArcs"]="1"; json.dump(d, open(sys.argv[2], "w"))' \
+        "$OUT/placed-router1.json" "$OUT/placed-router1-skip.json"
+    (unset NEXTPNR_SKIP_FAILED_ARCS
+        npnr "$OUT/sfa-r1s-noroi.log" --json "$OUT/placed-router1-skip.json" --no-pack --no-place)
+    rc0=$?
+    (unset NEXTPNR_SKIP_FAILED_ARCS
+        NEXTPNR_PARTITION_ROI=$OUT/far.roi.json NEXTPNR_PARTITION_CLAMP=off NEXTPNR_PARTITION_KEEPOUT=off \
+            npnr "$OUT/sfa-r1s.log" --json "$OUT/placed-router1-skip.json" --no-pack --no-place)
+    rc=$?
+    if [ "$rc0" -eq 0 ] && [ "$rc" -ne 0 ] && grep -q '^ERROR: NEXTPNR_SKIP_FAILED_ARCS or the router1/skipFailedArcs setting is set' "$OUT/sfa-r1s.log"; then
+        report "PASS router1/skipFailedArcs stored in the input netlist: rc 0 without a rectangle, refused at rc $rc under one"
+    else
+        report "FAIL router1/skipFailedArcs stored in the input netlist: rc $rc0 without a rectangle, rc $rc under one: $(grep -m1 '^ERROR' "$OUT/sfa-r1s.log")"
     fi
 }
 
@@ -467,24 +507,63 @@ modes_of() {
         echo UNREADABLE
 }
 
+modes_field() {
+    printf '%s\n' "$1" | tr ';' '\n' | sed -n "s/^$2=//p"
+}
+
 arm_partition_modes_recorded() {
     roi "$OUT/far.roi.json" 40 180 44 190
+    mkdir -p "$OUT/pm-elsewhere"
+    cp "$OUT/far.roi.json" "$OUT/pm-elsewhere/other-name.roi.json"
     NEXTPNR_PARTITION_ROI=$OUT/far.roi.json NEXTPNR_PARTITION_CLAMP=off npnr "$OUT/pm-off.log" --json "$OUT/placed.json" \
         --no-pack --no-place --write "$OUT/pm-off.json"
     local rc1=$?
+    NEXTPNR_PARTITION_ROI=$OUT/pm-elsewhere/other-name.roi.json NEXTPNR_PARTITION_CLAMP=off \
+        npnr "$OUT/pm-elsewhere/pm-off.log" --json "$OUT/placed.json" --no-pack --no-place \
+        --write "$OUT/pm-elsewhere/pm-off.json"
+    local rc1b=$?
+    printf 'no_such_net_in_this_design\n' >"$OUT/pm-keepout-exempt.nets"
+    : >"$OUT/pm-licence.routes"
+    NEXTPNR_PARTITION_ROI=$OUT/far.roi.json NEXTPNR_PARTITION_KEEPOUT_EXEMPT=$OUT/pm-keepout-exempt.nets \
+        NEXTPNR_PARTITION_KEEPOUT_LICENCE=$OUT/pm-licence.routes NEXTPNR_EXCLUDE_STAMPED_BBOX=1 \
+        npnr "$OUT/pm-ko.log" --json "$OUT/placed.json" --no-pack --no-place --write "$OUT/pm-ko.json"
+    local rc3=$?
     (unset NEXTPNR_PARTITION_ROI NEXTPNR_PARTITION_CLAMP NEXTPNR_PARTITION_KEEPOUT NEXTPNR_PARTITION_KEEPOUT_NARROW \
-        NEXTPNR_PARTITION_NETS NEXTPNR_PARTITION_EXEMPT_NETS NEXTPNR_BEL_BLACKLIST NEXTPNR_SKIP_FAILED_ARCS NEXTPNR_LUT_PERM_DROP
+        NEXTPNR_PARTITION_KEEPOUT_LICENCE NEXTPNR_PARTITION_KEEPOUT_EXEMPT NEXTPNR_PARTITION_NETS \
+        NEXTPNR_PARTITION_EXEMPT_NETS NEXTPNR_BEL_BLACKLIST NEXTPNR_PIP_BLACKLIST NEXTPNR_PIP_BLACKLIST_TILE \
+        NEXTPNR_EXCLUDE_STAMPED_BBOX NEXTPNR_SKIP_FAILED_ARCS NEXTPNR_LUT_PERM_DROP
         npnr "$OUT/pm-none.log" --json "$OUT/pm-off.json" --no-pack --no-place --no-route \
             --write "$OUT/pm-none.json")
     local rc2=$?
-    local m1 m2
+    local m1 m1b m2 m3
     m1=$(modes_of "$OUT/pm-off.json")
+    m1b=$(modes_of "$OUT/pm-elsewhere/pm-off.json")
     m2=$(modes_of "$OUT/pm-none.json")
-    if [ "$rc1" -eq 0 ] && [ "$rc2" -eq 0 ] && [[ $m1 == "roi=$OUT/far.roi.json;active=1;clamp=off;keepout=on;"* ]] &&
+    m3=$(modes_of "$OUT/pm-ko.json")
+    if [ "$rc1" -eq 0 ] && [ "$rc2" -eq 0 ] && [[ $m1 == "roi=fnv64:"*";rect0=40,180-44,190;active=1;clamp=off;keepout=on;"* ]] &&
             [ "$m2" = ABSENT ]; then
         report "PASS partition modes recorded in the written netlist: '$m1', and removed by a later run with no partition setting"
     else
         report "FAIL partition modes recorded in the written netlist: rc $rc1/$rc2, '$m1', then '$m2'"
+    fi
+    local s1 s1b
+    s1=$(sha256sum <"$OUT/pm-off.json")
+    s1b=$(sha256sum <"$OUT/pm-elsewhere/pm-off.json")
+    if [ "$rc1b" -eq 0 ] && [[ $m1 == roi=fnv64:* ]] && [ "$m1" = "$m1b" ] && [[ $m1 != */* ]] && [ "$s1" = "$s1b" ]; then
+        report "PASS partition modes name the rectangle by content: the same rectangle under another path and directory gives the same modes and a byte-identical netlist"
+    else
+        report "FAIL partition modes name the rectangle by content: rc $rc1b, '$m1' against '$m1b', netlists ${s1%% *} and ${s1b%% *}"
+    fi
+    local lic ex sb
+    lic=$(modes_field "$m3" keepout_licence)
+    ex=$(modes_field "$m3" keepout_exempt)
+    sb=$(modes_field "$m3" exclude_stamped_bbox)
+    if [ "$rc3" -eq 0 ] && [[ $lic == fnv64:* ]] && [[ $ex == fnv64:* ]] && [ "$lic" != "$ex" ] && [ "$sb" = set ] &&
+            [ "$(modes_field "$m1" keepout_licence)" = none ] && [ "$(modes_field "$m1" keepout_exempt)" = none ] &&
+            [ "$(modes_field "$m1" exclude_stamped_bbox)" = unset ]; then
+        report "PASS partition modes record the keepout licence, the keepout exemptions and the stamped-bbox exclusion: licence $lic, exempt $ex, bbox $sb; none of them set gives none/none/unset"
+    else
+        report "FAIL partition modes record the keepout licence, the keepout exemptions and the stamped-bbox exclusion: rc $rc3, licence '$lic', exempt '$ex', bbox '$sb': $(grep -m1 '^ERROR' "$OUT/pm-ko.log")"
     fi
 }
 
@@ -567,6 +646,24 @@ arm_fixed_routes_chipdb_identity() {
         report "PASS fixed-routes with no chipdb line under a rectangle: refused at rc $rc"
     else
         report "FAIL fixed-routes with no chipdb line under a rectangle: rc $rc, $(grep -o 'bound [0-9]*/[0-9]* pips' "$OUT/id-none-roi.log" | head -1)"
+    fi
+    if [ -n "${CHIPDB_OTHER:-}" ]; then
+        timeout "$NPNR_TIMEOUT" "$NEXTPNR" --chipdb "$CHIPDB_OTHER" --log "$OUT/id-real-stamp.log" -q \
+            --json "$OUT/placed.json" --no-pack --no-place --no-route \
+            --write-fixed-routes "$OUT/id-real-stamp.routes" >/dev/null 2>&1
+        local other
+        other=$(grep -m1 '^# nextpnr-xilinx chipdb: ' "$OUT/id-real-stamp.routes" 2>/dev/null)
+        { printf '%s\n' "$other"; cat "$OUT/id-none.routes"; } >"$OUT/id-real.routes"
+        npnr "$OUT/id-real.log" --json "$OUT/placed.json" --no-pack --no-place --fixed-routes "$OUT/id-real.routes"
+        rc=$?
+        if [ -n "$other" ] && [ "$other" != "$idl" ] && [ "$rc" -ne 0 ] &&
+                grep -q "^ERROR: fixed-routes: .* was written against chipdb '${other#\# nextpnr-xilinx chipdb: }'" "$OUT/id-real.log"; then
+            report "PASS fixed-routes stamped by a real other chipdb ($CHIPDB_OTHER): '${other#\# nextpnr-xilinx chipdb: }' against '${idl#\# nextpnr-xilinx chipdb: }', refused at rc $rc"
+        else
+            report "FAIL fixed-routes stamped by a real other chipdb ($CHIPDB_OTHER): '${other:-no identity line}' against '${idl:-none}', rc $rc"
+        fi
+    else
+        echo "SKIP fixed-routes stamped by a real other chipdb: CHIPDB_OTHER is not set"
     fi
     (unset NEXTPNR_PARTITION_ROI
         npnr "$OUT/id-none.log" --json "$OUT/placed.json" --no-pack --no-place --fixed-routes "$OUT/id-none.routes")
