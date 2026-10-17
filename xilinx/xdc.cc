@@ -215,7 +215,7 @@ void Arch::parseXdc(std::istream &in)
         static const std::vector<std::string> prefixes{"LUT", "SLICE_LUTX", "CARRY4", "MUXF", "F7MUX", "F8MUX",
                                                        "F9MUX", "SELMUX2_1", "INV", "VCC", "GND", "PSEUDO_"};
         const std::string &t = ci->type.str(this);
-        if (idstring_str_to_idx->count("X_LUT_AS_DRAM") && ci->attrs.count(id("X_LUT_AS_DRAM")))
+        if (ci->attrs.count(id_X_LUT_AS_DRAM))
             return false;
         for (auto &pre : prefixes)
             if (t.compare(0, pre.size(), pre) == 0)

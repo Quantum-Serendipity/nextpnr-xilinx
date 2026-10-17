@@ -737,8 +737,7 @@ void XC7Packer::propagate_clock_constraints()
         set_derived(ci, from, to, double(num) / double(den), num, den);
     };
     auto param_phase = [&](CellInfo *ci, const std::string &name) {
-        auto known = ctx->idstring_str_to_idx->find(name);
-        if (known == ctx->idstring_str_to_idx->end() || !ci->params.count(IdString(known->second)))
+        if (!ci->params.count(ctx->id(name)))
             return ExactFrac();
         double deg = param_double(ci, name, std::nan(""));
         double milli = deg * 1000;
