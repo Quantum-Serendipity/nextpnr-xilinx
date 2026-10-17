@@ -734,8 +734,8 @@ void XC7Packer::propagate_clock_constraints()
                 if (mismatch)
                     log_warning("    net '%s' carries the %.1f MHz XDC constraint of net '%s'; the %.1f MHz derived "
                                 "through '%s' is not applied, so the two clocks stay unrelated\n",
-                                to->name.c_str(ctx), MHz(to->clkconstr->period.delay),
-                                carried.at(to->name).c_str(ctx), MHz(period), ci->name.c_str(ctx));
+                                to->name.c_str(ctx), MHz(to->clkconstr->period.delay), carried.at(to->name).c_str(ctx),
+                                MHz(period), ci->name.c_str(ctx));
                 else
                     derivation[to->name] = Derivation{ci, from, num, den, shift};
             }
@@ -796,8 +796,9 @@ void XC7Packer::propagate_clock_constraints()
             if (ci == nullptr || out->driver.port != ctx->id("O"))
                 continue;
             IdString t = ci->type;
-            bool one_to_one = t == t_IBUF || t == t_IBUFG || t == t_BUFG || t == t_BUFGCE || t == t_BUFH ||
-                              t == t_BUFHCE || t == t_BUFMR || t == t_BUFMRCE || t == t_BUFIO;
+            bool one_to_one = t == t_IBUF || t == t_IBUFDS || t == t_IBUFG || t == t_IBUFGDS || t == t_BUFG ||
+                              t == t_BUFGCE || t == t_BUFH || t == t_BUFHCE || t == t_BUFMR || t == t_BUFMRCE ||
+                              t == t_BUFIO;
             if (t == t_BUFR) {
                 std::string div = str_or_default(ci->params, ctx->id("BUFR_DIVIDE"), "BYPASS");
                 one_to_one = div == "BYPASS" || div == "1";

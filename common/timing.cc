@@ -539,7 +539,9 @@ struct Timing
                 period = cc.high.minDelay();
             const ClockConstraint *lc = unrelated_launch(launch.clock, capture);
             if (lc != nullptr)
-                period = std::min(period, (edge == launch.edge) ? lc->period.minDelay() : lc->period.minDelay() / 2);
+                period = std::min(period, (edge == launch.edge)          ? lc->period.minDelay()
+                                          : (launch.edge == RISING_EDGE) ? lc->high.minDelay()
+                                                                         : lc->low.minDelay());
         }
         return period;
     }
@@ -1963,9 +1965,10 @@ void timing_analysis(Context *ctx, bool print_histogram, bool print_fmax, bool p
                               ev_a.c_str(), ev_b.c_str(), ctx->getDelayNS(path.path_delay), passed ? "PASS" : "FAIL",
                               ctx->getDelayNS(path.path_period), what.c_str(), source.c_str(ctx));
             } else if (timing.unrelated_launch(a.clock, b.clock) != nullptr) {
-                std::string what =
-                        path.by_exception ? "requirement set by a timing exception" : "shorter of the two periods";
-                msg = stringf("Max delay %s -> %s: %0.02f ns (%s against a %0.02f ns %s; unrelated clocks)\n",
+                std::string what = path.by_exception    ? "requirement set by a timing exception"
+                                   : (a.edge == b.edge) ? "shorter of the two periods"
+                                                        : "shorter of the two half-cycles";
+                msg = stringf("Max delay %s -> %s: %0.02f ns (%s against a %0.02f ns %s; no derived relation)\n",
                               ev_a.c_str(), ev_b.c_str(), ctx->getDelayNS(path.path_delay), passed ? "PASS" : "FAIL",
                               ctx->getDelayNS(path.path_period), what.c_str());
             } else {
