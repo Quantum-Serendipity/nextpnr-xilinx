@@ -18,13 +18,17 @@ directions of `clk <-> pix_clk` have a 5 ns budget.
 `unrelated.v` has `clk` (10 ns) and `sclk` (25 ns), a BUFG fed by a register on `clk`, so no
 derivation relates them. A crossing between them is graded against the shorter period, 10 ns.
 
-Three more runs reuse those designs with other XDCs:
+Four more runs reuse those designs with other XDCs:
 
 - `top-exc.xdc` adds `set_max_delay 5 -to [get_cells p_shift*]` to `top.v`. The exception equals the
   `b0 -> b1` edge separation, so only a label taken from the exception itself, not from comparing the
   two numbers, can say the requirement came from the exception.
 - `three-mismatch.xdc` sets `pix_clk` to 24 ns, which disagrees with the 25 ns the MMCM derives. The
   derivation is refused with a warning and the crossing falls back to the shorter period, 10 ns.
+- `three-pad.xdc` is `three.xdc` plus an 8 ns `create_clock` on the `clk_i` pad, which disagrees with the
+  10 ns on `clk` and the 25 ns on `pix_clk`. Both derivations from the pad are refused, so `clk` and
+  `pix_clk` must not be related through `clk_i`, even where an earlier pass matched before the pad's own
+  derivation arrived.
 - `unrelated-tight.xdc` sets `sclk` to 0.8 ns and runs under `--router router1`, whose post-route report
   turns a failing verdict into an `ERROR:` line. `sclk` has no path of its own, so the only errors are the
   two crossings and nextpnr exits 1.
@@ -53,6 +57,8 @@ default).
 | top-exc verdict | every `b0 -> b1` max-delay line names the 5.00 ns requirement as set by a timing exception |
 | three-mismatch warning | `o0` refuses the 40.0 MHz derivation because it carries the 41.7 MHz constraint of `pix_clk` |
 | three-mismatch `clk -> pix_clk` | every row has `period_ns` 10, and every max-delay line says no derived relation |
+| three-pad warning | `clk` refuses the 125.0 MHz derived from the 8 ns pad through `gs` |
+| three-pad `clk <-> pix_clk` | every row for each direction has `period_ns` 10, and every max-delay line says no derived relation |
 | unrelated-tight | nextpnr exits 1, the `clk -> sclk` line is an `ERROR:` FAIL against 0.80 ns, and no other `ERROR:` line exists |
 
 Every verdict arm reads all the max-delay reports in the log, the post-place one and the post-route one.

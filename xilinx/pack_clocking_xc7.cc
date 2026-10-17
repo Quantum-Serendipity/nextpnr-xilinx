@@ -728,6 +728,7 @@ void XC7Packer::propagate_clock_constraints()
         ExactFrac shift;
     };
     std::unordered_map<IdString, Derivation> derivation;
+    std::unordered_set<IdString> refused_derivation;
     std::unordered_map<IdString, IdString> carried;
     std::unordered_set<IdString> scaffold;
     auto is_scaffold = [&](NetInfo *n) { return carried.count(n->name) || scaffold.count(n->name); };
@@ -741,22 +742,26 @@ void XC7Packer::propagate_clock_constraints()
         if (to->clkconstr != nullptr) {
             bool mismatch = std::abs(to->clkconstr->period.delay - period) > 1;
             if (user_constrained.count(to->name)) {
-                if (mismatch)
+                if (mismatch) {
                     log_warning("    net '%s' is constrained to %.1f MHz by the XDC; the %.1f MHz derived through "
                                 "'%s' is not applied\n",
                                 to->name.c_str(ctx), MHz(to->clkconstr->period.delay), MHz(period),
                                 ci->name.c_str(ctx));
-                else if (!derivation.count(to->name))
+                    derivation.erase(to->name);
+                    refused_derivation.insert(to->name);
+                } else if (!derivation.count(to->name) && !refused_derivation.count(to->name))
                     derivation[to->name] = Derivation{ci, from, num, den, shift};
                 return;
             }
-            if (carried.count(to->name) && from_scaffold && !derivation.count(to->name)) {
-                if (mismatch)
+            if (carried.count(to->name) && from_scaffold) {
+                if (mismatch) {
                     log_warning("    net '%s' carries the %.1f MHz XDC constraint of net '%s'; the %.1f MHz derived "
                                 "through '%s' is not applied, so the two clocks stay unrelated\n",
                                 to->name.c_str(ctx), MHz(to->clkconstr->period.delay), carried.at(to->name).c_str(ctx),
                                 MHz(period), ci->name.c_str(ctx));
-                else
+                    derivation.erase(to->name);
+                    refused_derivation.insert(to->name);
+                } else if (!derivation.count(to->name) && !refused_derivation.count(to->name))
                     derivation[to->name] = Derivation{ci, from, num, den, shift};
             }
             if (!is_scaffold(to) || from_scaffold)
@@ -775,6 +780,7 @@ void XC7Packer::propagate_clock_constraints()
             log_info("    derived %.1f MHz for net '%s' (through %s '%s')\n", MHz(period), to->name.c_str(ctx),
                      ci->type.c_str(ctx), ci->name.c_str(ctx));
         derivation[to->name] = Derivation{ci, from, num, den, shift};
+        refused_derivation.erase(to->name);
         changed_nets.insert(to->name);
     };
     auto copy_through = [&](CellInfo *ci, const std::string &in, const std::string &out, int64_t num = 1,

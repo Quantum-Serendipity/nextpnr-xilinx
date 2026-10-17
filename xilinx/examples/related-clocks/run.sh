@@ -58,6 +58,7 @@ build three three.xdc
 build unrelated unrelated.xdc
 build top top-exc.xdc top-exc
 build three three-mismatch.xdc three-mismatch
+build three three-pad.xdc three-pad
 build unrelated unrelated-tight.xdc unrelated-tight 1 router1
 
 pair_arm() {
@@ -139,6 +140,17 @@ case $line in
 esac
 pair_arm clk pix_clk 10 three-mismatch
 verdict_arm three-mismatch clk pix_clk "against a 10.00 ns shorter of the two periods; no derived relation"
+
+line=$(grep -m1 "net 'clk' is constrained to .* by the XDC; the .* derived through" "$OUT/three-pad.log")
+case $line in
+    *"net 'clk' is constrained to 100.0 MHz by the XDC; the 125.0 MHz derived through 'gs' is not applied"*)
+        report "PASS three-pad warning: ${line#*Warning: }" ;;
+    *) report "FAIL three-pad warning: '${line#*Warning: }', expected clk to refuse the 125.0 MHz derivation from the pad" ;;
+esac
+pair_arm clk pix_clk 10 three-pad
+pair_arm pix_clk clk 10 three-pad
+verdict_arm three-pad clk pix_clk "against a 10.00 ns shorter of the two periods; no derived relation"
+verdict_arm three-pad pix_clk clk "against a 10.00 ns shorter of the two periods; no derived relation"
 
 rc=$(cat "$OUT/unrelated-tight.rc")
 line=$(grep -m1 -E '^ERROR: Max delay posedge clk +-> posedge sclk *:' "$OUT/unrelated-tight.log")
