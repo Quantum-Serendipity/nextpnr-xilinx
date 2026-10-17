@@ -708,25 +708,52 @@ void XC7Packer::propagate_clock_constraints()
         ExactFrac shift;
     };
     std::unordered_map<IdString, Derivation> derivation;
+    std::unordered_map<IdString, IdString> carried;
+    std::unordered_set<IdString> scaffold;
+    auto is_scaffold = [&](NetInfo *n) { return carried.count(n->name) || scaffold.count(n->name); };
 
     auto set_derived = [&](CellInfo *ci, NetInfo *from, NetInfo *to, double ratio, int64_t num = 0, int64_t den = 0,
                            ExactFrac shift = ExactFrac()) {
         if (from == nullptr || from->clkconstr == nullptr || to == nullptr || ratio <= 0)
             return;
         delay_t period = delay_t(from->clkconstr->period.delay / ratio);
+        bool from_scaffold = is_scaffold(from);
         if (to->clkconstr != nullptr) {
-            if (user_constrained.count(to->name) && std::abs(to->clkconstr->period.delay - period) > 1)
-                log_warning("    net '%s' is constrained to %.1f MHz by the XDC; the %.1f MHz derived through "
-                            "'%s' is not applied\n",
-                            to->name.c_str(ctx), MHz(to->clkconstr->period.delay), MHz(period), ci->name.c_str(ctx));
-            return;
+            bool mismatch = std::abs(to->clkconstr->period.delay - period) > 1;
+            if (user_constrained.count(to->name)) {
+                if (mismatch)
+                    log_warning("    net '%s' is constrained to %.1f MHz by the XDC; the %.1f MHz derived through "
+                                "'%s' is not applied\n",
+                                to->name.c_str(ctx), MHz(to->clkconstr->period.delay), MHz(period),
+                                ci->name.c_str(ctx));
+                else if (!derivation.count(to->name))
+                    derivation[to->name] = Derivation{ci, from, num, den, shift};
+                return;
+            }
+            if (carried.count(to->name) && from_scaffold && !derivation.count(to->name)) {
+                if (mismatch)
+                    log_warning("    net '%s' carries the %.1f MHz XDC constraint of net '%s'; the %.1f MHz derived "
+                                "through '%s' is not applied, so the two clocks stay unrelated\n",
+                                to->name.c_str(ctx), MHz(to->clkconstr->period.delay), carried.at(to->name).c_str(ctx),
+                                MHz(period), ci->name.c_str(ctx));
+                else
+                    derivation[to->name] = Derivation{ci, from, num, den, shift};
+            }
+            if (!is_scaffold(to) || from_scaffold)
+                return;
+            carried.erase(to->name);
+            scaffold.erase(to->name);
+        } else {
+            to->clkconstr = std::unique_ptr<ClockConstraint>(new ClockConstraint);
         }
-        to->clkconstr = std::unique_ptr<ClockConstraint>(new ClockConstraint);
         to->clkconstr->period.delay = period;
         to->clkconstr->high.delay = period / 2;
         to->clkconstr->low.delay = period / 2;
-        log_info("    derived %.1f MHz for net '%s' (through %s '%s')\n", MHz(period), to->name.c_str(ctx),
-                 ci->type.c_str(ctx), ci->name.c_str(ctx));
+        if (from_scaffold)
+            scaffold.insert(to->name);
+        else
+            log_info("    derived %.1f MHz for net '%s' (through %s '%s')\n", MHz(period), to->name.c_str(ctx),
+                     ci->type.c_str(ctx), ci->name.c_str(ctx));
         derivation[to->name] = Derivation{ci, from, num, den, shift};
         changed_nets.insert(to->name);
     };
@@ -757,6 +784,43 @@ void XC7Packer::propagate_clock_constraints()
                    t_BUFR = ctx->id("BUFR"), t_BUFMR = ctx->id("BUFMR"), t_BUFMRCE = ctx->id("BUFMRCE"),
                    t_BUFIO = ctx->id("BUFIO"), t_PLLE2_ADV = ctx->id("PLLE2_ADV"), t_PLLE2_BASE = ctx->id("PLLE2_BASE"),
                    t_MMCME2_ADV = ctx->id("MMCME2_ADV"), t_MMCME2_BASE = ctx->id("MMCME2_BASE");
+
+    {
+        std::vector<IdString> work(user_constrained.begin(), user_constrained.end());
+        std::sort(work.begin(), work.end(),
+                  [&](IdString a, IdString b) { return std::string(a.c_str(ctx)) > std::string(b.c_str(ctx)); });
+        while (!work.empty()) {
+            NetInfo *out = ctx->nets.at(work.back()).get();
+            work.pop_back();
+            CellInfo *ci = out->driver.cell;
+            if (ci == nullptr || out->driver.port != ctx->id("O"))
+                continue;
+            IdString t = ci->type;
+            bool one_to_one = t == t_IBUF || t == t_IBUFDS || t == t_IBUFG || t == t_IBUFGDS || t == t_BUFG ||
+                              t == t_BUFGCE || t == t_BUFH || t == t_BUFHCE || t == t_BUFMR || t == t_BUFMRCE ||
+                              t == t_BUFIO;
+            if (t == t_BUFR) {
+                std::string div = str_or_default(ci->params, ctx->id("BUFR_DIVIDE"), "BYPASS");
+                one_to_one = div == "BYPASS" || div == "1";
+            }
+            if (!one_to_one)
+                continue;
+            NetInfo *in = get_net_or_empty(ci, ctx->id("I"));
+            if (in == nullptr || in->clkconstr != nullptr)
+                continue;
+            in->clkconstr = std::unique_ptr<ClockConstraint>(new ClockConstraint);
+            in->clkconstr->period = out->clkconstr->period;
+            in->clkconstr->high = out->clkconstr->high;
+            in->clkconstr->low = out->clkconstr->low;
+            auto origin = carried.find(out->name);
+            carried[in->name] = (origin == carried.end()) ? out->name : origin->second;
+            changed_nets.insert(in->name);
+            work.push_back(in->name);
+            log_info("    carried the constraint of net '%s' back to net '%s' (through %s '%s'); it relates clocks "
+                     "and is not graded\n",
+                     carried.at(in->name).c_str(ctx), in->name.c_str(ctx), ci->type.c_str(ctx), ci->name.c_str(ctx));
+        }
+    }
 
     int iter = 0;
     const int itermax = 1000;
@@ -868,11 +932,7 @@ void XC7Packer::propagate_clock_constraints()
         if (fnd != relation.end())
             return fnd->second;
         Relation r;
-        if (user_constrained.count(net->name)) {
-            r.source = net;
-            r.num = 1;
-            r.den = 1;
-        } else if (derivation.count(net->name) && !visiting.count(net->name)) {
+        if (derivation.count(net->name) && !visiting.count(net->name)) {
             visiting.insert(net->name);
             const Derivation &d = derivation.at(net->name);
             Relation in = relate(d.from);
@@ -899,12 +959,21 @@ void XC7Packer::propagate_clock_constraints()
             }
             visiting.erase(net->name);
         }
+        if (r.source == nullptr && user_constrained.count(net->name)) {
+            r.source = net;
+            r.num = 1;
+            r.den = 1;
+        } else if (r.source == nullptr && carried.count(net->name)) {
+            r.source = ctx->nets.at(carried.at(net->name)).get();
+            r.num = 1;
+            r.den = 1;
+        }
         relation[net->name] = r;
         return r;
     };
     for (auto &net : ctx->nets) {
         NetInfo *ni = net.second.get();
-        if (ni->clkconstr == nullptr)
+        if (ni->clkconstr == nullptr || is_scaffold(ni))
             continue;
         Relation r = relate(ni);
         if (r.source == nullptr) {
@@ -920,6 +989,9 @@ void XC7Packer::propagate_clock_constraints()
         ni->clkconstr->offset_num = r.offset.n;
         ni->clkconstr->offset_den = r.offset.d;
     }
+    for (auto &net : ctx->nets)
+        if (is_scaffold(net.second.get()))
+            net.second->clkconstr.reset();
 }
 
 NEXTPNR_NAMESPACE_END

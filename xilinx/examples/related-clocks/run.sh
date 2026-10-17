@@ -30,16 +30,20 @@ report() {
 }
 
 build() {
-    local name=$1
-    if ! "$YOSYS" -q -l "$OUT/$name.yosys.log" \
-            -p "read_verilog \"$HERE/$name.v\"; synth_xilinx -flatten -abc9 -arch xc7 -top top; write_json \"$OUT/$name.json\"" \
+    local name=$1 xdc=${2:-related-clocks.xdc} tag=${3:-$1} expect_rc=${4:-0} router=${5:-} rc
+    if ! "$YOSYS" -q -l "$OUT/$tag.yosys.log" \
+            -p "read_verilog \"$HERE/$name.v\"; synth_xilinx -flatten -abc9 -arch xc7 -top top; write_json \"$OUT/$tag.json\"" \
             >/dev/null 2>&1; then
-        echo "FAIL yosys $name"
+        echo "FAIL yosys $tag"
         exit 1
     fi
-    if ! NEXTPNR_SETUP_EXPORT="$OUT/$name.tsv" "$NEXTPNR" --chipdb "$CHIPDB" --xdc "$HERE/related-clocks.xdc" \
-            --json "$OUT/$name.json" --fasm "$OUT/$name.fasm" --log "$OUT/$name.log" -q --seed 1 >/dev/null 2>&1; then
-        echo "FAIL nextpnr place and route $name: $(grep -m1 '^ERROR' "$OUT/$name.log")"
+    NEXTPNR_SETUP_EXPORT="$OUT/$tag.tsv" "$NEXTPNR" --chipdb "$CHIPDB" --xdc "$HERE/$xdc" \
+        --json "$OUT/$tag.json" --fasm "$OUT/$tag.fasm" --log "$OUT/$tag.log" -q --seed 1 \
+        ${router:+--router "$router"} >/dev/null 2>&1
+    rc=$?
+    echo "$rc" > "$OUT/$tag.rc"
+    if [ "$expect_rc" = 0 ] && [ "$rc" != 0 ]; then
+        echo "FAIL nextpnr place and route $tag: $(grep -m1 '^ERROR' "$OUT/$tag.log")"
         exit 1
     fi
 }
@@ -50,14 +54,33 @@ periods() {
 
 build top
 build coincident
+build three three.xdc
+build unrelated unrelated.xdc
+build top top-exc.xdc top-exc
+build three three-mismatch.xdc three-mismatch
+build unrelated unrelated-tight.xdc unrelated-tight 1 router1
 
 pair_arm() {
-    local launch=$1 capture=$2 want=$3 got
-    got=$(periods top "$launch" "$capture")
+    local launch=$1 capture=$2 want=$3 design=${4:-top} got
+    got=$(periods "$design" "$launch" "$capture")
     if [ "$got" = "$want " ]; then
-        report "PASS $launch -> $capture: every row graded against $want ns"
+        report "PASS $design $launch -> $capture: every row graded against $want ns"
     else
-        report "FAIL $launch -> $capture: rows graded against [${got% }] ns, expected $want ns"
+        report "FAIL $design $launch -> $capture: rows graded against [${got% }] ns, expected $want ns"
+    fi
+}
+
+verdict_arm() {
+    local design=$1 launch=$2 capture=$3 want=$4 lines n bad
+    lines=$(grep -E "Max delay posedge $launch +-> posedge $capture *:" "$OUT/$design.log")
+    n=$(printf '%s' "$lines" | grep -c .)
+    bad=$(printf '%s\n' "$lines" | grep -v -F -- "$want" | head -n1)
+    if [ "$n" -gt 0 ] && [ -z "$bad" ]; then
+        report "PASS $design verdict, all $n reports: $(printf '%s\n' "$lines" | tail -n1 | sed 's/^[A-Za-z]*: //')"
+    elif [ "$n" -eq 0 ]; then
+        report "FAIL $design verdict: no '$launch -> $capture' max-delay line"
+    else
+        report "FAIL $design verdict: '$(printf '%s' "$bad" | sed 's/^[A-Za-z]*: //')' does not carry '$want'"
     fi
 }
 
@@ -88,6 +111,42 @@ line=$(grep -m1 'Max delay posedge b1 -> posedge b0:' "$OUT/coincident.log")
 case $line in
     *"against a 4.17 ns edge separation"*) report "PASS coincident cross-domain verdict: ${line#*Info: }" ;;
     *) report "FAIL coincident cross-domain verdict: '${line#*Info: }', expected a 4.17 ns edge separation" ;;
+esac
+
+pair_arm clk pix_clk 5 three
+pair_arm pix_clk clk 5 three
+verdict_arm three clk pix_clk "against a 5.00 ns edge separation; related through 'clk'"
+verdict_arm three pix_clk clk "against a 5.00 ns edge separation; related through 'clk'"
+
+line=$(grep -m1 'Clock domain grading:' "$OUT/three.log")
+case $line in
+    *"grading: 3 constrained, "*"; 0 graded and 0 ungraded with no create_clock"*)
+        report "PASS three population: ${line#*Info: }" ;;
+    *) report "FAIL three population: '${line#*Info: }', expected only the three create_clock nets constrained" ;;
+esac
+
+pair_arm clk sclk 10 unrelated
+pair_arm sclk clk 10 unrelated
+verdict_arm unrelated clk sclk "against a 10.00 ns shorter of the two periods; no derived relation"
+
+verdict_arm top-exc b0 b1 "against a 5.00 ns requirement set by a timing exception; related through 'clk_i'"
+
+line=$(grep -m1 "carries the .* XDC constraint of net 'pix_clk'" "$OUT/three-mismatch.log")
+case $line in
+    *"net 'o0' carries the 41.7 MHz XDC constraint of net 'pix_clk'; the 40.0 MHz derived through 'mmcm' is not applied"*)
+        report "PASS three-mismatch warning: ${line#*Warning: }" ;;
+    *) report "FAIL three-mismatch warning: '${line#*Warning: }', expected o0 to refuse the 40.0 MHz derivation" ;;
+esac
+pair_arm clk pix_clk 10 three-mismatch
+verdict_arm three-mismatch clk pix_clk "against a 10.00 ns shorter of the two periods; no derived relation"
+
+rc=$(cat "$OUT/unrelated-tight.rc")
+line=$(grep -m1 -E '^ERROR: Max delay posedge clk +-> posedge sclk *:' "$OUT/unrelated-tight.log")
+others=$(grep '^ERROR: ' "$OUT/unrelated-tight.log" | grep -v '^ERROR: Max delay ' | head -n1)
+case "$rc|$line|$others" in
+    "1|"*"FAIL against a 0.80 ns shorter of the two periods; no derived relation"*"|")
+        report "PASS unrelated-tight: rc 1, ${line#ERROR: }" ;;
+    *) report "FAIL unrelated-tight: rc $rc, max-delay error '$line', other error '$others'; expected rc 1 from a FAIL against 0.80 ns alone" ;;
 esac
 
 echo "artefacts kept in $OUT"
