@@ -1837,7 +1837,7 @@ void Arch::applyFixedRoutes(const std::string &filename, std::function<void()> r
             for (auto p : getPipsUphill(xmux))
                 avail += std::string(" ") + IdString(wireInfo(getPipSrcWire(p)).name).str(this);
             log_warning("fixed-routes: xMUX %c of %s: no source '%s' (have:%s)\n", lane,
-                        nameOf(net), implied, avail.c_str());
+                        nameOf(net), implied.c_str(), avail.c_str());
         }
         return PipId();
     };
