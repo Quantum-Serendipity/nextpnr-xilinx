@@ -21,7 +21,9 @@
 #include <boost/algorithm/string.hpp>
 #include <boost/algorithm/string/predicate.hpp>
 #include <boost/range/adaptor/reversed.hpp>
+#include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <fstream>
 #include <set>
 #include "log.h"
@@ -1406,18 +1408,12 @@ struct FasmBackend
                     write_bit("LVCMOS15_SSTL15.DRIVE.I16_I_FIXED");
                 else if (iostandard == "LVCMOS18" && (drive == 12 || drive == 8))
                     write_bit("LVCMOS18.DRIVE.I12_I8");
-                // prjxray-db names both patterns as covering DRIVE=12
-                // (I12_I8 and I12_I16), which cannot both be right.  The tie is
-                // broken by the four Vivado-built references in
-                // prjxray-db/artix7/harness/{arty-a7/{swbut,uart,pmod},basys3/swbut}:
-                // across all 35 LVCMOS33 output pads at Vivado's default drive
-                // the pattern is I12_I16, and I12_I8 does not occur once.  So 12
-                // belongs with 16 here, and I12_I8 is left to its other member, 8.
-                else if ((iostandard == "LVCMOS33" && (drive == 16 || drive == 12)) ||
-                         (iostandard == "LVTTL"    && (drive == 16 || drive == 12)))
+                else if (iostandard == "LVCMOS33" && drive == 16)
+                    write_bit("LVCMOS33.DRIVE.I16");
+                else if ((iostandard == "LVCMOS33" && drive == 12) || (iostandard == "LVTTL" && drive == 16))
                     write_bit("LVCMOS33_LVTTL.DRIVE.I12_I16");
                 else if ((iostandard == "LVCMOS33" && drive == 8) ||
-                         (iostandard == "LVTTL"    && drive == 8))
+                         (iostandard == "LVTTL"    && (drive == 8 || drive == 12)))
                     write_bit("LVCMOS33_LVTTL.DRIVE.I12_I8");
                 else if ((iostandard == "LVCMOS33" && drive == 4) ||
                          (iostandard == "LVTTL"    && drive == 4))
@@ -1920,15 +1916,11 @@ struct FasmBackend
             if (!clk_inv) write_bit("ZINV_CLK");
         } else if (ci->type == ctx->id("OLOGICE2_TFF") || ci->type == ctx->id("OLOGICE3_TFF")) {
             // An ODDR on the pad's T input.  The tristate register runs in DDR mode,
-            // SRTYPE has its own bit, INIT is ZINIT_TQ (the library default is 0), T1 and
-            // T2 are not inverted.  The site's clock, edge and ODDR_TDDR.IN_USE bits come
-            // from the output ODDR when there is one; alone, Vivado sets SAME_EDGE
-            // whichever edge the ODDR asks for.
+            // SRTYPE has its own bit, INIT is ZINIT_TQ (the library default is 0).  The site's
+            // clock, edge and ODDR_TDDR.IN_USE bits come from the output ODDR when there is one;
+            // alone, Vivado sets SAME_EDGE whichever edge the ODDR asks for.
             const bool is_d1_inverted = bool_or_default(ci->params, ctx->id("IS_D1_INVERTED"), false);
             const bool is_d2_inverted = bool_or_default(ci->params, ctx->id("IS_D2_INVERTED"), false);
-            if (is_d1_inverted || is_d2_inverted)
-                log_error("%s '%s' drives a tristate input with an inverted D1 or D2, which is not supported\n",
-                          ci->type.c_str(ctx), ctx->nameOf(ci));
 
             write_bit("OSERDES.DATA_RATE_TQ.DDR");
             std::string srtype = str_or_default(ci->params, ctx->id("SRTYPE"), "SYNC");
@@ -1938,8 +1930,8 @@ struct FasmBackend
             auto init = int_or_default(ci->params, ctx->id("INIT"), 0);
             if (init == 0)
                 write_bit("ZINIT_TQ");
-            write_bit("ZINV_T1");
-            write_bit("ZINV_T2");
+            write_bit("ZINV_T1", !is_d1_inverted);
+            write_bit("ZINV_T2", !is_d2_inverted);
 
             const bool output_is_an_oddr = site_bel_is_bound("OUTFF");
             if (output_is_an_oddr) {
@@ -2917,7 +2909,10 @@ struct FasmBackend
     void split_phase(double phase, double divide, bool is_mmcm, int &phasemux, int &delaytime)
     {
         const double phase_normalized = phase < 0 ? phase + 360 : phase;
-        const double eighths = phase_normalized / 360 * divide * 8;
+        const double raw_eighths = phase_normalized / 360 * divide * 8;
+        const double nearest_eighth = std::round(raw_eighths);
+        const bool on_grid = std::fabs(raw_eighths - nearest_eighth) < 1e-6;
+        const double eighths = on_grid ? nearest_eighth : raw_eighths;
         const int phase_eighths = is_mmcm ? int(floor(eighths + 0.5)) : int(floor(eighths));
         phasemux = phase_eighths % 8;
         delaytime = phase_eighths / 8;
@@ -2940,7 +2935,7 @@ struct FasmBackend
         int high = 1, low = 1, phasemux = 0, delaytime = 0, frac = 0;
         bool no_count = false, edge = false;
         std::string divide_attr = name + ((name == "CLKFBOUT") ? "_MULT" : "_DIVIDE");
-        double divide = float_or_default(ci, divide_attr, 1);
+        double divide = float_or_default(ci, divide_attr, name == "CLKFBOUT" ? 5 : 1);
         // Xilinx's documented default for CLKOUT<n>_PHASE/CLKFBOUT_PHASE is 0.0
         // degrees (UG472) -- defaulting to 1 here computed a spurious non-zero
         // PHASE_MUX bit for any counter whose PHASE param the source netlist
@@ -2961,8 +2956,8 @@ struct FasmBackend
             if (name == "CLKOUT1" || name == "CLKFBOUT")
                 frac = floor(divide * 8) - floor(divide) * 8;
             split_counter(divide, duty, high, low, edge);
-            split_phase(phase, divide, false, phasemux, delaytime);
         }
+        split_phase(phase, std::max(divide, 1.0), false, phasemux, delaytime);
         if (used)
             check_divider_grid(ci, "PLLE2_ADV", divide_attr, false);
         check_duty_cycle(ci, "PLLE2_ADV", name, divide, frac, used, duty);
@@ -3122,7 +3117,7 @@ struct FasmBackend
             0x0F0, 0x0F0, 0x0F0, 0x0F0, 0x0F0, 0x0F0, 0x090, 0x090,
             0x090, 0x090, 0x090, 0x090, 0x090, 0x090, 0x090, 0x090,
             0x090, 0x090, 0x090, 0x090, 0x090, 0x090, 0x090};
-        int pll_mult = (int)float_or_default(ci, "CLKFBOUT_MULT", 1);
+        int pll_mult = (int)float_or_default(ci, "CLKFBOUT_MULT", 5);
         if (pll_mult < 2) pll_mult = 2;
         if (pll_mult > 64) pll_mult = 64;
         std::string pll_bw = str_or_default(ci->params, ctx->id("BANDWIDTH"), "OPTIMIZED");
@@ -3143,7 +3138,7 @@ struct FasmBackend
         bool fractional_counter = (name == "CLKFBOUT" || name == "CLKOUT0");
         std::string divide_attr = name + ((name == "CLKFBOUT") ? "_MULT_F" :
                                           (name == "CLKOUT0" ? "_DIVIDE_F" : "_DIVIDE"));
-        double divide = float_or_default(ci, divide_attr, 1);
+        double divide = float_or_default(ci, divide_attr, name == "CLKFBOUT" ? 5 : 1);
         // Xilinx's documented default for CLKOUT<n>_PHASE/CLKFBOUT_PHASE is 0.0
         // degrees (UG472) -- defaulting to 1 here computed a spurious non-zero
         // PHASE_MUX bit for any counter whose PHASE param the source netlist
@@ -3164,8 +3159,8 @@ struct FasmBackend
             if (name == "CLKOUT0" || name == "CLKFBOUT")
                 frac = floor(divide * 8) - floor(divide) * 8;
             split_counter(divide, duty, high, low, edge);
-            split_phase(phase, divide, true, phasemux, delaytime);
         }
+        split_phase(phase, std::max(divide, 1.0), true, phasemux, delaytime);
         if (used)
             check_divider_grid(ci, "MMCME2_ADV", divide_attr, fractional_counter);
         check_duty_cycle(ci, "MMCME2_ADV", name, divide, frac, used, duty);
@@ -3652,10 +3647,10 @@ struct FasmBackend
             const std::string n = name;
             const bool is_used = n == "CLKFBOUT" || get_net_or_empty(ci, ctx->id(n)) != nullptr;
             const double divide = float_or_default(
-                    ci, n + ((n == "CLKFBOUT") ? "_MULT_F" : (n == "CLKOUT0" ? "_DIVIDE_F" : "_DIVIDE")), 1);
+                    ci, n + ((n == "CLKFBOUT") ? "_MULT_F" : (n == "CLKOUT0" ? "_DIVIDE_F" : "_DIVIDE")),
+                    n == "CLKFBOUT" ? 5 : 1);
             int phasemux = 0, delaytime = 0;
-            if (divide > 1)
-                split_phase(clkout_phase(ci, n), divide, true, phasemux, delaytime);
+            split_phase(clkout_phase(ci, n), std::max(divide, 1.0), true, phasemux, delaytime);
             const bool is_fractional_divide = divide != floor(divide);
             const bool is_phase_off_half_cycle = phasemux % 4 != 0;
             if (is_used && (is_fractional_divide || is_phase_off_half_cycle))
@@ -5686,7 +5681,7 @@ void write_gtx_channel(CellInfo *ci)
         if (use_dport) write_bit("USE_DPORT[0]");
 
         auto use_simd = param_choice(ci, "USE_SIMD", {"ONE48", "TWO24", "FOUR12"});
-        if (use_simd == "TWO24")  write_bit("USE_SIMD_FOUR12_TWO24");
+        if (use_simd == "TWO24" || use_simd == "FOUR12") write_bit("USE_SIMD_FOUR12_TWO24");
         if (use_simd == "FOUR12") write_bit("USE_SIMD_FOUR12");
 
         auto dsp_bits48 = [&](const char *pname, uint64_t def) -> std::vector<bool> {
@@ -5723,6 +5718,8 @@ void write_gtx_channel(CellInfo *ci)
         if (sel_mask == "C")              write_bit("SEL_MASK_C");
         if (sel_mask == "ROUNDING_MODE1") write_bit("SEL_MASK_ROUNDING_MODE1");
         if (sel_mask == "ROUNDING_MODE2") write_bit("SEL_MASK_ROUNDING_MODE2");
+
+        param_choice(ci, "SEL_PATTERN", {"PATTERN"});
 
         const bool dport_used =
                 use_dport && param_choice(ci, "USE_MULT", {"MULTIPLY", "DYNAMIC", "NONE"}) != "NONE";
