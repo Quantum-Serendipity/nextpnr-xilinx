@@ -421,11 +421,13 @@ arm_bel_blacklist_fails_closed() {
     printf '%s\n' "$good" >"$OUT/bl-ok.bel"
     printf '%s\nSLICE_X9999Y9999/A6LUT\n' "$good" >"$OUT/bl-miss.bel"
     local tag f
-    for tag in ok missing-file unresolved; do
+    mkdir -p "$OUT/bl-dir.bel"
+    for tag in ok missing-file unresolved directory; do
         case $tag in
             ok) f=$OUT/bl-ok.bel ;;
             missing-file) f=$OUT/bl-absent.bel ;;
             unresolved) f=$OUT/bl-miss.bel ;;
+            directory) f=$OUT/bl-dir.bel ;;
         esac
         rm -f "$OUT/bl-absent.bel"
         NEXTPNR_BEL_BLACKLIST=$f npnr "$OUT/bl-$tag.log" --xdc "$HERE/top.xdc" --json "$OUT/top.json" --no-route --seed 1
@@ -455,6 +457,19 @@ arm_bel_blacklist_fails_closed() {
                     report "PASS bel blacklist with one name matching no bel: refused at rc $rc"
                 else
                     report "FAIL bel blacklist with one name matching no bel: rc $rc, $(grep -o 'reserved .*' "$OUT/bl-$tag.log" | head -1)"
+                fi ;;
+            directory)
+                if [ "$rc" -ne 0 ] && grep -q "^ERROR: NEXTPNR_BEL_BLACKLIST: '.*' is a directory" "$OUT/bl-$tag.log"; then
+                    report "PASS bel blacklist naming a directory: refused at rc $rc"
+                else
+                    report "FAIL bel blacklist naming a directory: rc $rc, $(grep -o 'reserved .*' "$OUT/bl-$tag.log" | head -1)"
+                fi
+                NEXTPNR_BEL_BLACKLIST=$f npnr "$OUT/bl-$tag-route.log" --json "$OUT/placed.json" --no-pack --no-place
+                rc=$?
+                if [ "$rc" -ne 0 ] && grep -q "^ERROR: NEXTPNR_BEL_BLACKLIST: '.*' is a directory" "$OUT/bl-$tag-route.log"; then
+                    report "PASS bel blacklist naming a directory, in a run that does not place: refused at rc $rc"
+                else
+                    report "FAIL bel blacklist naming a directory, in a run that does not place: rc $rc, no refusal"
                 fi ;;
         esac
     done

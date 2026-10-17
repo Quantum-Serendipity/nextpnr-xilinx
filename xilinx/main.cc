@@ -20,6 +20,7 @@
 #ifdef MAIN_EXECUTABLE
 
 #include <algorithm>
+#include <filesystem>
 #include <fstream>
 #include <initializer_list>
 #include "command.h"
@@ -187,6 +188,9 @@ void UspCommandHandler::customAfterLoad(Context *ctx)
                     "static build; an RM build needs its RM cells unplaced in the input netlist.\n",
                     vm.count("no-place") ? " (--no-place with a placed input netlist)" : "");
     if (const char *blf = getenv("NEXTPNR_BEL_BLACKLIST")) {
+        std::error_code ec;
+        if (std::filesystem::is_directory(blf, ec))
+            log_error("NEXTPNR_BEL_BLACKLIST: '%s' is a directory, not a file of bel names\n", blf);
         std::ifstream probe(blf);
         if (!probe)
             log_error("NEXTPNR_BEL_BLACKLIST: cannot open '%s'\n", blf);

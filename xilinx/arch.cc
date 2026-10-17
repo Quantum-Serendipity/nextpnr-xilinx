@@ -195,6 +195,9 @@ void Arch::record_partition_modes()
         const char *v = getenv(name);
         if (v == nullptr)
             return std::string("none");
+        std::error_code ec;
+        if (std::filesystem::is_directory(v, ec))
+            return std::string("directory");
         std::ifstream in(v, std::ios::binary);
         if (!in)
             return std::string("unreadable");
@@ -4763,6 +4766,9 @@ void Arch::load_bel_blacklist() const
     const char *f = getenv("NEXTPNR_BEL_BLACKLIST");
     if (f == nullptr)
         return;
+    std::error_code ec;
+    if (std::filesystem::is_directory(f, ec))
+        log_error("NEXTPNR_BEL_BLACKLIST: '%s' is a directory, not a file of bel names\n", f);
     std::ifstream in(f);
     if (!in)
         log_error("NEXTPNR_BEL_BLACKLIST: cannot open '%s'\n", f);
@@ -4783,6 +4789,8 @@ void Arch::load_bel_blacklist() const
         blacklist_bels.insert((int64_t(b.tile) << 32) | uint32_t(b.index));
         n++;
     }
+    if (in.bad())
+        log_error("NEXTPNR_BEL_BLACKLIST: reading '%s' failed after %d name(s)\n", f, n + miss);
     log_info("bel blacklist: reserved %d bel(s) from %s (%d unresolved)\n", n, f, miss);
     if (miss > 0)
         log_error("NEXTPNR_BEL_BLACKLIST: %d name(s) in '%s' name no bel of this chipdb (first: '%s'); a bel the "
