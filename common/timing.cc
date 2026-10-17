@@ -135,6 +135,7 @@ struct CriticalPath
     delay_t path_delay;
     delay_t path_period;
     double mcp = 1.0; // set_multicycle_path setup factor on the capture register (1 = single-cycle)
+    bool by_exception = false;
 };
 
 typedef std::unordered_map<ClockPair, CriticalPath> CriticalPathMap;
@@ -536,8 +537,21 @@ struct Timing
                 period = cc.low.minDelay();
             else if (edge == FALLING_EDGE)
                 period = cc.high.minDelay();
+            const ClockConstraint *lc = unrelated_launch(launch.clock, capture);
+            if (lc != nullptr)
+                period = std::min(period, (edge == launch.edge) ? lc->period.minDelay() : lc->period.minDelay() / 2);
         }
         return period;
+    }
+
+    const ClockConstraint *unrelated_launch(IdString launch, IdString capture) const
+    {
+        if (launch == capture || launch == async_clock || capture == async_clock)
+            return nullptr;
+        auto li = ctx->nets.find(launch), ci = ctx->nets.find(capture);
+        if (li == ctx->nets.end() || ci == ctx->nets.end() || ci->second->clkconstr == nullptr)
+            return nullptr;
+        return li->second->clkconstr.get();
     }
 
     bool timing_ignored(const NetInfo *net) const
@@ -1093,6 +1107,7 @@ struct Timing
                                     (*crit_path)[clockPair].path_delay = endpoint_arrival;
                                     (*crit_path)[clockPair].path_period = period;
                                     (*crit_path)[clockPair].mcp = this_mcp;
+                                    (*crit_path)[clockPair].by_exception = exc.has_max || this_mcp != 1.0;
                                     (*crit_path)[clockPair].ports.clear();
                                     (*crit_path)[clockPair].ports.push_back(&usr);
                                 }
@@ -1940,18 +1955,24 @@ void timing_analysis(Context *ctx, bool print_histogram, bool print_fmax, bool p
             auto ev_a = format_event(a, start_field_width), ev_b = format_event(b, end_field_width);
             delay_t sep, hold_sep;
             IdString source;
-            if (!timing.related_requirement(a.clock, a.edge, b.clock, b.edge, sep, hold_sep, &source)) {
+            std::string msg;
+            bool passed = path.path_delay <= path.path_period;
+            if (timing.related_requirement(a.clock, a.edge, b.clock, b.edge, sep, hold_sep, &source)) {
+                std::string what = path.by_exception ? "requirement set by a timing exception" : "edge separation";
+                msg = stringf("Max delay %s -> %s: %0.02f ns (%s against a %0.02f ns %s; related through '%s')\n",
+                              ev_a.c_str(), ev_b.c_str(), ctx->getDelayNS(path.path_delay), passed ? "PASS" : "FAIL",
+                              ctx->getDelayNS(path.path_period), what.c_str(), source.c_str(ctx));
+            } else if (timing.unrelated_launch(a.clock, b.clock) != nullptr) {
+                std::string what =
+                        path.by_exception ? "requirement set by a timing exception" : "shorter of the two periods";
+                msg = stringf("Max delay %s -> %s: %0.02f ns (%s against a %0.02f ns %s; unrelated clocks)\n",
+                              ev_a.c_str(), ev_b.c_str(), ctx->getDelayNS(path.path_delay), passed ? "PASS" : "FAIL",
+                              ctx->getDelayNS(path.path_period), what.c_str());
+            } else {
                 log_info("Max delay %s -> %s: %0.02f ns\n", ev_a.c_str(), ev_b.c_str(),
                          ctx->getDelayNS(path.path_delay));
                 continue;
             }
-            bool passed = path.path_delay <= path.path_period;
-            std::string what = path.path_period == sep ? "edge separation" : "requirement set by a timing exception";
-            std::string msg = stringf("Max delay %s -> %s: %0.02f ns (%s against a %0.02f ns %s; related through "
-                                      "'%s')\n",
-                                      ev_a.c_str(), ev_b.c_str(), ctx->getDelayNS(path.path_delay),
-                                      passed ? "PASS" : "FAIL", ctx->getDelayNS(path.path_period), what.c_str(),
-                                      source.c_str(ctx));
             if (!warn_on_failure || passed)
                 log_info("%s", msg.c_str());
             else if (bool_or_default(ctx->settings, ctx->id("timing/allowFail"), false))

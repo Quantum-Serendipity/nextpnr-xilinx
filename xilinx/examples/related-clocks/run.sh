@@ -30,14 +30,14 @@ report() {
 }
 
 build() {
-    local name=$1
+    local name=$1 xdc=${2:-related-clocks.xdc}
     if ! "$YOSYS" -q -l "$OUT/$name.yosys.log" \
             -p "read_verilog \"$HERE/$name.v\"; synth_xilinx -flatten -abc9 -arch xc7 -top top; write_json \"$OUT/$name.json\"" \
             >/dev/null 2>&1; then
         echo "FAIL yosys $name"
         exit 1
     fi
-    if ! NEXTPNR_SETUP_EXPORT="$OUT/$name.tsv" "$NEXTPNR" --chipdb "$CHIPDB" --xdc "$HERE/related-clocks.xdc" \
+    if ! NEXTPNR_SETUP_EXPORT="$OUT/$name.tsv" "$NEXTPNR" --chipdb "$CHIPDB" --xdc "$HERE/$xdc" \
             --json "$OUT/$name.json" --fasm "$OUT/$name.fasm" --log "$OUT/$name.log" -q --seed 1 >/dev/null 2>&1; then
         echo "FAIL nextpnr place and route $name: $(grep -m1 '^ERROR' "$OUT/$name.log")"
         exit 1
@@ -50,15 +50,26 @@ periods() {
 
 build top
 build coincident
+build three three.xdc
+build unrelated unrelated.xdc
 
 pair_arm() {
-    local launch=$1 capture=$2 want=$3 got
-    got=$(periods top "$launch" "$capture")
+    local launch=$1 capture=$2 want=$3 design=${4:-top} got
+    got=$(periods "$design" "$launch" "$capture")
     if [ "$got" = "$want " ]; then
-        report "PASS $launch -> $capture: every row graded against $want ns"
+        report "PASS $design $launch -> $capture: every row graded against $want ns"
     else
-        report "FAIL $launch -> $capture: rows graded against [${got% }] ns, expected $want ns"
+        report "FAIL $design $launch -> $capture: rows graded against [${got% }] ns, expected $want ns"
     fi
+}
+
+verdict_arm() {
+    local design=$1 launch=$2 capture=$3 want=$4 line
+    line=$(grep -m1 -E "Max delay posedge $launch +-> posedge $capture *:" "$OUT/$design.log")
+    case $line in
+        *"$want"*) report "PASS $design verdict: ${line#*Info: }" ;;
+        *) report "FAIL $design verdict: '${line#*Info: }' does not carry '$want'" ;;
+    esac
 }
 
 pair_arm b0 b1 5
@@ -89,6 +100,22 @@ case $line in
     *"against a 4.17 ns edge separation"*) report "PASS coincident cross-domain verdict: ${line#*Info: }" ;;
     *) report "FAIL coincident cross-domain verdict: '${line#*Info: }', expected a 4.17 ns edge separation" ;;
 esac
+
+pair_arm clk pix_clk 5 three
+pair_arm pix_clk clk 5 three
+verdict_arm three clk pix_clk "against a 5.00 ns edge separation; related through 'clk'"
+verdict_arm three pix_clk clk "against a 5.00 ns edge separation; related through 'clk'"
+
+line=$(grep -m1 'Clock domain grading:' "$OUT/three.log")
+case $line in
+    *"grading: 3 constrained, "*"; 0 graded and 0 ungraded with no create_clock"*)
+        report "PASS three population: ${line#*Info: }" ;;
+    *) report "FAIL three population: '${line#*Info: }', expected only the three create_clock nets constrained" ;;
+esac
+
+pair_arm clk sclk 10 unrelated
+pair_arm sclk clk 10 unrelated
+verdict_arm unrelated clk sclk "against a 10.00 ns shorter of the two periods; unrelated clocks"
 
 echo "artefacts kept in $OUT"
 exit "$rc_total"
