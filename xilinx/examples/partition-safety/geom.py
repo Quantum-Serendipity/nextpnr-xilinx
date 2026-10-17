@@ -57,10 +57,7 @@ def count(routes, x0, y0, x1, y1, which):
 def cell_tiles(grid, placed, cell_type):
     with open(placed) as f:
         cells = json.load(f)["modules"]["top"]["cells"]
-    site_xy = {}
-    for t in grid.values():
-        for site in t.get("sites", {}):
-            site_xy[site] = (t["grid_x"], t["grid_y"])
+    site_xy = site_grid(grid)
     for name in sorted(cells):
         c = cells[name]
         if c["type"] != cell_type:
@@ -68,6 +65,81 @@ def cell_tiles(grid, placed, cell_type):
         bel = c["attributes"].get("NEXTPNR_BEL", "")
         x, y = site_xy.get(bel.split("/", 1)[0], (-1, -1))
         print(bel, x, y)
+
+
+def site_grid(grid):
+    site_xy = {}
+    for t in grid.values():
+        for site in t.get("sites", {}):
+            site_xy[site] = (t["grid_x"], t["grid_y"])
+    return site_xy
+
+
+def cell_xy(cells, site_xy):
+    out = {}
+    for name, c in cells.items():
+        bel = c.get("attributes", {}).get("NEXTPNR_BEL", "")
+        if bel:
+            xy = site_xy.get(bel.split("/", 1)[0])
+            if xy is not None:
+                out[name] = xy
+    return out
+
+
+def cell_bbox(grid, placed, cell_types):
+    with open(placed) as f:
+        cells = json.load(f)["modules"]["top"]["cells"]
+    xy = cell_xy({n: c for n, c in cells.items() if c["type"] in cell_types}, site_grid(grid))
+    if not xy:
+        sys.exit("no placed cell of type " + ",".join(cell_types))
+    xs = [p[0] for p in xy.values()]
+    ys = [p[1] for p in xy.values()]
+    print(min(xs), min(ys), max(xs), max(ys))
+
+
+def net_cells(mod):
+    bit_names = {}
+    for name, nn in mod["netnames"].items():
+        for b in nn["bits"]:
+            if isinstance(b, int):
+                bit_names.setdefault(b, set()).add(name)
+    out = {}
+    for cname, c in mod["cells"].items():
+        for bits in c.get("connections", {}).values():
+            for b in bits:
+                for n in bit_names.get(b, ()):
+                    out.setdefault(n, set()).add(cname)
+    return out
+
+
+def touching_nets(placed, cell_types):
+    with open(placed) as f:
+        mod = json.load(f)["modules"]["top"]
+    for n, cs in sorted(net_cells(mod).items()):
+        if n in CONST_NETS:
+            continue
+        if any(mod["cells"][c]["type"] in cell_types for c in cs):
+            print(n)
+
+
+def escaping(grid, placed, routes_path, x0, y0, x1, y1):
+    with open(placed) as f:
+        mod = json.load(f)["modules"]["top"]
+    xy = cell_xy(mod["cells"], site_grid(grid))
+    inside = lambda p: x0 <= p[0] <= x1 and y0 <= p[1] <= y1
+    held = set()
+    for n, cs in net_cells(mod).items():
+        if n in CONST_NETS:
+            continue
+        if any(c in xy and inside(xy[c]) for c in cs):
+            held.add(n)
+    esc_nets = set()
+    out_pips = 0
+    for net, tile, x, y in read_routes(routes_path, grid):
+        if net in held and not inside((x, y)):
+            esc_nets.add(net)
+            out_pips += 1
+    print(len(held), len(esc_nets), out_pips)
 
 
 def unplace(placed, out, cell_types):
@@ -120,6 +192,17 @@ def main():
     p.add_argument("out")
     p.add_argument("bel")
     p.add_argument("strength", type=int)
+    p = sub.add_parser("cell-bbox")
+    p.add_argument("placed")
+    p.add_argument("cell_types", nargs="+")
+    p = sub.add_parser("touching-nets")
+    p.add_argument("placed")
+    p.add_argument("cell_types", nargs="+")
+    p = sub.add_parser("escaping")
+    p.add_argument("placed")
+    p.add_argument("routes")
+    for k in ("x0", "y0", "x1", "y1"):
+        p.add_argument(k, type=int)
     a = ap.parse_args()
     with open(a.tilegrid) as f:
         grid = json.load(f)
@@ -131,6 +214,12 @@ def main():
         count(read_routes(a.routes, grid), a.x0, a.y0, a.x1, a.y1, a.which)
     elif a.cmd == "cell-tiles":
         cell_tiles(grid, a.placed, a.cell_type)
+    elif a.cmd == "cell-bbox":
+        cell_bbox(grid, a.placed, a.cell_types)
+    elif a.cmd == "touching-nets":
+        touching_nets(a.placed, a.cell_types)
+    elif a.cmd == "escaping":
+        escaping(grid, a.placed, a.routes, a.x0, a.y0, a.x1, a.y1)
     elif a.cmd == "unplace":
         unplace(a.placed, a.out, a.cell_types)
     elif a.cmd == "pin":

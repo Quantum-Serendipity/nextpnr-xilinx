@@ -5890,6 +5890,10 @@ void write_gtx_channel(CellInfo *ci)
 
 void Arch::writeFasm(const std::string &filename, bool region_only)
 {
+    if (region_only && roi_active() && partition_nets().empty())
+        log_error("--region-only: the partition rectangle governs no nets, so the out-of-rectangle emission backstop "
+                  "has nothing to check and every net would be cut at the rectangle edge; an RM partial needs an RM "
+                  "cell set, which a placed input netlist cannot supply\n");
     writeFileReplacing(filename, "FASM", [&](std::ostream &out) {
         FasmBackend be(getCtx(), out);
         if (region_only) {

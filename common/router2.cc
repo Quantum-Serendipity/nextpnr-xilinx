@@ -2219,8 +2219,7 @@ struct Router2
         auto rend = std::chrono::high_resolution_clock::now();
         log_info("Router2 time %.02fs\n", std::chrono::duration<float>(rend - rstart).count());
 
-        // router2 has converged to a legal route (the loop above exits only
-        // at overused==0 && archfail==0).  The historical "re-route with
+        // The historical "re-route with
         // router1 to double-check" pass is both redundant AND destructive on
         // a large imported-placement design: router1 rips up router2's result
         // and re-routes from scratch with weaker congestion negotiation, then

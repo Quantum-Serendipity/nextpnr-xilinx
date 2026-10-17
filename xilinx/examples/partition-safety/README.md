@@ -12,7 +12,9 @@ The rectangles are chosen from the base route, so `run.sh` reads prjxray-db's
 `artix7/xc7a100t/tilegrid.json` to turn tile names into grid coordinates. `PRJXRAY_DB` names the
 database root; the default is this fork's `xilinx/external/prjxray-db` submodule. `geom.py` does the
 lookups. The pre-place arms need a nextpnr built with Python. `NPNR_TIMEOUT` bounds each nextpnr run in seconds (default 600). `run.sh` exits non-zero if any arm
-fails and leaves its outputs in `$OUT` (a fresh `mktemp -d` by default).
+fails and leaves its outputs in `$OUT` (a fresh `mktemp -d` by default). `CHIPDB_OTHER` names a second
+chipdb whose pip naming differs from `CHIPDB`'s (another chipdb revision); unset, the arm that needs it
+prints `SKIP` and does not count.
 
 | arm | passes when |
 |---|---|
@@ -32,3 +34,10 @@ fails and leaves its outputs in `$OUT` (a fresh `mktemp -d` by default).
 | pre-place region inside the rectangle | with the fixture's LUTs and FF unplaced (so they are RM) under a rectangle at (20,120)-(120,200), a `--pre-place` hook that confines them to (100,180)-(120,200) is honoured: every one lands inside it |
 | constant ties inside the rectangle | the netlist that hook placed, routed under the same rectangle, exits rc 0 with constant pips inside the rectangle, and the gate's constant census reads 0 crossings |
 | pre-place region reaching outside | the same hook with a region at (0,100)-(30,130), partly outside the rectangle, is refused |
+| `--region-only` over a placed netlist | with a rectangle around the placed logic and `--no-place`, `--region-only` is refused before routing and both outputs are left as they were; `geom.py escaping` reads the netlist and an unfiltered route under the same rectangle and must find nets with a cell inside that bind pips outside, which is what a region-only emission would have cut; that unfiltered route, which has no `--region-only`, is accepted with a warning naming the empty RM cell set |
+| `--region-only` with every RM net exempt | the unplaced logic placed and routed under a rectangle with `NEXTPNR_PARTITION_EXEMPT_NETS` naming every net `geom.py touching-nets` finds on an RM cell is refused at `--fasm` and at `--write-fixed-routes`, each output left as it was |
+| bel blacklist | a file naming one real bel reserves it at rc 0; a path that does not exist is refused in a run that places and in one that does not; a file with a name matching no bel is refused |
+| `NEXTPNR_SKIP_FAILED_ARCS` | routes at rc 0 without a rectangle and is refused under one, with router2 and with router1 (clamp and keepout off); a `router1/skipFailedArcs` setting stored in the input netlist routes at rc 0 without a rectangle and is refused under one |
+| partition modes | a netlist written under a rectangle with `NEXTPNR_PARTITION_CLAMP=off` records the rectangle file's content digest, the rectangle and `clamp=off` in its `partition_modes` setting, and a later run with no partition setting in its environment removes it; the same rectangle under another path and directory gives the same setting and a byte-identical netlist; `NEXTPNR_PARTITION_KEEPOUT_LICENCE`, `NEXTPNR_PARTITION_KEEPOUT_EXEMPT` and `NEXTPNR_EXCLUDE_STAMPED_BBOX` are recorded |
+| `NEXTPNR_LUT_PERM_DROP` | a `--pre-route` hook binds a LUT's A2 net onto the permutation pip from site pin A5 to the free logical A3, which drops that input in the rewrite: unset, the run warns at rc 0; `=fatal`, it is refused and no netlist is written; `=fatal` on the route without the hook is rc 0; a value other than `fatal` or `warn` is refused |
+| fixed-routes chipdb identity | `--write-fixed-routes` writes a `# nextpnr-xilinx chipdb:` line; a file naming another identity is refused with or without a rectangle, both a doctored one and one written by `CHIPDB_OTHER`; a file with index-form lines and no identity line is refused under a rectangle and loads without one |
