@@ -31,7 +31,7 @@ Four more runs reuse those designs with other XDCs:
   derivation arrived.
 - `unrelated-tight.xdc` sets `sclk` to 0.8 ns and runs under `--router router1`, whose post-route report
   turns a failing verdict into an `ERROR:` line. `sclk` has no path of its own, so the only errors are the
-  two crossings and nextpnr exits 1.
+  two crossings and nextpnr exits 1. The same run with `--timing-allow-fail` is `unrelated-tight-allow`.
 
 ```
 CHIPDB=/path/to/xc7a100tfgg484.bin YOSYS=yosys NEXTPNR=/path/to/nextpnr-xilinx ./run.sh
@@ -60,5 +60,6 @@ default).
 | three-pad warning | `clk` refuses the 125.0 MHz derived from the 8 ns pad through `gs` |
 | three-pad `clk <-> pix_clk` | every row for each direction has `period_ns` 10, and every max-delay line says no derived relation |
 | unrelated-tight | nextpnr exits 1, the `clk -> sclk` line is an `ERROR:` FAIL against 0.80 ns, and no other `ERROR:` line exists |
+| unrelated-tight-allow | with `--timing-allow-fail` nextpnr exits 0, the same FAIL prints as a `Warning:` line, and no `ERROR:` line exists |
 
 Every verdict arm reads all the max-delay reports in the log, the post-place one and the post-route one.

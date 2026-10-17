@@ -30,7 +30,7 @@ report() {
 }
 
 build() {
-    local name=$1 xdc=${2:-related-clocks.xdc} tag=${3:-$1} expect_rc=${4:-0} router=${5:-} rc
+    local name=$1 xdc=${2:-related-clocks.xdc} tag=${3:-$1} expect_rc=${4:-0} router=${5:-} allow=${6:-} rc
     if ! "$YOSYS" -q -l "$OUT/$tag.yosys.log" \
             -p "read_verilog \"$HERE/$name.v\"; synth_xilinx -flatten -abc9 -arch xc7 -top top; write_json \"$OUT/$tag.json\"" \
             >/dev/null 2>&1; then
@@ -39,7 +39,7 @@ build() {
     fi
     NEXTPNR_SETUP_EXPORT="$OUT/$tag.tsv" "$NEXTPNR" --chipdb "$CHIPDB" --xdc "$HERE/$xdc" \
         --json "$OUT/$tag.json" --fasm "$OUT/$tag.fasm" --log "$OUT/$tag.log" -q --seed 1 \
-        ${router:+--router "$router"} >/dev/null 2>&1
+        ${router:+--router "$router"} ${allow:+--timing-allow-fail} >/dev/null 2>&1
     rc=$?
     echo "$rc" > "$OUT/$tag.rc"
     if [ "$expect_rc" = 0 ] && [ "$rc" != 0 ]; then
@@ -60,6 +60,7 @@ build top top-exc.xdc top-exc
 build three three-mismatch.xdc three-mismatch
 build three three-pad.xdc three-pad
 build unrelated unrelated-tight.xdc unrelated-tight 1 router1
+build unrelated unrelated-tight.xdc unrelated-tight-allow 0 router1 allow
 
 pair_arm() {
     local launch=$1 capture=$2 want=$3 design=${4:-top} got
@@ -159,6 +160,15 @@ case "$rc|$line|$others" in
     "1|"*"FAIL against a 0.80 ns shorter of the two periods; no derived relation"*"|")
         report "PASS unrelated-tight: rc 1, ${line#ERROR: }" ;;
     *) report "FAIL unrelated-tight: rc $rc, max-delay error '$line', other error '$others'; expected rc 1 from a FAIL against 0.80 ns alone" ;;
+esac
+
+rc=$(cat "$OUT/unrelated-tight-allow.rc")
+line=$(grep -m1 -E '^Warning: Max delay posedge clk +-> posedge sclk *:' "$OUT/unrelated-tight-allow.log")
+errs=$(grep -c '^ERROR: ' "$OUT/unrelated-tight-allow.log")
+case "$rc|$line|$errs" in
+    "0|"*"FAIL against a 0.80 ns shorter of the two periods; no derived relation"*"|0")
+        report "PASS unrelated-tight-allow: rc 0 under --timing-allow-fail, ${line#Warning: }" ;;
+    *) report "FAIL unrelated-tight-allow: rc $rc, max-delay warning '$line', $errs ERROR line(s); expected rc 0 and the FAIL as a Warning" ;;
 esac
 
 echo "artefacts kept in $OUT"
