@@ -107,6 +107,20 @@ if builds mmcm_d1_p90; then
     feature mmcm_d1_p90 'CLKOUT1_CLKOUT2_DELAY_TIME' 'MMCME2_ADV.CLKOUT1_CLKOUT2_DELAY_TIME[5:0] = 6'"'"'b000000'
     feature mmcm_d1_p90 'POWER_REG' 'MMCME2_ADV.POWER_REG_POWER_REG_POWER_REG[15:0] = 16'"'"'b1001100100000000'
 fi
+for d in 0:000:0000000100000000 45:001:1001100100000000 180:100:0000000100000000; do
+    a=mmcm_d1_p${d%%:*}
+    m=${d#*:}
+    if builds "$a"; then
+        feature "$a" 'CLKOUT1_CLKOUT2_NO_COUNT' 'MMCME2_ADV.CLKOUT1_CLKOUT2_NO_COUNT[0]'
+        feature "$a" 'CLKOUT1_CLKOUT1_PHASE_MUX' "MMCME2_ADV.CLKOUT1_CLKOUT1_PHASE_MUX[2:0] = 3'b${m%%:*}"
+        feature "$a" 'POWER_REG' "MMCME2_ADV.POWER_REG_POWER_REG_POWER_REG[15:0] = 16'b${m#*:}"
+    fi
+done
+if builds pll_d1_p90; then
+    feature pll_d1_p90 'CLKOUT1_CLKOUT2_NO_COUNT' 'PLLE2_ADV.CLKOUT1_CLKOUT2_NO_COUNT[0]'
+    feature pll_d1_p90 'CLKOUT1_CLKOUT1_PHASE_MUX' 'PLLE2_ADV.CLKOUT1_CLKOUT1_PHASE_MUX[2:0] = 3'"'"'b010'
+    feature pll_d1_p90 'CLKOUT1_CLKOUT2_DELAY_TIME' 'PLLE2_ADV.CLKOUT1_CLKOUT2_DELAY_TIME[5:0] = 6'"'"'b000000'
+fi
 if builds mmcm_mult_default; then
     feature mmcm_mult_default 'CLKFBOUT_CLKOUT1_(HIGH|LOW)_TIME' 'MMCME2_ADV.CLKFBOUT_CLKOUT1_HIGH_TIME[5:0] = 6'"'"'b000010 MMCME2_ADV.CLKFBOUT_CLKOUT1_LOW_TIME[5:0] = 6'"'"'b000011'
     lines mmcm_mult_default 'CLKFBOUT_CLKOUT2_NO_COUNT' 0
@@ -116,6 +130,8 @@ if builds pll_mult_default; then
     feature pll_mult_default 'CLKFBOUT_CLKOUT1_(HIGH|LOW)_TIME' 'PLLE2_ADV.CLKFBOUT_CLKOUT1_HIGH_TIME[5:0] = 6'"'"'b000010 PLLE2_ADV.CLKFBOUT_CLKOUT1_LOW_TIME[5:0] = 6'"'"'b000011'
     lines pll_mult_default 'CLKFBOUT_CLKOUT2_NO_COUNT' 0
     log_has pll_mult_default 'VCO 1000.0 MHz'
+    feature pll_mult_default 'LKTABLE' 'PLLE2_ADV.LKTABLE[39:0] = 40'"'"'b0111001110111110100011111010010000000001'
+    feature pll_mult_default '\.TABLE\[' 'PLLE2_ADV.TABLE[9:0] = 10'"'"'b0111101100'
 fi
 
 if builds dsp_pattern; then
@@ -133,7 +149,7 @@ refuses dsp_simd_bogus 'USE_SIMD=FOUR'
 if builds dsp_simd_four12; then
     feature dsp_simd_four12 'USE_SIMD' 'DSP48.DSP_0.USE_SIMD_FOUR12 DSP48.DSP_0.USE_SIMD_FOUR12_TWO24'
 fi
-refuses dsp_sel_pattern_c 'SEL_PATTERN=C'
+refuses dsp_sel_pattern_c 'SEL_PATTERN=C. That is a legal DSP48E1 value'
 
 if builds bram_sdp; then
     lines bram_sdp 'EN_ECC' 0

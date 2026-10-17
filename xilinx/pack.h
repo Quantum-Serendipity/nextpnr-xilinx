@@ -249,7 +249,7 @@ struct XC7Packer : public XilinxPacker
     // domain the flops see is analysed against the constraint the design
     // states instead of the --freq default (openXC7/nextpnr-xilinx#155).
     void propagate_clock_constraints();
-    void set_cmt_multiplier_defaults(CellInfo *ci);
+    void apply_cmt_multiplier_defaults();
     void prepare_clocking();
     void pack_plls();
     void pack_gbs();

@@ -1915,10 +1915,6 @@ struct FasmBackend
             auto clk_inv = bool_or_default(ci->params, ctx->id("IS_CLK_INVERTED"));
             if (!clk_inv) write_bit("ZINV_CLK");
         } else if (ci->type == ctx->id("OLOGICE2_TFF") || ci->type == ctx->id("OLOGICE3_TFF")) {
-            // An ODDR on the pad's T input.  The tristate register runs in DDR mode,
-            // SRTYPE has its own bit, INIT is ZINIT_TQ (the library default is 0).  The site's
-            // clock, edge and ODDR_TDDR.IN_USE bits come from the output ODDR when there is one;
-            // alone, Vivado sets SAME_EDGE whichever edge the ODDR asks for.
             const bool is_d1_inverted = bool_or_default(ci->params, ctx->id("IS_D1_INVERTED"), false);
             const bool is_d2_inverted = bool_or_default(ci->params, ctx->id("IS_D2_INVERTED"), false);
 
@@ -2906,6 +2902,20 @@ struct FasmBackend
         return phase;
     }
 
+    static std::string cmt_divide_attr(const std::string &name, bool is_mmcm)
+    {
+        if (name == "CLKFBOUT")
+            return is_mmcm ? "CLKFBOUT_MULT_F" : "CLKFBOUT_MULT";
+        if (is_mmcm && name == "CLKOUT0")
+            return "CLKOUT0_DIVIDE_F";
+        return name + "_DIVIDE";
+    }
+
+    double cmt_divide(CellInfo *ci, const std::string &name, bool is_mmcm)
+    {
+        return float_or_default(ci, cmt_divide_attr(name, is_mmcm), name == "CLKFBOUT" ? 5 : 1);
+    }
+
     void split_phase(double phase, double divide, bool is_mmcm, int &phasemux, int &delaytime)
     {
         const double phase_normalized = phase < 0 ? phase + 360 : phase;
@@ -2934,8 +2944,8 @@ struct FasmBackend
     {
         int high = 1, low = 1, phasemux = 0, delaytime = 0, frac = 0;
         bool no_count = false, edge = false;
-        std::string divide_attr = name + ((name == "CLKFBOUT") ? "_MULT" : "_DIVIDE");
-        double divide = float_or_default(ci, divide_attr, name == "CLKFBOUT" ? 5 : 1);
+        const std::string divide_attr = cmt_divide_attr(name, false);
+        double divide = cmt_divide(ci, name, false);
         // Xilinx's documented default for CLKOUT<n>_PHASE/CLKFBOUT_PHASE is 0.0
         // degrees (UG472) -- defaulting to 1 here computed a spurious non-zero
         // PHASE_MUX bit for any counter whose PHASE param the source netlist
@@ -3117,7 +3127,7 @@ struct FasmBackend
             0x0F0, 0x0F0, 0x0F0, 0x0F0, 0x0F0, 0x0F0, 0x090, 0x090,
             0x090, 0x090, 0x090, 0x090, 0x090, 0x090, 0x090, 0x090,
             0x090, 0x090, 0x090, 0x090, 0x090, 0x090, 0x090};
-        int pll_mult = (int)float_or_default(ci, "CLKFBOUT_MULT", 5);
+        int pll_mult = (int)cmt_divide(ci, "CLKFBOUT", false);
         if (pll_mult < 2) pll_mult = 2;
         if (pll_mult > 64) pll_mult = 64;
         std::string pll_bw = str_or_default(ci->params, ctx->id("BANDWIDTH"), "OPTIMIZED");
@@ -3136,9 +3146,8 @@ struct FasmBackend
         int high = 1, low = 1, phasemux = 0, delaytime = 0, frac = 0;
         bool no_count = false, edge = false;
         bool fractional_counter = (name == "CLKFBOUT" || name == "CLKOUT0");
-        std::string divide_attr = name + ((name == "CLKFBOUT") ? "_MULT_F" :
-                                          (name == "CLKOUT0" ? "_DIVIDE_F" : "_DIVIDE"));
-        double divide = float_or_default(ci, divide_attr, name == "CLKFBOUT" ? 5 : 1);
+        const std::string divide_attr = cmt_divide_attr(name, true);
+        double divide = cmt_divide(ci, name, true);
         // Xilinx's documented default for CLKOUT<n>_PHASE/CLKFBOUT_PHASE is 0.0
         // degrees (UG472) -- defaulting to 1 here computed a spurious non-zero
         // PHASE_MUX bit for any counter whose PHASE param the source netlist
@@ -3344,7 +3353,7 @@ struct FasmBackend
             0b1111111111001111101011111010010000000001UL,
             0b1111111111001111101011111010010000000001UL
         };
-        auto clkfbout_mult = (int)float_or_default(ci, "CLKFBOUT_MULT_F", 5.000);
+        auto clkfbout_mult = (int)cmt_divide(ci, "CLKFBOUT", true);
         // lk_table[] and filter_lookup*[] hold 64 entries and are read at [mult-1].
         // The old pair of tests rejected 0 and >63 but let every NEGATIVE value
         // through, and (int) of an out-of-range double is undefined behaviour that
@@ -3646,9 +3655,7 @@ struct FasmBackend
         for (const char *name : {"CLKFBOUT", "CLKOUT0", "CLKOUT1", "CLKOUT2", "CLKOUT3", "CLKOUT4", "CLKOUT5", "CLKOUT6"}) {
             const std::string n = name;
             const bool is_used = n == "CLKFBOUT" || get_net_or_empty(ci, ctx->id(n)) != nullptr;
-            const double divide = float_or_default(
-                    ci, n + ((n == "CLKFBOUT") ? "_MULT_F" : (n == "CLKOUT0" ? "_DIVIDE_F" : "_DIVIDE")),
-                    n == "CLKFBOUT" ? 5 : 1);
+            const double divide = cmt_divide(ci, n, true);
             int phasemux = 0, delaytime = 0;
             split_phase(clkout_phase(ci, n), std::max(divide, 1.0), true, phasemux, delaytime);
             const bool is_fractional_divide = divide != floor(divide);
@@ -5719,7 +5726,12 @@ void write_gtx_channel(CellInfo *ci)
         if (sel_mask == "ROUNDING_MODE1") write_bit("SEL_MASK_ROUNDING_MODE1");
         if (sel_mask == "ROUNDING_MODE2") write_bit("SEL_MASK_ROUNDING_MODE2");
 
-        param_choice(ci, "SEL_PATTERN", {"PATTERN"});
+        if (param_choice(ci, "SEL_PATTERN", {"PATTERN", "C"}) == "C")
+            log_error("DSP48E1 '%s' at %s has SEL_PATTERN=C. That is a legal DSP48E1 value, but this flow cannot "
+                      "emit it yet: the pinned prjxray-db has no DSP48 row for it. It needs prjxray-db d3405db and "
+                      "the writer change from openXC7 cdd36a11a. Use SEL_PATTERN=PATTERN, or wait "
+                      "for that db bump.\n",
+                      ctx->nameOf(ci), get_tile_name(ci->bel.tile).c_str());
 
         const bool dport_used =
                 use_dport && param_choice(ci, "USE_MULT", {"MULTIPLY", "DYNAMIC", "NONE"}) != "NONE";
