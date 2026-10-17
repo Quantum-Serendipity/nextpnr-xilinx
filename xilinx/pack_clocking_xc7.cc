@@ -36,6 +36,26 @@
 
 NEXTPNR_NAMESPACE_BEGIN
 
+void XC7Packer::apply_cmt_multiplier_defaults()
+{
+    for (auto &cell : ctx->cells) {
+        CellInfo *ci = cell.second.get();
+        const bool is_mmcm = ci->type == ctx->id("MMCME2_BASE") || ci->type == ctx->id("MMCME2_ADV");
+        const bool is_pll = ci->type == ctx->id("PLLE2_BASE") || ci->type == ctx->id("PLLE2_ADV");
+        if (!is_mmcm && !is_pll)
+            continue;
+        auto set_default = [&](const char *param, const Property &value) {
+            if (!ci->params.count(ctx->id(param)))
+                ci->params[ctx->id(param)] = value;
+        };
+        if (is_mmcm)
+            set_default("CLKFBOUT_MULT_F", Property("5.0"));
+        else
+            set_default("CLKFBOUT_MULT", Property(5));
+        set_default("DIVCLK_DIVIDE", Property(1));
+    }
+}
+
 void XC7Packer::prepare_clocking()
 {
     log_info("Preparing clocking...\n");
@@ -864,9 +884,7 @@ void XC7Packer::propagate_clock_constraints()
                     in = get_net_or_empty(ci, ctx->id("CLKIN2"));
                 if (in == nullptr || in->clkconstr == nullptr)
                     continue;
-                double mult = is_mmcm && ci->params.count(ctx->id("CLKFBOUT_MULT_F"))
-                                      ? param_double(ci, "CLKFBOUT_MULT_F", 1.0)
-                                      : param_double(ci, "CLKFBOUT_MULT", 1.0);
+                double mult = param_double(ci, is_mmcm ? "CLKFBOUT_MULT_F" : "CLKFBOUT_MULT", 1.0);
                 double divclk = param_double(ci, "DIVCLK_DIVIDE", 1.0);
                 if (mult <= 0 || divclk <= 0)
                     continue;

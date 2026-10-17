@@ -1551,6 +1551,7 @@ bool Arch::pack()
         packer.ctx = getCtx();
         // Before any cell is transformed: the yosys cell types (IBUF, BUFG,
         // PLLE2_*, MMCME2_*) are what the propagation recognises.
+        packer.apply_cmt_multiplier_defaults();
         packer.propagate_clock_constraints();
         packer.pack_constants();
         packer.pack_inverters();
