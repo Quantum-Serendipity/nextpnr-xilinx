@@ -107,6 +107,7 @@ bool place_single_cell(Context *ctx, CellInfo *cell, bool require_legality)
 {
     bool all_placed = false;
     int iters = 25;
+    std::unordered_set<BelId> tile_invalid;
     while (!all_placed) {
         BelId best_bel = BelId();
         wirelen_t best_wirelen = std::numeric_limits<wirelen_t>::max(),
@@ -118,7 +119,8 @@ bool place_single_cell(Context *ctx, CellInfo *cell, bool require_legality)
         }
         IdString targetType = cell->type;
         for (auto bel : ctx->getBels()) {
-            if (ctx->getBelType(bel) == targetType && (!require_legality || ctx->isValidBelForCell(cell, bel))) {
+            if (ctx->getBelType(bel) == targetType && !tile_invalid.count(bel) &&
+                (!require_legality || ctx->isValidBelForCell(cell, bel))) {
                 if (ctx->checkBelAvail(bel)) {
                     wirelen_t wirelen = get_cell_metric_at_bel(ctx, cell, bel, MetricType::COST);
                     if (iters >= 4)
@@ -172,6 +174,12 @@ bool place_single_cell(Context *ctx, CellInfo *cell, bool require_legality)
             log_info("   placed single cell '%s' at '%s'\n", cell->name.c_str(ctx),
                      ctx->getBelName(best_bel).c_str(ctx));
         ctx->bindBel(best_bel, cell, STRENGTH_WEAK);
+        if (require_legality && all_placed && !ctx->isBelLocationValid(best_bel)) {
+            ctx->unbindBel(best_bel);
+            tile_invalid.insert(best_bel);
+            all_placed = false;
+            continue;
+        }
 
         cell = ripup_target;
     }
@@ -404,7 +412,7 @@ class ConstraintLegaliseWorker
             lockdown_chain(cell);
             return true;
         }
-        if (constraints_satisfied(cell)) {
+        if (constraints_satisfied(cell) && (cell->belStrength >= STRENGTH_STRONG || chain_tiles_valid(cell))) {
             if (cell->constr_children.size() > 0 || cell->constr_x != cell->UNCONSTR ||
                 cell->constr_y != cell->UNCONSTR || cell->constr_z != cell->UNCONSTR) {
                 bind_unplaced_children(cell);
@@ -487,6 +495,30 @@ class ConstraintLegaliseWorker
                             }
                         }
                     }
+                    bool tiles_valid = true;
+                    for (auto cp : solution) {
+                        BelId target = ctx->getBelByLocation(cp.second);
+                        if (ctx->isBelLocationValid(target))
+                            continue;
+                        for (auto bel : ctx->getBelsByTile(cp.second.x, cp.second.y)) {
+                            CellInfo *belCell = ctx->getBoundBelCell(bel);
+                            if (belCell != nullptr && !solution.count(belCell->name) &&
+                                belCell->belStrength < STRENGTH_STRONG) {
+                                ctx->unbindBel(bel);
+                                rippedCells.insert(belCell->name);
+                            }
+                        }
+                        if (!ctx->isBelLocationValid(target))
+                            tiles_valid = false;
+                    }
+                    if (!tiles_valid) {
+                        for (auto cp : solution) {
+                            CellInfo *ci = ctx->cells.at(cp.first).get();
+                            ctx->unbindBel(ci->bel);
+                            rippedCells.erase(cp.first);
+                        }
+                        continue;
+                    }
                     NPNR_ASSERT(constraints_satisfied(cell));
                     return true;
                 }
@@ -498,6 +530,16 @@ class ConstraintLegaliseWorker
 
     // Check if constraints are currently satisfied on a cell and its children
     bool constraints_satisfied(const CellInfo *cell) { return get_constraints_distance(ctx, cell) == 0; }
+
+    bool chain_tiles_valid(const CellInfo *cell)
+    {
+        if (cell->bel == BelId() || !ctx->isBelLocationValid(cell->bel))
+            return false;
+        for (auto child : cell->constr_children)
+            if (!chain_tiles_valid(child))
+                return false;
+        return true;
+    }
 
   public:
     ConstraintLegaliseWorker(Context *ctx) : ctx(ctx){};

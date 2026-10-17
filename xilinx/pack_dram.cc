@@ -35,8 +35,6 @@ NEXTPNR_NAMESPACE_BEGIN
 void XilinxPacker::inherit_timing_exceptions(const CellInfo *src, CellInfo *dst)
 {
     for (const char *name : {"NEXTPNR_TEXC_FROM", "NEXTPNR_TEXC_TO"}) {
-        if (!ctx->idstring_str_to_idx->count(name))
-            continue;
         IdString attr = ctx->id(name);
         auto found = src->attrs.find(attr);
         if (found != src->attrs.end())

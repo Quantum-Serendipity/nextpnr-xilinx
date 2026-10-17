@@ -943,10 +943,8 @@ void XilinxPacker::pack_constants()
         // GND/VCC cell, so the loop further down reties its users to the
         // packer's own constants and erases it.
         for (const char *cn : {"$PACKER_GND_NET", "$PACKER_VCC_NET"}) {
-            if (!ctx->idstring_str_to_idx->count(cn))
-                continue;
-            IdString id = ctx->id(cn);
-            if (ctx->nets.count(id)) {
+            IdString id = ctx->id_if_interned(cn);
+            if (id != IdString() && ctx->nets.count(id)) {
                 log_info("    adopting imported constant net %s (%d user(s))\n", cn,
                          int(ctx->nets.at(id)->users.size()));
                 rename_net(id, ctx->id(std::string(cn) + "$imported"));
@@ -1406,9 +1404,7 @@ void XC7Packer::pack_bram()
             for (auto &a15 : {std::make_pair(ctx->id("ADDRARDADDRL15"), "RAM_EXTENSION_A"),
                               std::make_pair(ctx->id("ADDRBWRADDRL15"), "RAM_EXTENSION_B")}) {
                 IdString p = a15.first;
-                const bool extension_is_named = ctx->idstring_str_to_idx->count(a15.second) != 0;
-                const std::string extension =
-                        extension_is_named ? str_or_default(ci->params, ctx->id(a15.second), "NONE") : "NONE";
+                const std::string extension = str_or_default(ci->params, ctx->id(a15.second), "NONE");
                 const bool port_is_cascaded = extension == "LOWER" || extension == "UPPER";
                 const bool a15_has_a_net = get_net_or_empty(ci, p) != nullptr;
                 if (port_is_cascaded && a15_has_a_net)

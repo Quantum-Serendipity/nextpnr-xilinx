@@ -120,6 +120,10 @@ Arch::Arch(ArchArgs args) : args(args)
     id_slicem_inst = id("SLICEM");
     id_lut5_shfreg = id("LUT_OR_MEM5SHFREG");
     id_lut6_shfreg = id("LUT_OR_MEM6SHFREG");
+    for (const char *name : {"NEXTPNR_TEXC_FROM", "NEXTPNR_TEXC_TO", "NEXTPNR_TIMING_IGNORE", "NEXTPNR_MCP_SETUP",
+                             "RAM_EXTENSION_A", "RAM_EXTENSION_B", "CLKFBOUT_PHASE", "CLKOUT0_PHASE", "CLKOUT1_PHASE",
+                             "CLKOUT2_PHASE", "CLKOUT3_PHASE", "CLKOUT4_PHASE", "CLKOUT5_PHASE", "CLKOUT6_PHASE"})
+        id(name);
     const TimingDataPOD *td = chip_info->timing_data.get();
     for (int t = 0; td != nullptr && t < td->num_tile_types && !chipdb_has_timing_checks; t++) {
         const TileCellTimingPOD &tt = td->tile_cell_timings[t];
@@ -1837,7 +1841,7 @@ void Arch::applyFixedRoutes(const std::string &filename, std::function<void()> r
             for (auto p : getPipsUphill(xmux))
                 avail += std::string(" ") + IdString(wireInfo(getPipSrcWire(p)).name).str(this);
             log_warning("fixed-routes: xMUX %c of %s: no source '%s' (have:%s)\n", lane,
-                        nameOf(net), implied, avail.c_str());
+                        nameOf(net), implied.c_str(), avail.c_str());
         }
         return PipId();
     };

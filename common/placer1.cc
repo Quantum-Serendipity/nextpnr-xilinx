@@ -612,9 +612,6 @@ class SAPlacer
                 all_placed = true;
             }
             ctx->bindBel(best_bel, cell, STRENGTH_WEAK);
-
-            // Back annotate location
-            cell->attrs[ctx->id("BEL")] = ctx->getBelName(cell->bel).str(ctx);
             cell = ripup_target;
         }
     }

@@ -788,6 +788,12 @@ struct BaseCtx
 
     IdString id(const char *s) const { return IdString(this, s); }
 
+    IdString id_if_interned(const std::string &s) const
+    {
+        auto it = idstring_str_to_idx->find(s);
+        return it == idstring_str_to_idx->end() ? IdString() : IdString(it->second);
+    }
+
     Context *getCtx() { return reinterpret_cast<Context *>(this); }
 
     const Context *getCtx() const { return reinterpret_cast<const Context *>(this); }

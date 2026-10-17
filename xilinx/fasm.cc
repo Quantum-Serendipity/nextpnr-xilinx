@@ -96,15 +96,17 @@ struct FasmBackend
         return false;
     }
 
-    // Depth-0 pushes must declare their tile (cur_tile is cleared whenever the
-    // stack empties, so a new prefix context cannot inherit a stale one).  A
-    // push site added later without a cur_tile assignment trips this instead of
-    // silently attributing its lines to the previous tile.
     void push(const std::string &x)
     {
-        if (fasm_ctx.empty())
-            NPNR_ASSERT(cur_tile >= 0);
+        NPNR_ASSERT(!fasm_ctx.empty());
         fasm_ctx.push_back(x);
+    }
+
+    void push_tile(int tile)
+    {
+        NPNR_ASSERT(fasm_ctx.empty() && tile >= 0);
+        cur_tile = tile;
+        fasm_ctx.push_back(get_tile_name(tile));
     }
 
     void pop()
@@ -899,8 +901,7 @@ struct FasmBackend
         if (lts == nullptr)
             return;
 
-        cur_tile = tile;
-        push(tname);
+        push_tile(tile);
         push(get_half_name(half, boost::contains(tname, "CLBLM")));
 
         for (int i = 0; i < 4; i++) {
@@ -1084,8 +1085,7 @@ struct FasmBackend
         if (lts == nullptr)
             return;
 
-        cur_tile = tile;
-        push(tname);
+        push_tile(tile);
         push(get_half_name(half, is_mtile));
 
         BelId bel_in_half =
@@ -1184,8 +1184,7 @@ struct FasmBackend
         if (carry == nullptr)
             return;
 
-        cur_tile = tile;
-        push(tname);
+        push_tile(tile);
         push(get_half_name(half, is_mtile));
 
         // Select the CARRY4 carry-in source.  PRECYINIT.CIN takes the carry
@@ -1337,8 +1336,7 @@ struct FasmBackend
         std::string tile = get_tile_name(pad->bel.tile);
         if (boost::starts_with(tile, "GTP_") || boost::starts_with(tile, "GTX_"))
             return;
-        cur_tile = pad->bel.tile;
-        push(tile);
+        push_tile(pad->bel.tile);
 
         bool is_riob18   = boost::starts_with(tile, "RIOB18_");
         // is_hp_bank covers BOTH RIOB18_ (right) and LIOB18_ (left) — the
@@ -1787,8 +1785,7 @@ struct FasmBackend
     void write_iol_config(CellInfo *ci)
     {
         std::string tile = get_tile_name(ci->bel.tile);
-        cur_tile = ci->bel.tile;
-        push(tile);
+        push_tile(ci->bel.tile);
         bool is_sing     = boost::contains(tile, "_SING_");
         bool is_top_sing = ci->bel.tile < ctx->getHclkForIoi(ci->bel.tile);
 
@@ -2114,8 +2111,7 @@ struct FasmBackend
             }
         }
         for (auto &hclk : ioconfig_by_hclk) {
-            cur_tile = hclk.first;
-            push(get_tile_name(hclk.first));
+            push_tile(hclk.first);
             write_bit("STEPDOWN", hclk.second.stepdown);
             write_bit("VREF.V_675_MV", hclk.second.vref);
             write_bit("ONLY_DIFF_IN_USE", hclk.second.only_diff);
@@ -2184,8 +2180,7 @@ struct FasmBackend
                 }
                 if (chosen.empty() || emitted.count(chosen)) continue;
                 emitted.insert(chosen);
-                cur_tile = chosen_tile;
-                push(chosen);
+                push_tile(chosen_tile);
                 write_bit("IOB_COL_BANK_ACTIVE");
                 write_bit("IOB_COL_OBUF_CASCADE_Y1");
                 pop();
@@ -2235,8 +2230,7 @@ struct FasmBackend
             if (!boost::starts_with(tile_name, "CFG_CENTER_"))
                 continue;
 
-            cur_tile = ci->bel.tile;
-            push(tile_name);
+            push_tile(ci->bel.tile);
             if (ci->type == id_BSCAN) {
                 push("BSCAN");
                 int chain = int_or_default(ci->params, id_JTAG_CHAIN, 1);
@@ -2354,8 +2348,7 @@ struct FasmBackend
         for (auto cell : sorted(ctx->cells)) {
             CellInfo *ci = cell.second;
             if (ci->type == id_BUFGCTRL) {
-                cur_tile = ci->bel.tile;
-                push(get_tile_name(ci->bel.tile));
+                push_tile(ci->bel.tile);
                 auto xy = ctx->getSiteLocInTile(ci->bel);
                 bufgctrl_used_y[ci->bel.tile].insert(xy.y);
                 push("BUFGCTRL.BUFGCTRL_X" + std::to_string(xy.x) + "Y" + std::to_string(xy.y));
@@ -2376,8 +2369,7 @@ struct FasmBackend
                 write_bit("ZINV_S1", !bool_or_default(ci->params, ctx->id("IS_S1_INVERTED")));
                 pop(2);
             } else if (ci->type == id_BUFHCE) {
-                cur_tile = ci->bel.tile;
-                push(get_tile_name(ci->bel.tile));
+                push_tile(ci->bel.tile);
                 auto xy = ctx->getSiteLocInTile(ci->bel);
                 push("BUFHCE.BUFHCE_X" + std::to_string(xy.x) + "Y" + std::to_string(xy.y));
                 write_bit("IN_USE");
@@ -2452,8 +2444,7 @@ struct FasmBackend
 
         for (int tile = 0; tile < int(tt.size()); tile++) {
             std::tie(name, type) = tt.at(tile);
-            cur_tile = tile;
-            push(name);
+            push_tile(tile);
             if (type == "HCLK_L" || type == "HCLK_R" || type == "HCLK_L_BOT_UTURN" || type == "HCLK_R_BOT_UTURN") {
                 auto used_sources = used_wires_starting_with(tile, "HCLK_CK_", true);
                 push("ENABLE_BUFFER");
@@ -2512,8 +2503,7 @@ struct FasmBackend
 
         for (int tile = 0; tile < int(tt.size()); tile++) {
             std::tie(name, type) = tt.at(tile);
-            cur_tile = tile;
-            push(name);
+            push_tile(tile);
             if (type == "CLK_BUFG_REBUF") {
                 for (auto &gclk : all_gclk) {
                     write_bit(gclk + "_ENABLE_ABOVE");
@@ -2710,8 +2700,7 @@ struct FasmBackend
 
     void write_bram_half(int tile, int half, CellInfo *ci)
     {
-        cur_tile = tile;
-        push(get_tile_name(tile));
+        push_tile(tile);
         push("RAMB18_Y" + std::to_string(half));
         if (ci != nullptr) {
             bool is_36 = ci->type == id_RAMB36E1_RAMB36E1;
@@ -3020,8 +3009,7 @@ struct FasmBackend
                       ci->name.c_str(ctx), divide.c_str());
         }
 
-        cur_tile = ci->bel.tile;
-        push(get_tile_name(ci->bel.tile));
+        push_tile(ci->bel.tile);
         push("BUFR_Y" + std::to_string(xy.y));
         write_bit("IN_USE");
         push("BUFR_DIVIDE");
@@ -3039,8 +3027,7 @@ struct FasmBackend
         // y minus the lowest BUFIO y of the tile).
         auto xy = ctx->getSiteLocInTile(ci->bel);
 
-        cur_tile = ci->bel.tile;
-        push(get_tile_name(ci->bel.tile));
+        push_tile(ci->bel.tile);
         push("BUFIO_Y" + std::to_string(xy.y));
         write_bit("IN_USE");
         pop();
@@ -3049,8 +3036,7 @@ struct FasmBackend
 
     void write_pll(CellInfo *ci)
     {
-        cur_tile = ci->bel.tile;
-        push(get_tile_name(ci->bel.tile));
+        push_tile(ci->bel.tile);
         push("PLLE2_ADV");
         write_bit("IN_USE");
         write_bit("ZINV_PWRDWN", bool_or_default(ci->params, ctx->id("IS_PWRDWN_INVERTED"), false));
@@ -3255,8 +3241,7 @@ struct FasmBackend
 
     void write_mmcm(CellInfo *ci)
     {
-        cur_tile = ci->bel.tile;
-        push(get_tile_name(ci->bel.tile));
+        push_tile(ci->bel.tile);
         push("MMCME2_ADV");
         write_bit("IN_USE");
         write_bit("ZINV_PWRDWN", bool_or_default(ci->params, id_IS_PWRDWN_INVERTED, false));
@@ -3702,8 +3687,7 @@ struct FasmBackend
 
     void write_ibufds_gte2(CellInfo * ci)
     {
-        cur_tile = ci->bel.tile;
-        push(get_tile_name(ci->bel.tile));
+        push_tile(ci->bel.tile);
         Loc siteLoc = ctx->getSiteLocInTile(ci->bel);
         push("IBUFDS_GTE2_Y" + std::to_string(siteLoc.y));
         write_bit("IN_USE");
@@ -3720,8 +3704,7 @@ struct FasmBackend
 
     void write_gtp_pll(CellInfo *ci)
     {
-        cur_tile = ci->bel.tile;
-        push(get_tile_name(ci->bel.tile));
+        push_tile(ci->bel.tile);
 
         push("GTPE2_COMMON");
         write_bit("IN_USE");
@@ -3799,8 +3782,7 @@ struct FasmBackend
 
     void write_gtp_channel(CellInfo *ci)
     {
-        cur_tile = ci->bel.tile;
-        push(get_tile_name(ci->bel.tile));
+        push_tile(ci->bel.tile);
         push("GTPE2_CHANNEL");
 
         write_bit("IN_USE");
@@ -4377,8 +4359,7 @@ struct FasmBackend
 
     void write_pcie_2_1(CellInfo *ci)
     {
-        cur_tile = ci->bel.tile;
-        push(get_tile_name(ci->bel.tile));
+        push_tile(ci->bel.tile);
         push("PCIE");
 
         auto write_str_bool = [&](std::string attribute, std::string deflt = "FALSE") {
@@ -5020,8 +5001,7 @@ struct FasmBackend
 
     void write_gtx_pll(CellInfo *ci)
     {
-        cur_tile = ci->bel.tile;
-        push(get_tile_name(ci->bel.tile));
+        push_tile(ci->bel.tile);
 
         push("GTXE2_COMMON");
         write_bit("IN_USE");
@@ -5095,8 +5075,7 @@ struct FasmBackend
 
 void write_gtx_channel(CellInfo *ci)
     {
-        cur_tile = ci->bel.tile;
-        push(get_tile_name(ci->bel.tile));
+        push_tile(ci->bel.tile);
         push("GTXE2_CHANNEL");
 
         write_bit("IN_USE");
@@ -5644,8 +5623,7 @@ void write_gtx_channel(CellInfo *ci)
     {
         auto tile_name = get_tile_name(ci->bel.tile);
         auto tile_side = tile_name.at(4);
-        cur_tile = ci->bel.tile;
-        push(tile_name);
+        push_tile(ci->bel.tile);
         push("DSP48");
         auto xy = ctx->getSiteLocInTile(ci->bel);
         auto dsp = "DSP_" + std::to_string(xy.y);

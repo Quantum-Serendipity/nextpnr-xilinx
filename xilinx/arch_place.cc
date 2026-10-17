@@ -343,8 +343,6 @@ bool Arch::xc7_logic_tile_valid(IdString tileType, LogicTileStatus &lts) const
                 continue;
             any = true;
             // frozen == stamped: bound STRENGTH_USER by the BEL-attr placer.
-            // (A BEL *attribute* is NOT a reliable marker -- place_initial
-            //  back-annotates one onto every nextpnr-placed user cell too.)
             //
             // ---------------------------------------------------------------
             // MERGE CONFLICT RESOLVED HERE, 2026-08-09 (xc7dpr Unit 7.1).
@@ -1288,12 +1286,6 @@ bool Arch::isValidBelForCell(CellInfo *cell, BelId bel) const
     // (Only gates USER cells: an imported BEL-pinned cell is fixed at a
     // Vivado-proven bel -- e.g. a $trt routethru LUT1 deliberately placed at a
     // free 5LUT -- so it is trusted, not re-validated by this heuristic.)
-    // Marker note: at candidate-selection time a STAMPED cell already carries
-    // its JSON BEL attr (but isn't bound yet, so belStrength is still NONE),
-    // whereas a nextpnr-placed USER cell has no BEL attr until place_initial
-    // back-annotates it post-bind.  So the BEL attr is the correct
-    // "is-this-a-frozen-cell" test HERE (unlike the post-placement fast-path,
-    // which must use belStrength because back-annotation pollutes the attr).
     if (cell->type == id_SLICE_LUTX && !cell->attrs.count(id("BEL")) &&
         getBelPinWire(bel, id_A6) == WireId()) {
         // Count CONNECTED input ports directly rather than lutInfo.input_count:
