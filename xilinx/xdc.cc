@@ -18,6 +18,7 @@
  */
 
 #include <cmath>
+#include <cstring>
 #include <functional>
 #include <numeric>
 #include "log.h"
@@ -733,6 +734,18 @@ void Arch::parseXdc(std::istream &in)
         return true;
     };
 
+    auto drives_clock = [&](const NetInfo *ni) {
+        if (ni->clkconstr != nullptr)
+            return true;
+        if (ni->driver.cell == nullptr)
+            return false;
+        const std::string &dt = ni->driver.cell->type.str(this);
+        for (const char *pre : {"BUFG", "BUFH", "BUFR", "BUFIO", "BUFMR"})
+            if (dt.compare(0, std::strlen(pre), pre) == 0)
+                return true;
+        return dt.find("PLL") != std::string::npos || dt.find("MMCM") != std::string::npos;
+    };
+
     auto resolve_clock = [&](const std::string &arg, IdString &out, std::string &err) {
         std::string pat;
         if (!arg.empty() && arg.front() == '[') {
@@ -769,7 +782,7 @@ void Arch::parseXdc(std::istream &in)
                 add(n.first);
         if (found.empty()) {
             for (auto &n : nets)
-                if (is_clocky(n.second.get()) && glob_match(n.first.str(this), pat))
+                if (drives_clock(n.second.get()) && glob_match(n.first.str(this), pat))
                     add(n.first);
             for (auto &gc : generated_clocks)
                 if (glob_match(gc.target.str(this), pat))
@@ -1002,12 +1015,12 @@ void Arch::parseXdc(std::istream &in)
                 fnd = std::prev(v.end());
             }
             if (set_max) {
+                fnd->max_delay = (add && fnd->has_max) ? std::max(fnd->max_delay, value) : value;
                 fnd->has_max = true;
-                fnd->max_delay = value;
             }
             if (set_min) {
+                fnd->min_delay = (add && fnd->has_min) ? std::min(fnd->min_delay, value) : value;
                 fnd->has_min = true;
-                fnd->min_delay = value;
             }
             fnd->source = where;
         }

@@ -1556,6 +1556,7 @@ bool Arch::pack()
         // Before any cell is transformed: the yosys cell types (IBUF, BUFG,
         // PLLE2_*, MMCME2_*) are what the propagation recognises.
         packer.propagate_clock_constraints();
+        check_io_delay_clocks();
         packer.pack_constants();
         packer.pack_inverters();
         packer.pack_io();

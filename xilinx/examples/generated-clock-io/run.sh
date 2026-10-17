@@ -105,7 +105,7 @@ io_row_arm "output delay" full 1 'dout$intcell$OBUF' clk clk_i 7 4 pos
 io_row_arm "input delay on a falling generated clock" full 4 'iopadmap$sd_do' sd_clk clk 6 3 pos
 io_row_arm "output delay to a generated clock at a port" full 1 'sd_di$intcell$OBUF' clk sd_clk 7 6 any
 
-line=$(grep -m1 'Max delay posedge clk_i *-> posedge clk *:' "$OUT/full.log")
+line=$(grep -m1 'Max delay posedge clk_i (input delay) *-> posedge clk *:' "$OUT/full.log")
 case $line in
     *"FAIL against a 10.00 ns edge separation"*) report "PASS input delay verdict: ${line#*Info: }" ;;
     *) report "FAIL input delay verdict: '${line#*Info: }' is not a FAIL against the 10.00 ns separation" ;;
@@ -152,8 +152,9 @@ else
 fi
 
 strict_arm() {
-    local name=$1 why=$2
-    if pnr "strict_$name" --xdc "$HERE/base.xdc" --xdc "$HERE/gen.xdc" --xdc "$HERE/xdc/$name.xdc" --xdc-strict \
+    local name=$1 why=$2 gen=(--xdc "$HERE/gen.xdc")
+    [ "${3:-}" = nogen ] && gen=()
+    if pnr "strict_$name" --xdc "$HERE/base.xdc" "${gen[@]}" --xdc "$HERE/xdc/$name.xdc" --xdc-strict \
             --json "$OUT/top.json" --pack-only; then
         report "FAIL strict $name: --xdc-strict accepted xdc/$name.xdc"
     elif grep -q -F -- "$why" "$OUT/strict_$name.log"; then
@@ -170,6 +171,45 @@ strict_arm duty "duty cycle other than half the period"
 strict_arm clock_typo "clock 'no_such_clk' matched no clock"
 strict_arm min_only "has a -min delay and no -max delay"
 strict_arm no_source "-source: get_pins 'no_such_cell/O' matched 0 cells"
+strict_arm clock_data_pad "clock 'dout' matched no clock"
+strict_arm clock_unconstrained "no clock constraint reaches net 'dclk', which its -clock names" nogen
+
+if NEXTPNR_TIMING_ONLY=1 pnr same_clock --xdc "$HERE/base.xdc" --xdc "$HERE/replay.xdc" --xdc "$HERE/same_clock.xdc" \
+        --json "$OUT/routed.json" --no-pack --no-place --no-route; then
+    io=$(grep -m1 'Max delay posedge clk (input delay) *-> posedge clk *:' "$OUT/same_clock.log")
+    fm=$(grep -m1 "Max frequency for clock *'clk':" "$OUT/same_clock.log")
+    case "$io|$fm" in
+        *"FAIL against a 10.00 ns edge separation"*"|"*PASS*)
+            report "PASS same-clock input delay: graded as its own check (${io#*Info: }), not folded into the Fmax figure (${fm#*Info: })" ;;
+        *) report "FAIL same-clock input delay: IO line '${io#*Info: }', Fmax line '${fm#*Info: }'" ;;
+    esac
+else
+    report "FAIL same-clock input delay: nextpnr exited non-zero: $(grep -m1 '^ERROR' "$OUT/same_clock.log")"
+fi
+
+if NEXTPNR_TIMING_ONLY=1 pnr no_endpoint --xdc "$HERE/base.xdc" --xdc "$HERE/replay.xdc" --xdc "$HERE/no_endpoint.xdc" \
+        --json "$OUT/routed.json" --no-pack --no-place --no-route; then
+    if grep -q "set_input_delay on port 'clk_i' (.*) times nothing: no timed endpoint is reachable" \
+            "$OUT/no_endpoint.log" && grep -q "set_input_delay on port 'din_a': max 1.000 ns, .* timed at" \
+            "$OUT/no_endpoint.log"; then
+        report "PASS no endpoint: an input delay that reaches no timed endpoint is warned, din_a beside it is timed"
+    else
+        report "FAIL no endpoint: no 'times nothing' warning for clk_i, or din_a is not timed"
+    fi
+else
+    report "FAIL no endpoint: nextpnr exited non-zero: $(grep -m1 '^ERROR' "$OUT/no_endpoint.log")"
+fi
+
+if NEXTPNR_TIMING_ONLY=1 pnr add_delay --xdc "$HERE/base.xdc" --xdc "$HERE/replay.xdc" --xdc "$HERE/add_delay.xdc" \
+        --json "$OUT/routed.json" --no-pack --no-place --no-route; then
+    if grep -q "set_input_delay on port 'din_b': max 9.500 ns, min 0.500 ns," "$OUT/add_delay.log"; then
+        report "PASS add_delay: on the same clock edge -add_delay keeps the larger max and the smaller min"
+    else
+        report "FAIL add_delay: $(grep -m1 "set_input_delay on port 'din_b'" "$OUT/add_delay.log")"
+    fi
+else
+    report "FAIL add_delay: nextpnr exited non-zero: $(grep -m1 '^ERROR' "$OUT/add_delay.log")"
+fi
 
 if NEXTPNR_TIMING_ONLY=1 pnr lenient --xdc "$HERE/base.xdc" --xdc "$HERE/replay.xdc" \
         --xdc "$HERE/xdc/reference_pin.xdc" --json "$OUT/routed.json" --no-pack --no-place --no-route; then

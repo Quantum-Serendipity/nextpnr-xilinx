@@ -43,10 +43,11 @@ struct ClockEvent
     IdString clock;
     ClockEdge edge;
     int tag = 0;
+    bool io = false;
 
     bool operator==(const ClockEvent &other) const
     {
-        return clock == other.clock && edge == other.edge && tag == other.tag;
+        return clock == other.clock && edge == other.edge && tag == other.tag && io == other.io;
     }
 };
 
@@ -108,6 +109,8 @@ template <> struct hash<NEXTPNR_NAMESPACE_PREFIX ClockEvent>
         boost::hash_combine(seed, hash<int>()(int(obj.edge)));
         if (obj.tag != 0)
             boost::hash_combine(seed, hash<int>()(obj.tag));
+        if (obj.io)
+            boost::hash_combine(seed, hash<int>()(1));
         return seed;
     }
 };
@@ -223,12 +226,50 @@ struct Timing
         return fnd == io_ends.end() ? nullptr : &fnd->second;
     }
 
+    bool reaches_endpoint(const NetInfo *start) const
+    {
+        std::vector<const NetInfo *> queue{start};
+        std::unordered_set<const NetInfo *> seen{start};
+        while (!queue.empty()) {
+            const NetInfo *net = queue.back();
+            queue.pop_back();
+            for (auto &usr : net->users) {
+                if (io_end_at(usr) != nullptr)
+                    return true;
+                int clocks = 0;
+                TimingPortClass cls = ctx->getPortTimingClass(usr.cell, usr.port, clocks);
+                if (cls == TMG_REGISTER_INPUT || cls == TMG_ENDPOINT)
+                    return true;
+                if (cls != TMG_COMB_INPUT)
+                    continue;
+                for (auto &port : usr.cell->ports) {
+                    if (port.second.type != PORT_OUT || port.second.net == nullptr)
+                        continue;
+                    DelayInfo comb;
+                    if (!ctx->getCellDelay(usr.cell, usr.port, port.first, comb))
+                        continue;
+                    if (seen.insert(port.second.net).second)
+                        queue.push_back(port.second.net);
+                }
+            }
+        }
+        return false;
+    }
+
     void resolve_io_delays()
     {
+        struct Resolved
+        {
+            TimingIoDelay *delay;
+            const NetInfo *pad, *clk;
+            std::vector<std::string> pins;
+            std::vector<const NetInfo *> starts;
+        };
+        std::vector<Resolved> resolved;
         for (auto &d : ctx->timing_io_delays) {
             NetInfo *pad = ctx->getNetByAlias(d.port);
             NetInfo *clk = ctx->getNetByAlias(d.clock);
-            std::vector<std::string> pins;
+            Resolved r{&d, pad, clk, {}, {}};
             auto pad_cell = ctx->cells.find(d.port);
             auto exc_cell = [&](const CellInfo *buffer, IdString attr) {
                 if (attr == IdString() || buffer->attrs.count(attr) || pad_cell == ctx->cells.end())
@@ -245,7 +286,8 @@ struct Timing
                                     clk->name, d.edge, d.max_delay,
                                     d.has_min ? d.min_delay : std::numeric_limits<delay_t>::max() / 4,
                                     exc_cell(usr.cell, texc_from_attr)});
-                            pins.push_back(usr.cell->name.str(ctx) + "." + port.first.str(ctx));
+                            r.pins.push_back(usr.cell->name.str(ctx) + "." + port.first.str(ctx));
+                            r.starts.push_back(port.second.net);
                         }
                 } else if (pad->driver.cell != nullptr) {
                     for (auto &port : pad->driver.cell->ports) {
@@ -255,31 +297,42 @@ struct Timing
                         io_ends[&port.second].push_back(IoEnd{clk->name, d.edge, d.max_delay, d.has_min,
                                                               -d.min_delay,
                                                               exc_cell(pad->driver.cell, texc_to_attr)});
-                        pins.push_back(pad->driver.cell->name.str(ctx) + "." + port.first.str(ctx));
+                        r.pins.push_back(pad->driver.cell->name.str(ctx) + "." + port.first.str(ctx));
                     }
                 }
             }
+            resolved.push_back(std::move(r));
+        }
+        for (auto &r : resolved) {
+            TimingIoDelay &d = *r.delay;
             if (d.reported)
                 continue;
             d.reported = true;
             const char *what = d.input ? "set_input_delay" : "set_output_delay";
-            if (pins.empty()) {
+            if (r.pins.empty()) {
                 log_warning("%s on port '%s' (%s) is not applied: %s\n", what, d.port.c_str(ctx), d.source.c_str(),
-                            pad == nullptr  ? "no net carries the port's name"
-                            : clk == nullptr ? "its clock net no longer exists"
-                            : d.input        ? "nothing buffers the pad into the fabric"
-                                             : "nothing drives the pad");
+                            r.pad == nullptr  ? "no net carries the port's name"
+                            : r.clk == nullptr ? "its clock net no longer exists"
+                            : d.input          ? "nothing buffers the pad into the fabric"
+                                               : "nothing drives the pad");
                 continue;
             }
             std::string list;
-            for (auto &p : pins)
+            for (auto &p : r.pins)
                 list += (list.empty() ? "" : ", ") + p;
+            if (d.input && std::none_of(r.starts.begin(), r.starts.end(),
+                                        [&](const NetInfo *n) { return reaches_endpoint(n); })) {
+                log_warning("%s on port '%s' (%s) times nothing: no timed endpoint is reachable from %s (an input "
+                            "that feeds only IO logic, a clock buffer or an untimed output has no setup check)\n",
+                            what, d.port.c_str(ctx), d.source.c_str(), list.c_str());
+                continue;
+            }
             log_info("%s on port '%s': %s, relative to %s %s, timed at %s\n", what, d.port.c_str(ctx),
                      (d.has_min ? stringf("max %.3f ns, min %.3f ns", ctx->getDelayNS(d.max_delay),
                                           ctx->getDelayNS(d.min_delay))
                                 : stringf("max %.3f ns", ctx->getDelayNS(d.max_delay)))
                              .c_str(),
-                     d.edge == FALLING_EDGE ? "negedge" : "posedge", clk->name.c_str(ctx), list.c_str());
+                     d.edge == FALLING_EDGE ? "negedge" : "posedge", r.clk->name.c_str(ctx), list.c_str());
         }
     }
 
@@ -724,7 +777,7 @@ struct Timing
                     if (io != io_starts.end()) {
                         topographical_order.emplace_back(o->net);
                         for (auto &st : io->second) {
-                            auto &sd = net_data[o->net][ClockEvent{st.clock, st.edge, start_tag(st.exc_cell)}];
+                            auto &sd = net_data[o->net][ClockEvent{st.clock, st.edge, start_tag(st.exc_cell), true}];
                             sd = TimingData{st.max_arrival};
                             sd.min_arrival = st.min_arrival;
                         }
@@ -1175,7 +1228,7 @@ struct Timing
                                     setup_rows.at(fnd->second) = std::make_pair(path_budget, row.str());
                                 }
                             }
-                            ClockEvent dest_ev{clksig, edge, startdomain.first.tag};
+                            ClockEvent dest_ev{clksig, edge, startdomain.first.tag, io_end != nullptr};
                             ClockPair clockPair{startdomain.first, dest_ev};
                             nd.arrival_time[dest_ev] = std::max(nd.arrival_time[dest_ev], endpoint_arrival);
 
@@ -1635,7 +1688,7 @@ std::map<std::string, std::pair<double, double>> compute_clock_fmax(Context *ctx
         for (auto &path : crit_paths) {
             const ClockEvent &a = path.first.start;
             const ClockEvent &b = path.first.end;
-            if (a.clock != b.clock || a.clock == ctx->id("$async$"))
+            if (a.clock != b.clock || a.clock == ctx->id("$async$") || a.io || b.io)
                 continue;
             double Fmax;
             if (a.edge == b.edge)
@@ -1727,12 +1780,14 @@ std::string Context::reportJson()
 
 void timing_analysis(Context *ctx, bool print_histogram, bool print_fmax, bool print_path, bool warn_on_failure)
 {
-    auto format_event = [ctx](const ClockEvent &e, int field_width = 0) {
+    auto format_event = [ctx](const ClockEvent &e, bool is_end, int field_width = 0) {
         std::string value;
         if (e.clock == ctx->id("$async$"))
             value = std::string("<async>");
         else
             value = (e.edge == FALLING_EDGE ? std::string("negedge ") : std::string("posedge ")) + e.clock.str(ctx);
+        if (e.io)
+            value += is_end ? " (output delay)" : " (input delay)";
         if (int(value.length()) < field_width)
             value.insert(value.length(), field_width - int(value.length()), ' ');
         return value;
@@ -1812,7 +1867,7 @@ void timing_analysis(Context *ctx, bool print_histogram, bool print_fmax, bool p
         for (auto path : crit_paths) {
             const ClockEvent &a = path.first.start;
             const ClockEvent &b = path.first.end;
-            if (a.clock != b.clock || a.clock == ctx->id("$async$"))
+            if (a.clock != b.clock || a.clock == ctx->id("$async$") || a.io || b.io)
                 continue;
             double Fmax;
             empty_clocks.erase(a.clock);
@@ -1832,7 +1887,7 @@ void timing_analysis(Context *ctx, bool print_histogram, bool print_fmax, bool p
         for (auto &path : crit_paths) {
             const ClockEvent &a = path.first.start;
             const ClockEvent &b = path.first.end;
-            if (a.clock == b.clock && a.clock != ctx->id("$async$"))
+            if (a.clock == b.clock && a.clock != ctx->id("$async$") && !a.io && !b.io)
                 continue;
             xclock_paths.push_back(path.first);
         }
@@ -1854,9 +1909,11 @@ void timing_analysis(Context *ctx, bool print_histogram, bool print_fmax, bool p
                 return true;
             if (a.end.clock.str(ctx) > b.end.clock.str(ctx))
                 return false;
-            if (a.end.edge < b.end.edge)
-                return true;
-            return false;
+            if (a.end.edge != b.end.edge)
+                return a.end.edge < b.end.edge;
+            if (a.start.io != b.start.io)
+                return b.start.io;
+            return !a.end.io && b.end.io;
         });
     }
 
@@ -1869,7 +1926,7 @@ void timing_analysis(Context *ctx, bool print_histogram, bool print_fmax, bool p
             auto io_start = timing.io_starts.find(front_port.net);
             if (io_start != timing.io_starts.end())
                 for (auto &st : io_start->second)
-                    if (st.clock == clocks.start.clock && st.edge == clocks.start.edge) {
+                    if (clocks.start.io && st.clock == clocks.start.clock && st.edge == clocks.start.edge) {
                         total += st.max_arrival;
                         logic_total += st.max_arrival;
                         log_info("%4.1f %4.1f  Input delay %s.%s\n", ctx->getDelayNS(st.max_arrival),
@@ -1993,8 +2050,8 @@ void timing_analysis(Context *ctx, bool print_histogram, bool print_fmax, bool p
 
         for (auto &xclock : xclock_paths) {
             log_break();
-            std::string start = format_event(xclock.start);
-            std::string end = format_event(xclock.end);
+            std::string start = format_event(xclock.start, false);
+            std::string end = format_event(xclock.end, true);
             log_info("Critical path report for cross-domain path '%s' -> '%s':\n", start.c_str(), end.c_str());
             auto &crit_path = crit_paths.at(xclock).ports;
             print_path_report(xclock, crit_path);
@@ -2073,18 +2130,22 @@ void timing_analysis(Context *ctx, bool print_histogram, bool print_fmax, bool p
 
         int start_field_width = 0, end_field_width = 0;
         for (auto &xclock : xclock_paths) {
-            start_field_width = std::max((int)format_event(xclock.start).length(), start_field_width);
-            end_field_width = std::max((int)format_event(xclock.end).length(), end_field_width);
+            start_field_width = std::max((int)format_event(xclock.start, false).length(), start_field_width);
+            end_field_width = std::max((int)format_event(xclock.end, true).length(), end_field_width);
         }
 
         for (auto &xclock : xclock_paths) {
             const ClockEvent &a = xclock.start;
             const ClockEvent &b = xclock.end;
             auto &path = crit_paths.at(xclock);
-            auto ev_a = format_event(a, start_field_width), ev_b = format_event(b, end_field_width);
+            auto ev_a = format_event(a, false, start_field_width), ev_b = format_event(b, true, end_field_width);
             delay_t sep, hold_sep;
             IdString source;
-            if (!timing.related_requirement(a.clock, a.edge, b.clock, b.edge, sep, hold_sep, &source)) {
+            if (a.clock == b.clock && a.clock != ctx->id("$async$") && ctx->nets.count(a.clock) &&
+                ctx->nets.at(a.clock)->clkconstr != nullptr) {
+                sep = timing.setup_requirement(ClockEvent{a.clock, a.edge}, b.clock, b.edge, 0);
+                source = a.clock;
+            } else if (!timing.related_requirement(a.clock, a.edge, b.clock, b.edge, sep, hold_sep, &source)) {
                 log_info("Max delay %s -> %s: %0.02f ns\n", ev_a.c_str(), ev_b.c_str(),
                          ctx->getDelayNS(path.path_delay));
                 continue;

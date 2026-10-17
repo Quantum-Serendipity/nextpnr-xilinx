@@ -985,7 +985,8 @@ void Arch::report_unapplied_generated_clocks(const std::vector<bool> &applied)
         if (xdc_strict)
             log_error("create_generated_clock '%s' (%s) is not applied: %s [--xdc-strict]\n", gc.name.c_str(),
                       gc.origin.c_str(), why.c_str());
-        log_warning("create_generated_clock '%s' (%s) is not applied: %s\n", gc.name.c_str(), gc.origin.c_str(),
+        else
+            log_warning("create_generated_clock '%s' (%s) is not applied: %s\n", gc.name.c_str(), gc.origin.c_str(),
                     why.c_str());
     }
 }
@@ -1040,6 +1041,29 @@ void Arch::apply_generated_clocks()
         }
     }
     report_unapplied_generated_clocks(applied);
+    check_io_delay_clocks();
+}
+
+void Arch::check_io_delay_clocks()
+{
+    for (auto it = timing_io_delays.begin(); it != timing_io_delays.end();) {
+        NetInfo *clk = getNetByAlias(it->clock);
+        if (clk != nullptr && clk->clkconstr != nullptr) {
+            ++it;
+            continue;
+        }
+        const char *what = it->input ? "set_input_delay" : "set_output_delay";
+        std::string why = clk == nullptr ? "its -clock net '" + it->clock.str(this) + "' no longer exists"
+                                         : "no clock constraint reaches net '" + it->clock.str(this) +
+                                                   "', which its -clock names";
+        if (xdc_strict)
+            log_error("%s on port '%s' (%s) is not applied: %s [--xdc-strict]\n", what, it->port.c_str(this),
+                      it->source.c_str(), why.c_str());
+        else
+            log_warning("%s on port '%s' (%s) is not applied: %s\n", what, it->port.c_str(this),
+                        it->source.c_str(), why.c_str());
+        it = timing_io_delays.erase(it);
+    }
 }
 
 NEXTPNR_NAMESPACE_END
