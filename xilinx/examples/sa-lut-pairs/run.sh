@@ -60,5 +60,29 @@ for placer in sa heap; do
     done
 done
 
+if ! "$YOSYS" -q -l "$OUT/control-yosys.log" \
+        -p "read_verilog \"$HERE/control.v\"; synth_xilinx -flatten -abc9 -arch xc7 -top top; write_json \"$OUT/control.json\"" \
+        >/dev/null 2>&1; then
+    echo "FAIL yosys control"
+    exit 1
+fi
+
+for placer in sa heap; do
+    arm=control-$placer
+    "$NEXTPNR" --chipdb "$CHIPDB" --xdc "$HERE/sa-lut-pairs.xdc" --json "$OUT/control.json" --placer "$placer" \
+        --no-route --write "$OUT/$arm.placed.json" --log "$OUT/$arm.log" -q --seed 1 >/dev/null 2>&1
+    rc=$?
+    if [ "$rc" -ne 0 ]; then
+        report "FAIL $arm: place rc $rc: $(grep -m1 '^ERROR' "$OUT/$arm.log")"
+        continue
+    fi
+    summary=$("$PYTHON" "$HERE/grade.py" "$OUT/$arm.placed.json" 2>&1 | tail -1)
+    if [ "$summary" = "pairs 4 illegal 0" ]; then
+        report "PASS $arm: the grader reads the four LUT6_2 halves as four legal pairs"
+    else
+        report "FAIL $arm: expected 'pairs 4 illegal 0' from four LUT6_2 cells, got '$summary'"
+    fi
+done
+
 echo "artefacts kept in $OUT"
 exit "$rc_total"
