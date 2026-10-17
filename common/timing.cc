@@ -306,7 +306,7 @@ struct Timing
     bool constant_net(const NetInfo *net) const
     {
         if (net->driver.cell == nullptr)
-            return false;
+            return net->undef_const != 0;
         const std::string &type = net->driver.cell->type.str(ctx);
         return type == "PSEUDO_GND" || type == "PSEUDO_VCC" || type == "GND" || type == "VCC";
     }
@@ -334,12 +334,16 @@ struct Timing
             inputs = {"CLKIN1"};
             alternates = {"CLKIN2"};
         }
+        const bool mux = !alternates.empty();
         auto input_net = [&](const char *in) -> const NetInfo * {
             auto fnd = drv->ports.find(ctx->id(in));
             if (fnd == drv->ports.end() || fnd->second.type != PORT_IN || fnd->second.net == nullptr ||
                 constant_net(fnd->second.net))
                 return nullptr;
-            return fnd->second.net;
+            const NetInfo *n = fnd->second.net;
+            if (mux && n->driver.cell == nullptr && n->clkconstr == nullptr)
+                return nullptr;
+            return n;
         };
         for (auto in : inputs)
             if (const NetInfo *n = input_net(in)) {
