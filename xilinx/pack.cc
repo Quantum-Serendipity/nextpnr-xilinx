@@ -1604,6 +1604,7 @@ bool Arch::pack()
                 packer.constrain_regional_clock_sinks(ci);
         }
     } else {
+        apply_generated_clocks();
         USPacker packer;
         packer.ctx = getCtx();
         packer.pack_constants();

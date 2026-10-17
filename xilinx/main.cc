@@ -148,11 +148,13 @@ void UspCommandHandler::customAfterLoad(Context *ctx)
         }
         if (!ctx->xdc_dropped.empty()) {
             for (const auto &d : ctx->xdc_dropped)
-                log_info("XDC target dropped: %s\n", d.c_str());
-            log_error("%d XDC constraint target(s) reference ports or nets that are not in this design, listed "
-                      "above [--xdc-strict]\n",
+                log_info("XDC constraint dropped: %s\n", d.c_str());
+            log_error("%d XDC constraint(s) were not applied, because a target is not in this design or the "
+                      "constraint was refused, listed above [--xdc-strict]\n",
                       int(ctx->xdc_dropped.size()));
         }
+        if (vm.count("no-pack"))
+            ctx->apply_generated_clocks();
     }
     // Snapshot the reconfigurable-module cell set. This has to happen here and
     // nowhere later: customAfterLoad runs after parse_json and

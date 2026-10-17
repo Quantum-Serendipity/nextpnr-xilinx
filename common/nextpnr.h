@@ -554,6 +554,27 @@ struct TimingClockGroups
     std::string source;
 };
 
+struct TimingIoDelay
+{
+    IdString port;
+    bool input = true;
+    IdString clock;
+    ClockEdge edge = RISING_EDGE;
+    bool has_max = false, has_min = false;
+    delay_t max_delay = 0, min_delay = 0;
+    std::string source;
+    bool reported = false;
+};
+
+struct GeneratedClock
+{
+    std::string name;
+    IdString target, source;
+    int64_t num = 1, den = 1;
+    int64_t shift_num = 0, shift_den = 1;
+    std::string origin;
+};
+
 struct TimingConstraintObject
 {
     TimingConstrObjectId id;
@@ -841,6 +862,8 @@ struct BaseCtx
 
     std::vector<TimingException> timing_exceptions;
     std::vector<TimingClockGroups> timing_clock_groups;
+    std::vector<TimingIoDelay> timing_io_delays;
+    std::vector<GeneratedClock> generated_clocks;
     bool timing_ignore_nets = false;
 
     TimingConstrObjectId timingWildcardObject();

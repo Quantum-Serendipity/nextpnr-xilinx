@@ -697,8 +697,21 @@ void XC7Packer::propagate_clock_constraints()
             changed_nets.insert(net.first);
         }
     }
-    if (changed_nets.empty())
+    std::unordered_map<IdString, std::vector<size_t>> gen_by_source;
+    std::unordered_set<IdString> gen_targets;
+    std::vector<bool> gen_applied(ctx->generated_clocks.size(), false);
+    for (size_t i = 0; i < ctx->generated_clocks.size(); i++) {
+        const GeneratedClock &gc = ctx->generated_clocks.at(i);
+        NetInfo *src = ctx->getNetByAlias(gc.source), *tgt = ctx->getNetByAlias(gc.target);
+        if (src == nullptr || tgt == nullptr)
+            continue;
+        gen_by_source[src->name].push_back(i);
+        gen_targets.insert(tgt->name);
+    }
+    if (changed_nets.empty()) {
+        ctx->report_unapplied_generated_clocks(gen_applied);
         return;
+    }
 
     struct Derivation
     {
@@ -713,20 +726,32 @@ void XC7Packer::propagate_clock_constraints()
                            ExactFrac shift = ExactFrac()) {
         if (from == nullptr || from->clkconstr == nullptr || to == nullptr || ratio <= 0)
             return;
+        if (ci != nullptr && gen_targets.count(to->name)) {
+            if (to->clkconstr == nullptr)
+                log_info("    net '%s' is the target of a create_generated_clock; the clock derived through '%s' "
+                         "is not applied\n",
+                         to->name.c_str(ctx), ci->name.c_str(ctx));
+            return;
+        }
         delay_t period = delay_t(from->clkconstr->period.delay / ratio);
         if (to->clkconstr != nullptr) {
             if (user_constrained.count(to->name) && std::abs(to->clkconstr->period.delay - period) > 1)
                 log_warning("    net '%s' is constrained to %.1f MHz by the XDC; the %.1f MHz derived through "
                             "'%s' is not applied\n",
-                            to->name.c_str(ctx), MHz(to->clkconstr->period.delay), MHz(period), ci->name.c_str(ctx));
+                            to->name.c_str(ctx), MHz(to->clkconstr->period.delay), MHz(period),
+                            ci != nullptr ? ci->name.c_str(ctx) : "a create_generated_clock");
             return;
         }
         to->clkconstr = std::unique_ptr<ClockConstraint>(new ClockConstraint);
         to->clkconstr->period.delay = period;
         to->clkconstr->high.delay = period / 2;
         to->clkconstr->low.delay = period / 2;
-        log_info("    derived %.1f MHz for net '%s' (through %s '%s')\n", MHz(period), to->name.c_str(ctx),
-                 ci->type.c_str(ctx), ci->name.c_str(ctx));
+        if (ci != nullptr)
+            log_info("    derived %.1f MHz for net '%s' (through %s '%s')\n", MHz(period), to->name.c_str(ctx),
+                     ci->type.c_str(ctx), ci->name.c_str(ctx));
+        else
+            log_info("    derived %.1f MHz for net '%s' (create_generated_clock from net '%s')\n", MHz(period),
+                     to->name.c_str(ctx), from->name.c_str(ctx));
         derivation[to->name] = Derivation{ci, from, num, den, shift};
         changed_nets.insert(to->name);
     };
@@ -764,10 +789,33 @@ void XC7Packer::propagate_clock_constraints()
     while (!changed_nets.empty() && iter < itermax) {
         ++iter;
         std::unordered_set<IdString> changed_cells;
-        for (auto net : changed_nets)
+        std::vector<size_t> changed_gens;
+        for (auto net : changed_nets) {
             for (auto &user : ctx->nets.at(net)->users)
                 changed_cells.insert(user.cell->name);
+            auto g = gen_by_source.find(net);
+            if (g != gen_by_source.end())
+                changed_gens.insert(changed_gens.end(), g->second.begin(), g->second.end());
+        }
         changed_nets.clear();
+        std::sort(changed_gens.begin(), changed_gens.end());
+        for (size_t gi : changed_gens) {
+            if (gen_applied.at(gi))
+                continue;
+            const GeneratedClock &gc = ctx->generated_clocks.at(gi);
+            NetInfo *src = ctx->getNetByAlias(gc.source), *tgt = ctx->getNetByAlias(gc.target);
+            gen_applied.at(gi) = true;
+            if (tgt->clkconstr != nullptr) {
+                log_warning("    create_generated_clock '%s' (%s): net '%s' already carries a clock constraint, so "
+                            "the generated clock is not applied\n",
+                            gc.name.c_str(), gc.origin.c_str(), tgt->name.c_str(ctx));
+                continue;
+            }
+            set_derived(nullptr, src, tgt, double(gc.num) / double(gc.den), gc.num, gc.den,
+                        ExactFrac::of(gc.shift_num, gc.shift_den));
+            if (tgt->clkconstr != nullptr)
+                tgt->clkconstr->name = gc.name;
+        }
         for (auto cell : sorted(changed_cells)) {
             CellInfo *ci = ctx->cells.at(cell).get();
             IdString t = ci->type;
@@ -851,6 +899,7 @@ void XC7Packer::propagate_clock_constraints()
     if (iter >= itermax)
         log_warning("    clock constraint propagation did not settle after %d iterations (loop through a PLL?)\n",
                     itermax);
+    ctx->report_unapplied_generated_clocks(gen_applied);
 
     struct Relation
     {
@@ -878,7 +927,7 @@ void XC7Packer::propagate_clock_constraints()
             const Derivation &d = derivation.at(net->name);
             Relation in = relate(d.from);
             bool ambiguous = false;
-            if (d.cell->type == t_BUFGCTRL) {
+            if (d.cell != nullptr && d.cell->type == t_BUFGCTRL) {
                 auto constant = [&](NetInfo *n) {
                     if (n->driver.cell == nullptr)
                         return false;
@@ -921,6 +970,76 @@ void XC7Packer::propagate_clock_constraints()
         ni->clkconstr->offset_num = r.offset.n;
         ni->clkconstr->offset_den = r.offset.d;
     }
+}
+
+void Arch::report_unapplied_generated_clocks(const std::vector<bool> &applied)
+{
+    for (size_t i = 0; i < generated_clocks.size(); i++) {
+        if (applied.at(i))
+            continue;
+        const GeneratedClock &gc = generated_clocks.at(i);
+        NetInfo *src = getNetByAlias(gc.source), *tgt = getNetByAlias(gc.target);
+        std::string why = src == nullptr   ? "its source net '" + gc.source.str(this) + "' no longer exists"
+                          : tgt == nullptr ? "its target net '" + gc.target.str(this) + "' no longer exists"
+                                           : "no clock constraint reaches its source net '" + gc.source.str(this) + "'";
+        if (xdc_strict)
+            log_error("create_generated_clock '%s' (%s) is not applied: %s [--xdc-strict]\n", gc.name.c_str(),
+                      gc.origin.c_str(), why.c_str());
+        log_warning("create_generated_clock '%s' (%s) is not applied: %s\n", gc.name.c_str(), gc.origin.c_str(),
+                    why.c_str());
+    }
+}
+
+void Arch::apply_generated_clocks()
+{
+    std::vector<bool> applied(generated_clocks.size(), false);
+    bool progress = true;
+    while (progress) {
+        progress = false;
+        for (size_t i = 0; i < generated_clocks.size(); i++) {
+            if (applied.at(i))
+                continue;
+            const GeneratedClock &gc = generated_clocks.at(i);
+            NetInfo *src = getNetByAlias(gc.source), *tgt = getNetByAlias(gc.target);
+            if (src == nullptr || tgt == nullptr || src->clkconstr == nullptr)
+                continue;
+            applied.at(i) = true;
+            progress = true;
+            if (tgt->clkconstr != nullptr) {
+                log_warning("create_generated_clock '%s' (%s): net '%s' already carries a clock constraint, so the "
+                            "generated clock is not applied\n",
+                            gc.name.c_str(), gc.origin.c_str(), tgt->name.c_str(this));
+                continue;
+            }
+            ClockConstraint &sc = *src->clkconstr;
+            if (sc.source == IdString() || sc.source_num <= 0 || sc.source_den <= 0 || sc.offset_den <= 0) {
+                sc.source = src->name;
+                sc.source_num = 1;
+                sc.source_den = 1;
+                sc.offset_num = 0;
+                sc.offset_den = 1;
+            }
+            ExactFrac offset = ExactFrac::of(sc.offset_num, sc.offset_den) +
+                               ExactFrac::of(gc.shift_num, gc.shift_den) * ExactFrac::of(sc.source_den, sc.source_num);
+            ExactFrac ratio = ExactFrac::of(sc.source_num, sc.source_den) * ExactFrac::of(gc.num, gc.den);
+            delay_t period = delay_t(sc.period.delay / (double(gc.num) / double(gc.den)));
+            tgt->clkconstr = std::unique_ptr<ClockConstraint>(new ClockConstraint);
+            tgt->clkconstr->period.delay = period;
+            tgt->clkconstr->high.delay = period / 2;
+            tgt->clkconstr->low.delay = period / 2;
+            tgt->clkconstr->name = gc.name;
+            if (offset.ok && ratio.ok) {
+                tgt->clkconstr->source = sc.source;
+                tgt->clkconstr->source_num = ratio.n;
+                tgt->clkconstr->source_den = ratio.d;
+                tgt->clkconstr->offset_num = offset.n;
+                tgt->clkconstr->offset_den = offset.d;
+            }
+            log_info("create_generated_clock '%s': %.1f MHz on net '%s' from net '%s'\n", gc.name.c_str(),
+                     1000.0 / getDelayNS(period), tgt->name.c_str(this), src->name.c_str(this));
+        }
+    }
+    report_unapplied_generated_clocks(applied);
 }
 
 NEXTPNR_NAMESPACE_END

@@ -1,0 +1,8 @@
+set_input_delay -clock sysclk -max 1.000 [get_ports din_a]
+set_input_delay -clock sysclk -min 0.500 [get_ports din_a]
+set_input_delay -clock [get_clocks sysclk] -max 9.500 [get_ports din_b]
+set_output_delay -clock sysclk -max 4.000 [get_ports dout]
+set_input_delay -clock sck -clock_fall -max 3.000 [get_ports sd_do]
+set_input_delay -clock sck -clock_fall -min 0.000 [get_ports sd_do]
+set_output_delay -clock sck -max 6.000 [get_ports sd_di]
+set_output_delay -clock sck -min -2.000 [get_ports sd_di]
