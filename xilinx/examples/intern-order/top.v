@@ -20,5 +20,8 @@ module top (
         inert_b <= acc[7:0] ^ prod[15:8];
     end
 
-    assign led = inert_b ^ {7'b0, inert_a};
+    wire mcp_q;
+    (* keep *) FDRE mcp_dst (.C(clk_i), .CE(1'b1), .R(1'b0), .D(lfsr[3] ^ lfsr[9]), .Q(mcp_q));
+
+    assign led = inert_b ^ {6'b0, mcp_q, inert_a};
 endmodule

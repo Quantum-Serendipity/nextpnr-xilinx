@@ -36,7 +36,7 @@ if ! "$YOSYS" -q -l "$OUT/yosys.log" \
     exit 1
 fi
 
-for arm in base base_again inert; do
+for arm in base base_again inert mcp spare; do
     xdc=$arm
     [ "$arm" = base_again ] && xdc=base
     if ! "$NEXTPNR" --chipdb "$CHIPDB" --xdc "$HERE/$xdc.xdc" --json "$OUT/top.json" --fasm "$OUT/$arm.fasm" \
@@ -58,12 +58,31 @@ else
     report "FAIL inert: the log does not show the set_false_path matching inert_a and inert_b"
 fi
 
-n=$(diff "$OUT/base.fasm" "$OUT/inert.fasm" | grep -c '^[<>]')
-if [ "$n" -eq 0 ]; then
-    report "PASS inert: a set_false_path between two unconnected registers leaves the FASM unchanged"
+if grep -q "set_multicycle_path: setup multicycle 1 tagged on 1 cells matching 'mcp_dst'" "$OUT/mcp.log"; then
+    report "PASS mcp: the factor-1 set_multicycle_path tagged mcp_dst"
 else
-    report "FAIL inert: a set_false_path between two unconnected registers changes $n FASM line(s)"
+    report "FAIL mcp: the log does not show the set_multicycle_path tagging mcp_dst"
 fi
+
+if grep -q "2 XDC constraint target(s) reference ports or nets that are not in this design" "$OUT/spare.log" &&
+        grep -q "set_false_path: -through matched no net" "$OUT/spare.log"; then
+    report "PASS spare: the absent port, the absent clock net and the -through pattern were all read as matching nothing"
+else
+    report "FAIL spare: the log does not show the three absent targets refused"
+fi
+
+same_fasm() {
+    local n
+    n=$(diff "$OUT/base.fasm" "$OUT/$1.fasm" | grep -c '^[<>]')
+    if [ "$n" -eq 0 ]; then
+        report "PASS $1: $2 leaves the FASM unchanged"
+    else
+        report "FAIL $1: $2 changes $n FASM line(s)"
+    fi
+}
+same_fasm inert "a set_false_path between two unconnected registers"
+same_fasm mcp "a factor-1 set_multicycle_path"
+same_fasm spare "constraints naming a port, a net and a net pattern absent from the design"
 
 echo "artefacts kept in $OUT"
 exit "$rc_total"

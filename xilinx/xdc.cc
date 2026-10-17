@@ -113,11 +113,12 @@ void Arch::parseXdc(std::istream &in)
             log_warning("set_property: target %s not supported (on line %d)\n", split.front().c_str(), lineno);
         if (split.size() < 2)
             log_error("failed to parse target (on line %d)\n", lineno);
-        IdString cellname = id(strip_quotes(split_name));
+        const std::string target_name = strip_quotes(split_name);
+        IdString cellname = id_if_interned(target_name);
         if (!cells.count(cellname)) {
-            std::string base = debus_zero(strip_quotes(split_name));
-            if (!base.empty() && cells.count(id(base)))
-                cellname = id(base);
+            std::string base = debus_zero(target_name);
+            if (!base.empty() && cells.count(id_if_interned(base)))
+                cellname = id_if_interned(base);
         }
         if (cells.count(cellname))
             tgt_cells.push_back(cells.at(cellname).get());
@@ -129,10 +130,10 @@ void Arch::parseXdc(std::istream &in)
             missing_targets++;
             if (xdc_strict)
                 xdc_dropped.push_back(stringf("%s line %d: %s: no cell named '%s'", xdc_file.c_str(), lineno,
-                                              split.front().c_str(), cellname.c_str(this)));
+                                              split.front().c_str(), target_name.c_str()));
             else if (getCtx()->verbose)
                 log_info("%s: no cell named '%s' (on line %d) - this target is ignored\n", split.front().c_str(),
-                         cellname.c_str(this), lineno);
+                         target_name.c_str(), lineno);
         }
         return tgt_cells;
     };
@@ -150,12 +151,12 @@ void Arch::parseXdc(std::istream &in)
             log_error("targets other than 'get_ports' or 'get_nets' are not supported (on line %d)\n", lineno);
         if (split.size() < 2)
             log_error("failed to parse target (on line %d)\n", lineno);
-        IdString netname = id(strip_quotes(split_name));
-        NetInfo *maybe_net = getNetByAlias(netname);
+        const std::string target_name = strip_quotes(split_name);
+        NetInfo *maybe_net = getNetByAlias(id_if_interned(target_name));
         if (maybe_net == nullptr) {
-            std::string base = debus_zero(strip_quotes(split_name));
+            std::string base = debus_zero(target_name);
             if (!base.empty())
-                maybe_net = getNetByAlias(id(base));
+                maybe_net = getNetByAlias(id_if_interned(base));
         }
         if (maybe_net != nullptr)
             tgt_nets.push_back(maybe_net);
@@ -163,10 +164,10 @@ void Arch::parseXdc(std::istream &in)
             missing_targets++;
             if (xdc_strict)
                 xdc_dropped.push_back(stringf("%s line %d: %s: no net or port named '%s'", xdc_file.c_str(), lineno,
-                                              split.front().c_str(), netname.c_str(this)));
+                                              split.front().c_str(), target_name.c_str()));
             else if (getCtx()->verbose)
                 log_info("%s: no net or port named '%s' (on line %d) - this target is ignored\n",
-                         split.front().c_str(), netname.c_str(this), lineno);
+                         split.front().c_str(), target_name.c_str(), lineno);
         }
         return tgt_nets;
     };
@@ -423,7 +424,7 @@ void Arch::parseXdc(std::istream &in)
         } else if (qcmd == "get_nets") {
             sel.has_nets = true;
             for (auto &p : pats) {
-                NetInfo *exact = getNetByAlias(id(p));
+                NetInfo *exact = getNetByAlias(id_if_interned(p));
                 if (exact != nullptr) {
                     if (std::find(sel.nets.begin(), sel.nets.end(), exact) == sel.nets.end())
                         sel.nets.push_back(exact);
