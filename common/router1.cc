@@ -1151,7 +1151,9 @@ bool router1(Context *ctx, const Router1Cfg &cfg)
                 last_arcs_with_ripup = router.arcs_with_ripup;
                 last_arcs_without_ripup = router.arcs_without_ripup;
                 ctx->yield();
+#ifndef NDEBUG
                 router.check();
+#endif
             }
 
             if (ctx->debug)

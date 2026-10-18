@@ -37,13 +37,64 @@ if ! "$YOSYS" -q -l "$OUT/yosys.log" \
 fi
 
 "$NEXTPNR" --chipdb "$CHIPDB" --xdc "$HERE/top.xdc" --json "$OUT/top.json" --router router1 \
-    --fasm "$OUT/clean.fasm" --log "$OUT/clean.log" -q --seed 1 >/dev/null 2>&1
+    --post-route "$HERE/locked.py" --fasm "$OUT/clean.fasm" --log "$OUT/clean.log" -q --seed 1 >"$OUT/clean.stdout" 2>&1
 rc=$?
 if [ "$rc" -eq 0 ] && grep -q '^Info: Routing complete' "$OUT/clean.log" &&
-        ! grep -q 'checkRoutedDesign FAIL' "$OUT/clean.log" && [ -s "$OUT/clean.fasm" ]; then
-    report "PASS clean: router1 routes the design, the post-route check accepts it, rc 0"
+        ! grep -q 'checkRoutedDesign FAIL' "$OUT/clean.log" && [ -s "$OUT/clean.fasm" ] &&
+        grep -q "^Info:     routing clock 'clk'" "$OUT/clean.log" &&
+        grep -qE '^locked.py: net clk locked [1-9][0-9]* wire' "$OUT/clean.stdout"; then
+    report "PASS clean: router1 routes the design with routeClock's locked clock tree, the post-route check accepts it, rc 0"
 else
-    report "FAIL clean: rc $rc: $(grep -m1 -E '^ERROR|checkRoutedDesign FAIL' "$OUT/clean.log")"
+    report "FAIL clean: rc $rc: $(grep -m1 -E '^ERROR|checkRoutedDesign FAIL' "$OUT/clean.log"), $(grep -m1 '^locked.py: net clk ' "$OUT/clean.stdout")"
+fi
+
+npnr_route() {
+    local tag=$1
+    shift
+    "$NEXTPNR" --chipdb "$CHIPDB" --json "$OUT/placed.json" --no-pack --no-place --router router1 \
+        --fasm "$OUT/$tag.fasm" --log "$OUT/$tag.log" -q --seed 1 "$@" >"$OUT/$tag.stdout" 2>&1
+}
+
+DRV_CHAIN=('lfsr[14] CLBLL_L_X2Y96/130.177' 'lfsr[14] CLBLL_L_X2Y96/340.130')
+
+if ! "$NEXTPNR" --chipdb "$CHIPDB" --xdc "$HERE/top.xdc" --json "$OUT/top.json" --router router1 --no-route \
+        --write "$OUT/placed.json" --log "$OUT/place.log" -q --seed 1 >/dev/null 2>&1; then
+    report "FAIL replay: placement: $(grep -m1 '^ERROR' "$OUT/place.log")"
+    report "FAIL fragment: no placement"
+elif ! npnr_route ref --write-fixed-routes "$OUT/all.routes"; then
+    report "FAIL replay: reference route: $(grep -m1 '^ERROR' "$OUT/ref.log")"
+    report "FAIL fragment: no reference route"
+else
+    pips=$(grep -vc '^#' "$OUT/all.routes")
+    npnr_route full --fixed-routes "$OUT/all.routes"
+    rc=$?
+    if [ "$rc" -eq 0 ] && grep -q '^Info: Router1 time' "$OUT/full.log" &&
+            grep -q "fixed-routes: bound $pips/$pips pips" "$OUT/full.log" &&
+            ! grep -q 'checkRoutedDesign FAIL' "$OUT/full.log" &&
+            cmp -s <(sort "$OUT/ref.fasm") <(sort "$OUT/full.fasm"); then
+        report "PASS replay: router1 under a lock of all $pips routed pips passes the post-route check and reproduces the FASM, rc 0"
+    else
+        report "FAIL replay: rc $rc: $(grep -m1 -E '^ERROR|checkRoutedDesign FAIL|fixed-routes: bound' "$OUT/full.log")"
+    fi
+
+    missing=0
+    for l in "${DRV_CHAIN[@]}"; do
+        grep -qxF -- "$l" "$OUT/all.routes" || missing=1
+    done
+    if [ "$missing" -ne 0 ]; then
+        report "FAIL fragment: the reference route no longer drives lfsr[14] through ${DRV_CHAIN[*]}; re-derive the driver chain"
+    else
+        grep -vxF -e "${DRV_CHAIN[0]}" -e "${DRV_CHAIN[1]}" "$OUT/all.routes" >"$OUT/frag.routes"
+        npnr_route frag --fixed-routes "$OUT/frag.routes"
+        rc=$?
+        if ! grep -q 'fixed-routes: .* locked nets contain their driver (1 driverless' "$OUT/frag.log"; then
+            report "FAIL fragment: the lock did not leave lfsr[14] driverless: $(grep -m1 'contain their driver' "$OUT/frag.log")"
+        elif [ "$rc" -ne 0 ] && grep -q 'checkRoutedDesign FAIL net lfsr\[14\]:' "$OUT/frag.log"; then
+            report "PASS fragment: a locked fragment cut off from its driver is refused after routing, rc $rc"
+        else
+            report "FAIL fragment: rc $rc, the post-route check did not refuse the driverless lfsr[14]"
+        fi
+    fi
 fi
 
 "$NEXTPNR" --chipdb "$CHIPDB" --xdc "$HERE/top.xdc" --json "$OUT/top.json" --router router1 \
