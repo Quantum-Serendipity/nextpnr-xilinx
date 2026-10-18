@@ -2174,8 +2174,6 @@ void Arch::applyFixedRoutes(const std::string &filename, std::function<void()> r
             if (n != nullptr)
                 net_orig[n] = ci->attrs.at(ak).as_string();
         }
-        // Align all inputs: nextpnr's router treats each belpin as fixed to its
-        // tile input (A6-only leaves A1..A5 mismatched -> hooking collides ->
         auto tile_it = locked_lut_input.find(ci->bel.tile);
         const int slot = getBelLocation(ci->bel).z >> 4;
         for (int t = 1; t <= npin; t++) {
@@ -3108,7 +3106,6 @@ bool Arch::route()
     routeBufhcePassthroughCE();
     check_partition_routing();
     check_partition_keepout();
-    //   NEXTPNR_CRIT_PATH_REPORT=1   also dump the critical path stage by stage
     dsp48e1CheckCache();
     dsp48e1WarnInternalPaths();
     const char *post_route_timing = getenv("NEXTPNR_POST_ROUTE_TIMING");

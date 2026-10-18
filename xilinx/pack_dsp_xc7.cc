@@ -129,8 +129,6 @@ void XC7Packer::pack_dsps()
                 // instead of zero) and ALUMODE[3:2] 00 into 11.  The DSP then
                 // ignores its A operand entirely and returns near-constant
                 // junk, with a correct netlist and clean timing.
-                //
-                // The earlier "these seem to be inverted for unknown reasons"
                 if (boost::starts_with(n, "D") ||
                     boost::starts_with(n, "RSTD") ||
                     boost::starts_with(n, "INMODE") ||

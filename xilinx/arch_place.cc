@@ -343,7 +343,6 @@ bool Arch::xc7_logic_tile_valid(IdString tileType, LogicTileStatus &lts) const
                 continue;
             any = true;
             // frozen == stamped: bound STRENGTH_USER by the BEL-attr placer.
-            //
             if (c->belStrength < STRENGTH_LOCKED) {
                 all_frozen = false;
                 break;

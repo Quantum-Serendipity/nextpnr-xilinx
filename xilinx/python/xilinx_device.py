@@ -476,8 +476,6 @@ def import_device(name, prjxray_root, metadata_root):
 			raise RuntimeError("{} exists but no device->fabric rows were parsed".format(devices_yaml))
 		fabricname = fabric_map.get(fabricname, fabricname)
 	elif fabricname == 'xc7a35t':
-		# https://github.com/gatecat/nextpnr-xilinx/issues/35
-		# https://github.com/f4pga/prjxray/pull/1889
 		fabricname = 'xc7a50t'
 
 	if not os.path.exists(os.path.join(prjxray_root, fabricname, "tilegrid.json")):

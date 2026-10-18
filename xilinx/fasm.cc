@@ -5630,7 +5630,6 @@ void write_gtx_channel(CellInfo *ci)
             boost::split(pins, attr_value, boost::is_any_of(" "));
             for (auto pin : pins) {
                 if (boost::empty(pin)) continue;
-                //
                 // Splitting the trailing index off matters: erase_all() of
                 // "0123456789" turned "INMODE1" into "INMODE" and then looked
                 // up IS_INMODE_INVERTED, which yosys never emits (it writes
