@@ -18,11 +18,12 @@
  *
  */
 
-#include <assert.h>
 #include <boost/filesystem/path.hpp>
 #include <boost/program_options.hpp>
+#include <errno.h>
 #include <iostream>
 #include <map>
+#include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -58,6 +59,45 @@ std::vector<std::string> labelNames;
 std::map<std::string, int> labelIndex;
 
 std::vector<std::string> preText, postText;
+
+std::string inputName;
+int inputLine = 0;
+
+[[noreturn]] void fail(const char *fmt, ...)
+{
+    fprintf(stderr, "bbasm: ");
+    if (inputLine > 0)
+        fprintf(stderr, "%s:%d: ", inputName.c_str(), inputLine);
+    va_list ap;
+    va_start(ap, fmt);
+    vfprintf(stderr, fmt, ap);
+    va_end(ap);
+    fprintf(stderr, "\n");
+    exit(1);
+}
+
+const char *requireToken(const char *tok, const char *cmd)
+{
+    if (tok == nullptr)
+        fail("'%s' is missing its operand", cmd);
+    return tok;
+}
+
+Stream &currentStream(const std::string &cmd)
+{
+    if (streamStack.empty())
+        fail("'%s' outside any pushed stream", cmd.c_str());
+    return streams.at(streamStack.back());
+}
+
+const std::string &labelName(int64_t index)
+{
+    for (auto &it : labelIndex)
+        if (it.second == index)
+            return it.first;
+    static const std::string unknown = "<unknown>";
+    return unknown;
+}
 
 const char *skipWhitespace(const char *p)
 {
@@ -138,13 +178,23 @@ int main(int argc, char **argv)
     }
 
     FILE *fileIn = fopen(files.at(0).c_str(), "rt");
-    assert(fileIn != nullptr);
+    if (fileIn == nullptr)
+        fail("cannot open input '%s': %s", files.at(0).c_str(), strerror(errno));
 
     FILE *fileOut = fopen(files.at(1).c_str(), writeC ? "wt" : "wb");
-    assert(fileOut != nullptr);
+    if (fileOut == nullptr)
+        fail("cannot open output '%s': %s", files.at(1).c_str(), strerror(errno));
 
-    while (fgets(buffer, 512, fileIn) != nullptr) {
-        std::string cmd = strtok(buffer, " \t\r\n");
+    inputName = files.at(0);
+    while (fgets(buffer, sizeof(buffer), fileIn) != nullptr) {
+        inputLine++;
+        size_t len = strlen(buffer);
+        if (len == sizeof(buffer) - 1 && buffer[len - 1] != '\n' && !feof(fileIn))
+            fail("line longer than %d characters", int(sizeof(buffer) - 2));
+        const char *first = strtok(buffer, " \t\r\n");
+        if (first == nullptr)
+            fail("empty line");
+        std::string cmd = first;
         if (cmd == "offset32") {
             offset32 = true;
             continue;
@@ -163,7 +213,7 @@ int main(int argc, char **argv)
         }
 
         if (cmd == "push") {
-            const char *p = strtok(nullptr, " \t\r\n");
+            const char *p = requireToken(strtok(nullptr, " \t\r\n"), "push");
             if (streamIndex.count(p) == 0) {
                 streamIndex[p] = streams.size();
                 streams.resize(streams.size() + 1);
@@ -174,14 +224,16 @@ int main(int argc, char **argv)
         }
 
         if (cmd == "pop") {
+            if (streamStack.empty())
+                fail("'pop' with no stream pushed");
             streamStack.pop_back();
             continue;
         }
 
         if (cmd == "label" || cmd == "ref") {
-            const char *label = strtok(nullptr, " \t\r\n");
+            const char *label = requireToken(strtok(nullptr, " \t\r\n"), cmd.c_str());
             const char *comment = skipWhitespace(strtok(nullptr, "\r\n"));
-            Stream &s = streams.at(streamStack.back());
+            Stream &s = currentStream(cmd);
             if (labelIndex.count(label) == 0) {
                 labelIndex[label] = labels.size();
                 if (debug)
@@ -196,9 +248,9 @@ int main(int argc, char **argv)
         }
 
         if (cmd == "u8" || cmd == "u16" || cmd == "u32") {
-            const char *value = strtok(nullptr, " \t\r\n");
+            const char *value = requireToken(strtok(nullptr, " \t\r\n"), cmd.c_str());
             const char *comment = skipWhitespace(strtok(nullptr, "\r\n"));
-            Stream &s = streams.at(streamStack.back());
+            Stream &s = currentStream(cmd);
             s.tokenTypes.push_back(cmd == "u8" ? TOK_U8 : cmd == "u16" ? TOK_U16 : TOK_U32);
             s.tokenValues.push_back(atoll(value));
             if (debug)
@@ -207,7 +259,7 @@ int main(int argc, char **argv)
         }
 
         if (cmd == "align") {
-            Stream &s = streams.at(streamStack.back());
+            Stream &s = currentStream(cmd);
             s.tokenTypes.push_back(TOK_ALIGN);
             s.tokenValues.push_back(0);
             if (debug)
@@ -217,14 +269,16 @@ int main(int argc, char **argv)
 
         if (cmd == "str") {
             const char *value = skipWhitespace(strtok(nullptr, "\r\n"));
-            assert(*value != 0);
+            if (*value == 0)
+                fail("'str' is missing its operand");
             char *end = strchr((char *)value + 1, *value);
-            assert(end != nullptr);
+            if (end == nullptr)
+                fail("'str' operand has no closing %c", *value);
             *end = 0;
             value += 1;
             const char *comment = skipWhitespace(strtok(end + 1, "\r\n"));
             std::string label = std::string("str:") + value;
-            Stream &s = streams.at(streamStack.back());
+            Stream &s = currentStream(cmd);
             if (labelIndex.count(label) == 0) {
                 labelIndex[label] = labels.size();
                 if (debug)
@@ -260,8 +314,12 @@ int main(int argc, char **argv)
             continue;
         }
 
-        assert(0);
+        fail("unknown directive '%s'", cmd.c_str());
     }
+    if (ferror(fileIn))
+        fail("read error on '%s'", inputName.c_str());
+    fclose(fileIn);
+    inputLine = 0;
 
     if (verbose) {
         printf("Constructed %d streams:\n", int(streams.size()));
@@ -269,8 +327,10 @@ int main(int argc, char **argv)
             printf("    stream '%s' with %ld tokens\n", s.name.c_str(), int64_t(s.tokenTypes.size()));
     }
 
-    assert(!streams.empty());
-    assert(streamStack.empty());
+    if (streams.empty())
+        fail("'%s' defines no stream", inputName.c_str());
+    if (!streamStack.empty())
+        fail("'%s' ends with stream '%s' still pushed", inputName.c_str(), streams.at(streamStack.back()).name.c_str());
     streams.push_back(Stream());
     streams.back().name = "strings";
     streams.back().tokenTypes.swap(stringStream.tokenTypes);
@@ -282,8 +342,9 @@ int main(int argc, char **argv)
         for (int64_t i = 0; i < int64_t(s.tokenTypes.size()); i++) {
             switch (s.tokenTypes[i]) {
             case TOK_LABEL:
-                if (offset32)
-                    assert(cursor % 4 == 0);
+                if (offset32 && cursor % 4 != 0)
+                    fail("label '%s' at unaligned offset %lld", labelName(s.tokenValues[i]).c_str(),
+                         (long long)cursor);
                 labels[s.tokenValues[i]] = cursor;
                 break;
             case TOK_REF:
@@ -293,11 +354,13 @@ int main(int argc, char **argv)
                 cursor += 1;
                 break;
             case TOK_U16:
-                assert(cursor % 2 == 0);
+                if (cursor % 2 != 0)
+                    fail("u16 in stream '%s' at unaligned offset %lld", s.name.c_str(), (long long)cursor);
                 cursor += 2;
                 break;
             case TOK_U32:
-                assert(cursor % 4 == 0);
+                if (cursor % 4 != 0)
+                    fail("u32 in stream '%s' at unaligned offset %lld", s.name.c_str(), (long long)cursor);
                 cursor += 4;
                 break;
             case TOK_ALIGN:
@@ -305,10 +368,14 @@ int main(int argc, char **argv)
                     cursor += 4 - (cursor % 4);
                 break;
             default:
-                assert(0);
+                fail("internal error: token type %d", int(s.tokenTypes[i]));
             }
         }
     }
+
+    for (size_t i = 0; i < labels.size(); i++)
+        if (labels[i] == -1)
+            fail("label '%s' is referenced but never defined", labelName(i).c_str());
 
     if (verbose) {
         printf("resolved positions for %d labels.\n", int(labels.size()));
@@ -330,8 +397,12 @@ int main(int argc, char **argv)
             case TOK_LABEL:
                 break;
             case TOK_REF:
-                assert(labels[value] % 4 == 0);
-                assert(cursor % 4 == 0);
+                if (labels[value] % 4 != 0)
+                    fail("ref to label '%s' at unaligned offset %lld", labelName(value).c_str(),
+                         (long long)labels[value]);
+                if (cursor % 4 != 0)
+                    fail("ref to label '%s' in stream '%s' at unaligned offset %lld", labelName(value).c_str(),
+                         s.name.c_str(), (long long)cursor);
                 value = (labels[value] - cursor) / 4;
                 numBytes = 4;
                 break;
@@ -349,7 +420,7 @@ int main(int argc, char **argv)
                     numBytes = 4 - (cursor % 4);
                 break;
             default:
-                assert(0);
+                fail("internal error: token type %d", int(s.tokenTypes[i]));
             }
 
             if (bigEndian) {
@@ -369,7 +440,7 @@ int main(int argc, char **argv)
                 case 0:
                     break;
                 default:
-                    assert(0);
+                    fail("internal error: %d-byte token", numBytes);
                 }
             } else {
                 switch (numBytes) {
@@ -388,7 +459,7 @@ int main(int argc, char **argv)
                 case 0:
                     break;
                 default:
-                    assert(0);
+                    fail("internal error: %d-byte token", numBytes);
                 }
                 cursor += numBytes;
             }
@@ -434,13 +505,14 @@ int main(int argc, char **argv)
                         printf("u32 %-26llu %s\n", v, s.tokenComments[i].c_str());
                     break;
                 default:
-                    assert(0);
+                    fail("internal error: token type %d", int(s.tokenTypes[i]));
                 }
             }
         }
     }
 
-    assert(cursor == int64_t(data.size()));
+    if (cursor != int64_t(data.size()))
+        fail("internal error: wrote %lld of %lld bytes", (long long)cursor, (long long)data.size());
 
     if (writeC) {
         for (auto &s : preText)
@@ -491,12 +563,19 @@ int main(int argc, char **argv)
             fprintf(fileOut, "%s\n", s.c_str());
 
         FILE *fileBin = fopen(files.at(2).c_str(), "wb");
-        assert(fileBin != nullptr);
-        fwrite(data.data(), int(data.size()), 1, fileBin);
-        fclose(fileBin);
+        if (fileBin == nullptr)
+            fail("cannot open output '%s': %s", files.at(2).c_str(), strerror(errno));
+        if (!data.empty() && fwrite(data.data(), data.size(), 1, fileBin) != 1)
+            fail("write error on '%s': %s", files.at(2).c_str(), strerror(errno));
+        if (fclose(fileBin) != 0)
+            fail("write error on '%s': %s", files.at(2).c_str(), strerror(errno));
     } else {
-        fwrite(data.data(), int64_t(data.size()), 1, fileOut);
+        if (!data.empty() && fwrite(data.data(), data.size(), 1, fileOut) != 1)
+            fail("write error on '%s': %s", files.at(1).c_str(), strerror(errno));
     }
+
+    if (ferror(fileOut) || fclose(fileOut) != 0)
+        fail("write error on '%s': %s", files.at(1).c_str(), strerror(errno));
 
     return 0;
 }
