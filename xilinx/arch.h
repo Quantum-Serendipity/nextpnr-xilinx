@@ -1216,7 +1216,10 @@ struct Arch : BaseCtx
     void check_partition_routing() const;
     void check_partition_keepout() const;
 
-    bool checkBelAvail(BelId bel) const
+    bool checkBelAvail(BelId bel) const { return bel_avail(bel, true); }
+    bool checkBelAvailIgnoringRoi(BelId bel) const { return bel_avail(bel, false); }
+
+    bool bel_avail(BelId bel, bool roi_veto) const
     {
         if (usp_bel_hard_unavail(bel))
             return false;
@@ -1240,7 +1243,7 @@ struct Arch : BaseCtx
         // reverting the load to lazy would silently reopen HeAP's ripup escape
         // (:1027).  scripts/partition-roi-evidence.sh asserts the ordering
         // directly out of the log.
-        if (bel_outside_roi(bel)) {
+        if (roi_veto && bel_outside_roi(bel)) {
             ++roi_veto_avail;
             return false;
         }
