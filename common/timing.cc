@@ -147,13 +147,10 @@ struct Timing
     bool net_delays;
     bool update;
     delay_t min_slack;
-    delay_t worst_hold_slack = std::numeric_limits<delay_t>::max() / 4;  // WHS (hold pass)
-    // Per-endpoint hold slack (Phase 2: drives targeted hold-buffer insertion).
-    // Recorded only in the reporting analysis (crit_path != nullptr), not during P&R.
+    delay_t worst_hold_slack = std::numeric_limits<delay_t>::max() / 4;
     struct HoldEndpoint
     {
-        const NetInfo *net;   // net feeding the endpoint (where a delay buffer would go)
-        IdString cell, port;  // the capture FF D pin
+        IdString cell, port;
         delay_t slack;
     };
     std::vector<HoldEndpoint> hold_endpoints;
@@ -1132,8 +1129,8 @@ struct Timing
                                     delay_t hold_slack =
                                             nd.min_arrival + net_delay_min - clkInfo.hold.maxDelay() - hold_req;
                                     worst_hold_slack = std::min(worst_hold_slack, hold_slack);
-                                    if (crit_path)  // reporting analysis only
-                                        hold_endpoints.push_back({net, usr.cell->name, usr.port, hold_slack});
+                                    if (crit_path)
+                                        hold_endpoints.push_back({usr.cell->name, usr.port, hold_slack});
                                 }
                             }
                         } else {
@@ -1396,15 +1393,7 @@ struct Timing
                     nc.cd_worst_slack = std::min(nc.cd_worst_slack, worst_slack.at(domain));
                 }
             }
-            // Export per-net max criticality (0..1) for timing-driven PLACEMENT
-            // feedback: place_lef weights net HPWL by (1 + K*crit), so the SA
-            // annealer keeps near-critical nets short.  Overwrite each call ->
-            // holds the last (most-converged) routing iteration's criticality.
             if (const char *cf = getenv("NEXTPNR_CRIT_EXPORT")) {
-                // Key by DRIVER-CELL name, not net name: net names don't survive
-                // bir_to_nextpnr_json flattening on the place_lef side, but cell
-                // names do (as the hold-target export relies on).  Emit the max
-                // criticality over each driver cell's output nets.
                 std::map<IdString, float> cell_crit;
                 for (auto &nc : *net_crit) {
                     float mx = 0.0f;
@@ -1425,23 +1414,6 @@ struct Timing
                     for (auto &cc : cell_crit)
                         out << cc.first.c_str(ctx) << '\t' << cc.second << '\n';
             }
-#if 0
-            if (ctx->debug) {
-                for (auto &nc : *net_crit) {
-                    NetInfo *net = ctx->nets.at(nc.first).get();
-                    log_info("Net %s maxlen %d worst_slack %.02fns: \n", nc.first.c_str(ctx), nc.second.max_path_length,
-                             ctx->getDelayNS(nc.second.cd_worst_slack));
-                    if (!nc.second.criticality.empty() && !nc.second.slack.empty()) {
-                        for (size_t i = 0; i < net->users.size(); i++) {
-                            log_info("   user %s.%s slack %.02fns crit %.03f\n", net->users.at(i).cell->name.c_str(ctx),
-                                     net->users.at(i).port.c_str(ctx), ctx->getDelayNS(nc.second.slack.at(i)),
-                                     nc.second.criticality.at(i));
-                        }
-                    }
-                    log_break();
-                }
-            }
-#endif
         }
         if (setup_export.is_open()) {
             for (auto &row : setup_rows)
@@ -1656,11 +1628,8 @@ void timing_analysis(Context *ctx, bool print_histogram, bool print_fmax, bool p
                      timing.exc_hold_skipped, timing.exc_max_delay);
     }
     if (print_fmax) {
-        // In-process HOLD estimate (early/min-delay pass): earliest data vs the
-        // capture FF hold window.  Golden Vivado/OpenSTA ibex reference ~ +0.06ns.
         log_info("Estimated worst hold slack: %.2f ns%s\n", ctx->getDelayNS(timing.worst_hold_slack),
                  timing.worst_hold_slack < 0 ? "  *** HOLD VIOLATION ***" : "");
-        // Phase 2: the tightest hold endpoints -- targets for hold-buffer insertion.
         auto &he = timing.hold_endpoints;
         std::sort(he.begin(), he.end(), [](const Timing::HoldEndpoint &a, const Timing::HoldEndpoint &b) {
             return a.slack < b.slack;
@@ -1671,24 +1640,6 @@ void timing_analysis(Context *ctx, bool print_histogram, bool print_fmax, bool p
             for (int i = 0; i < nshow; i++)
                 log_info("    %+.3f ns  %s.%s\n", ctx->getDelayNS(he[i].slack), he[i].cell.c_str(ctx),
                          he[i].port.c_str(ctx));
-        }
-        // Phase 2b: export the sub-threshold hold targets (net + capture pin +
-        // slack) so an edit pass -- place_lef FPGA_HOLD_LUT1 or a reroute-detour --
-        // buffers ONLY these instead of blanket every FF->FF.  Env-gated:
-        //   NEXTPNR_HOLD_TARGETS=<file>  NEXTPNR_HOLD_MARGIN_NS=<slack thresh (0.15)>
-        if (const char *tf = getenv("NEXTPNR_HOLD_TARGETS")) {
-            const char *mg = getenv("NEXTPNR_HOLD_MARGIN_NS");
-            double margin = mg ? atof(mg) : 0.15;
-            std::ofstream ofs(tf);
-            int nwr = 0;
-            for (auto &e : he) {
-                if (ctx->getDelayNS(e.slack) >= margin)
-                    break; // sorted ascending
-                ofs << e.net->name.c_str(ctx) << '\t' << e.cell.c_str(ctx) << '.' << e.port.c_str(ctx) << '\t'
-                    << ctx->getDelayNS(e.slack) << '\n';
-                nwr++;
-            }
-            log_info("Wrote %d hold target(s) (< %.3f ns) to %s\n", nwr, margin, tf);
         }
     }
     std::map<IdString, std::pair<ClockPair, CriticalPath>> clock_reports;
