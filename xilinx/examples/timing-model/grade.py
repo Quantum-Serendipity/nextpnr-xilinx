@@ -275,10 +275,11 @@ def grade_skew(argv):
 
 
 def grade_srl_launch(argv):
-    routed, setup_tsv, hold_tsv, sdf_path, timings, tilegrid, netname, name = argv
+    routed, setup_tsv, hold_tsv, sdf_path, timings, tilegrid, drv, name = argv
     group, q_of, bel = netlist(routed)
     with open(routed) as f:
-        cells = json.load(f)["modules"]["top"]["cells"]
+        top = json.load(f)["modules"]["top"]
+    cells = top["cells"]
     _, srows = read_tsv(setup_tsv)
     hcols, hrows = read_tsv(hold_tsv)
     if hcols is None:
@@ -286,12 +287,10 @@ def grade_srl_launch(argv):
     clk = sdf_clock_pins(sdf_path)
     if not clk:
         return "FAIL %s: no clock-pin INTERCONNECT in %s" % (name, os.path.basename(sdf_path))
-    drv = q_of.get(netname)
-    cell = cells.get(drv or "", {})
+    cell = cells.get(drv, {})
     attrs = cell.get("attributes", {})
     if cell.get("type") != "SLICE_LUTX" or not ("X_LUT_AS_SRL" in attrs or "X_LUT_AS_DRAM" in attrs):
-        return "FAIL %s: net %s is not driven by an SRL or LUTRAM (driver %s, type %s)" % (
-            name, netname, drv, cell.get("type"))
+        return "FAIL %s: cell %s is not an SRL or LUTRAM (type %s)" % (name, drv, cell.get("type"))
     if drv not in clk:
         return "FAIL %s: the SDF gives no clock-pin delay for %s" % (name, drv)
     launch = clk[drv]
@@ -305,9 +304,13 @@ def grade_srl_launch(argv):
     arc = sdf.cells(tiletype or "").get(("%s/%s" % (sitetype, b), variant), {}).get(("CLK", out))
     if arc is None:
         return "FAIL %s: the SDF of %s has no %s/%s %s CLK->%s arc" % (name, tiletype, sitetype, b, variant, out)
-    rows = [r for r in srows if r["net"] == netname]
+    obits = {b for b in cell["connections"].get(out, []) if isinstance(b, int)}
+    nets = {n for n, nn in top["netnames"].items() if obits & {b for b in nn["bits"] if isinstance(b, int)}}
+    rows = [r for r in srows if r["net"] in nets]
     if not rows:
-        return "FAIL %s: no setup row on net %s" % (name, netname)
+        return "FAIL %s: no setup row on the %s output of %s (net %s)" % (name, out, drv,
+                                                                       "/".join(sorted(nets)) or "none")
+    netname = rows[0]["net"]
     hold = {(r["cell"], r["port"]): r for r in hrows}
     for r in rows:
         arrival = float(r["driver_arrival_ns"])

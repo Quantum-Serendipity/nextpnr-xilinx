@@ -60,7 +60,7 @@ R=$OUT/routed.json
 grade arcs "$R" "$OUT/arcs.tsv" "$TIMINGS" "$TILEGRID" arcs
 grade hold "$OUT/full.hold.tsv" hold_export
 grade skew "$R" "$OUT/full.tsv" "$OUT/full.hold.tsv" "$OUT/full.sdf" "$TIMINGS" "$TILEGRID" lfsr,k_q skew
-grade srl_launch "$R" "$OUT/full.tsv" "$OUT/full.hold.tsv" "$OUT/full.sdf" "$TIMINGS" "$TILEGRID" srl_o srl_launch
+grade srl_launch "$R" "$OUT/full.tsv" "$OUT/full.hold.tsv" "$OUT/full.sdf" "$TIMINGS" "$TILEGRID" sreg srl_launch
 grade period "$R" "$OUT/full.tsv" p1_q ck0 ck0 period_ns 5 duty_mmcm
 
 if NEXTPNR_SETUP_EXPORT="$OUT/duty.tsv" "$NEXTPNR" --chipdb "$CHIPDB" --xdc "$HERE/base.xdc" --json "$OUT/duty.json" \
