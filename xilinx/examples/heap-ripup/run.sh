@@ -88,7 +88,7 @@ else
     esac
 fi
 
-if ! synth "$OUT/ramp" "$HERE/dense.v" "chparam -set K 126 top;"; then
+if ! synth "$OUT/ramp" "$HERE/dense.v" "chparam -set K 136 top;"; then
     report "FAIL ramp: yosys"
 elif ! RIPUP_REGION=13,53,14,62 place "$OUT/ramp" --pre-place "$HERE/region.py"; then
     report "FAIL ramp: nextpnr: $(grep -m1 '^ERROR' "$OUT/ramp.log")"
