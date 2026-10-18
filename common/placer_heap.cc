@@ -922,6 +922,11 @@ class HeAPPlacer
         int ripup_resets = 0;
         int total_iters = 0;
         int total_iters_noreset = 0;
+        auto log_ripup = [&]() {
+            if (ripup_resets > 0)
+                log_info("    strict legalisation: %d rip-up radius escalation(s), radius %d of grid %d\n",
+                         ripup_resets, ripup_radius, std::max(max_x, max_y));
+        };
         while (!remaining.empty()) {
             auto top = remaining.top();
             remaining.pop();
@@ -987,6 +992,7 @@ class HeAPPlacer
             }
 
             if (total_iters_noreset > std::max(5000, 8 * int(ctx->cells.size()))) {
+                log_ripup();
                 log_error("Unable to find legal placement for all cells, design is probably at utilisation limit.\n");
             }
 
@@ -1002,6 +1008,7 @@ class HeAPPlacer
                 // 369038ed).  Budget the radius growth plus a full-grid
                 // search pass on top of the cell-count term.
                 if (attempts > std::max(10000, 3 * int(ctx->cells.size())) + 10 * max_x * max_y) {
+                    log_ripup();
                     std::queue<CellInfo *> members;
                     for (auto child : ci->constr_children)
                         members.push(child);
@@ -1318,9 +1325,7 @@ class HeAPPlacer
                 }
             }
         }
-        if (ripup_resets > 0)
-            log_info("    strict legalisation: %d rip-up radius escalation(s), radius %d of grid %d\n", ripup_resets,
-                     ripup_radius, std::max(max_x, max_y));
+        log_ripup();
         auto endt = std::chrono::high_resolution_clock::now();
         sl_time += std::chrono::duration<float>(endt - startt).count();
     }
