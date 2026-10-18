@@ -55,8 +55,6 @@ npnr_route() {
         --fasm "$OUT/$tag.fasm" --log "$OUT/$tag.log" -q --seed 1 "$@" >"$OUT/$tag.stdout" 2>&1
 }
 
-DRV_CHAIN=('lfsr[14] CLBLL_L_X2Y96/130.177' 'lfsr[14] CLBLL_L_X2Y96/340.130')
-
 if ! "$NEXTPNR" --chipdb "$CHIPDB" --xdc "$HERE/top.xdc" --json "$OUT/top.json" --router router1 --no-route \
         --write "$OUT/placed.json" --log "$OUT/place.log" -q --seed 1 >/dev/null 2>&1; then
     report "FAIL replay: placement: $(grep -m1 '^ERROR' "$OUT/place.log")"
@@ -77,20 +75,18 @@ else
         report "FAIL replay: rc $rc: $(grep -m1 -E '^ERROR|checkRoutedDesign FAIL|fixed-routes: bound' "$OUT/full.log")"
     fi
 
-    missing=0
-    for l in "${DRV_CHAIN[@]}"; do
-        grep -qxF -- "$l" "$OUT/all.routes" || missing=1
-    done
-    if [ "$missing" -ne 0 ]; then
-        report "FAIL fragment: the reference route no longer drives lfsr[14] through ${DRV_CHAIN[*]}; re-derive the driver chain"
+    npnr_route cut --post-route "$HERE/driver-cut.py" --write-fixed-routes "$OUT/frag.routes"
+    cut=$(sed -n 's/^driver-cut.py: lfsr\[14\] driver chain of \([0-9]*\) wire(s) in .*/\1/p' "$OUT/cut.stdout" "$OUT/cut.log" | head -1)
+    fpips=$(grep -vc '^#' "$OUT/frag.routes" 2>/dev/null)
+    if [ "${cut:-0}" -lt 1 ] || [ "${fpips:-0}" -ne $((pips - ${cut:-0})) ]; then
+        report "FAIL fragment: driver-cut.py unbound ${cut:-no} wire(s) of lfsr[14]'s driver chain and the lock it wrote holds ${fpips:-no} of the reference's $pips pips"
     else
-        grep -vxF -e "${DRV_CHAIN[0]}" -e "${DRV_CHAIN[1]}" "$OUT/all.routes" >"$OUT/frag.routes"
         npnr_route frag --fixed-routes "$OUT/frag.routes"
         rc=$?
         if ! grep -q 'fixed-routes: .* locked nets contain their driver (1 driverless' "$OUT/frag.log"; then
             report "FAIL fragment: the lock did not leave lfsr[14] driverless: $(grep -m1 'contain their driver' "$OUT/frag.log")"
         elif [ "$rc" -ne 0 ] && grep -q 'checkRoutedDesign FAIL net lfsr\[14\]:' "$OUT/frag.log"; then
-            report "PASS fragment: a locked fragment cut off from its driver is refused after routing, rc $rc"
+            report "PASS fragment: a locked fragment cut off from its driver ($cut wire(s) of lfsr[14]'s driver chain unbound by driver-cut.py) is refused after routing, rc $rc"
         else
             report "FAIL fragment: rc $rc, the post-route check did not refuse the driverless lfsr[14]"
         fi
