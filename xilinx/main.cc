@@ -53,7 +53,7 @@ po::options_description UspCommandHandler::getArchOptions()
     po::options_description specific("Architecture specific options");
     specific.add_options()("chipdb", po::value<std::string>(), "name of chip database binary");
     specific.add_options()("xdc", po::value<std::vector<std::string>>(), "XDC-style constraints file");
-    specific.add_options()("xdc-strict", "treat an XDC target that matches nothing as an error, not a warning");
+    specific.add_options()("xdc-strict", "treat an XDC target that matches nothing, an unsupported XDC command or an unread option as an error");
     specific.add_options()("fasm", po::value<std::string>(), "fasm bitstream file to write");
     specific.add_options()("fixed-routes", po::value<std::string>(),
                            "frozen hard-macro routing to LOCK before routing (net + src->dst pips)");
@@ -151,8 +151,7 @@ void UspCommandHandler::customAfterLoad(Context *ctx)
         if (!ctx->xdc_dropped.empty()) {
             for (const auto &d : ctx->xdc_dropped)
                 log_info("XDC target dropped: %s\n", d.c_str());
-            log_error("%d XDC constraint target(s) reference ports or nets that are not in this design, listed "
-                      "above [--xdc-strict]\n",
+            log_error("%d XDC constraint(s) or target(s) were not applied, listed above [--xdc-strict]\n",
                       int(ctx->xdc_dropped.size()));
         }
     }

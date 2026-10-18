@@ -32,9 +32,15 @@ struct DelayInfo
     // existing code that only sets `.delay` keeps min==max and the setup pass is
     // byte-identical.  Set `min` explicitly (fast corner) to enable hold analysis.
     delay_t min = 0;
+    bool has_min = false;
 
     delay_t maxDelay() const { return delay; }
-    delay_t minDelay() const { return min ? min : delay; }
+    delay_t minDelay() const { return (has_min || min) ? min : delay; }
+    void setMin(delay_t v)
+    {
+        min = v;
+        has_min = true;
+    }
 
     delay_t maxRaiseDelay() const { return maxDelay(); }
     delay_t minRaiseDelay() const { return minDelay(); }
@@ -46,6 +52,7 @@ struct DelayInfo
         DelayInfo ret;
         ret.delay = this->maxDelay() + other.maxDelay();
         ret.min = this->minDelay() + other.minDelay();
+        ret.has_min = true;
         return ret;
     }
 };

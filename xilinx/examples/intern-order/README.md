@@ -18,6 +18,6 @@ CHIPDB=/path/to/xc7a100tfgg484.bin YOSYS=yosys NEXTPNR=/path/to/nextpnr-xilinx .
 |---|---|
 | `base_again` | the two `base.xdc` runs write the same FASM, so a difference below is not run-to-run noise |
 | `inert` (log) | the log shows the exception read with one `from` cell and eight `to` cells |
-| `mcp` (log) | the log shows the multicycle tag on `mcp_dst` |
+| `mcp` (log) | the log shows the multicycle path read as an exception to `mcp_dst` |
 | `spare` (log) | the log shows two absent targets ignored and the `-through` refused for matching no net |
 | `inert`, `mcp`, `spare` (FASM) | that arm's FASM is byte-identical to the `base.xdc` FASM |

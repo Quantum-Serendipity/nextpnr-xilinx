@@ -58,10 +58,10 @@ else
     report "FAIL inert: the log does not show the set_false_path matching inert_a and inert_b"
 fi
 
-if grep -q "set_multicycle_path: setup multicycle 1 tagged on 1 cells matching 'mcp_dst'" "$OUT/mcp.log"; then
-    report "PASS mcp: the factor-1 set_multicycle_path tagged mcp_dst"
+if grep -q "set_multicycle_path: exception #0, from 0 cell(s) 0 clock pattern(s), to 1 cell(s) 0 pin(s) 0 clock pattern(s), setup multiplier 1" "$OUT/mcp.log"; then
+    report "PASS mcp: the factor-1 set_multicycle_path was read as an exception to mcp_dst"
 else
-    report "FAIL mcp: the log does not show the set_multicycle_path tagging mcp_dst"
+    report "FAIL mcp: the log does not show the set_multicycle_path read as an exception to mcp_dst"
 fi
 
 if grep -q "2 XDC constraint target(s) reference ports or nets that are not in this design" "$OUT/spare.log" &&

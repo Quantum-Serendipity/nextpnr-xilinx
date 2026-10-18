@@ -2865,20 +2865,7 @@ struct FasmBackend
         }
     }
 
-    int duty_half_cycles(int d, double duty)
-    {
-        const long long duty_fixed = llround(duty * 100000);
-        const long long scaled = 2LL * d * duty_fixed;
-        const int rounded_up = int((scaled + 50000) / 100000);
-        const bool is_tie = scaled % 100000 == 50000;
-        auto encodable = [d](int half_cycles) {
-            const int high = half_cycles / 2, low = d - high;
-            return high >= 1 && high <= 64 && low >= 1 && low <= 64;
-        };
-        if (is_tie && !encodable(rounded_up) && encodable(rounded_up - 1))
-            return rounded_up - 1;
-        return rounded_up;
-    }
+    int duty_half_cycles(int d, double duty) { return Arch::cmtDutyHalfCycles(d, duty); }
 
     void split_counter(double divide, double duty, int &high, int &low, bool &edge)
     {

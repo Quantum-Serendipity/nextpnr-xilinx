@@ -30,9 +30,9 @@ report() {
 }
 
 build() {
-    local name=$1 xdc=${2:-related-clocks.xdc} tag=${3:-$1} expect_rc=${4:-0} router=${5:-} allow=${6:-} rc
+    local name=$1 xdc=${2:-related-clocks.xdc} tag=${3:-$1} expect_rc=${4:-0} router=${5:-} allow=${6:-} def=${7:-} rc
     if ! "$YOSYS" -q -l "$OUT/$tag.yosys.log" \
-            -p "read_verilog \"$HERE/$name.v\"; synth_xilinx -flatten -abc9 -arch xc7 -top top; write_json \"$OUT/$tag.json\"" \
+            -p "read_verilog ${def:+-D$def} \"$HERE/$name.v\"; synth_xilinx -flatten -abc9 -arch xc7 -top top; write_json \"$OUT/$tag.json\"" \
             >/dev/null 2>&1; then
         echo "FAIL yosys $tag"
         exit 1
@@ -61,6 +61,8 @@ build three three-mismatch.xdc three-mismatch
 build three three-pad.xdc three-pad
 build unrelated unrelated-tight.xdc unrelated-tight 1 router1
 build unrelated unrelated-tight.xdc unrelated-tight-allow 0 router1 allow
+build order order-pad.xdc order-pad-last 0 "" "" MMCM_NAME=mmcm
+build order order-pad.xdc order-pad-first 0 "" "" MMCM_NAME=a_mmcm
 
 pair_arm() {
     local launch=$1 capture=$2 want=$3 design=${4:-top} got
@@ -152,6 +154,23 @@ pair_arm clk pix_clk 10 three-pad
 pair_arm pix_clk clk 10 three-pad
 verdict_arm three-pad clk pix_clk "against a 10.00 ns shorter of the two periods; no derived relation"
 verdict_arm three-pad pix_clk clk "against a 10.00 ns shorter of the two periods; no derived relation"
+
+order_arm() {
+    local design=$1 cell=$2 want=$3 want_carried=$4 line carried
+    line=$(grep -m1 "MMCME2_BASE '$cell': input " "$OUT/$design.log")
+    carried=$(grep -c "net 'pix_clk' is constrained to 50.0 MHz by the XDC; the 40.0 MHz derived through '$cell' from the carried constraint on net 'clk_ibuf' is not applied" "$OUT/$design.log")
+    case "$line|$carried" in
+        *"input $want MHz"*"|$want_carried")
+            report "PASS $design order: the first propagation through '$cell' saw ${line#*input }, and $carried carried-constraint warning(s) for pix_clk" ;;
+        *) report "FAIL $design order: '${line#*Info: }' with $carried carried-constraint warning(s) for pix_clk, expected the first propagation through '$cell' to see $want MHz and $want_carried such warning(s)" ;;
+    esac
+}
+order_arm order-pad-last mmcm 125.0 0
+order_arm order-pad-first a_mmcm 100.0 1
+pair_arm pix_clk_g aux_clk 4 order-pad-last
+pair_arm pix_clk_g aux_clk 4 order-pad-first
+verdict_arm order-pad-last pix_clk_g aux_clk "against a 4.00 ns edge separation; related through 'clk_i'"
+verdict_arm order-pad-first pix_clk_g aux_clk "against a 4.00 ns edge separation; related through 'clk_i'"
 
 rc=$(cat "$OUT/unrelated-tight.rc")
 line=$(grep -m1 -E '^ERROR: Max delay posedge clk +-> posedge sclk *:' "$OUT/unrelated-tight.log")

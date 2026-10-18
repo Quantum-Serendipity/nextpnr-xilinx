@@ -522,6 +522,7 @@ struct ClockConstraint
     IdString source;
     int64_t source_num = 0, source_den = 0;
     int64_t offset_num = 0, offset_den = 1;
+    int64_t high_num = 1, high_den = 2;
 
     TimingConstrObjectId domain_tmg_id;
 };
@@ -532,9 +533,12 @@ struct TimingException
     {
         FALSE_PATH,
         MAX_DELAY,
+        MULTICYCLE,
     } kind = FALSE_PATH;
 
     delay_t value = 0;
+    int multiplier = 0;
+    bool launch_period = false;
     bool datapath_only = false;
     bool setup = true;
     bool hold = true;
