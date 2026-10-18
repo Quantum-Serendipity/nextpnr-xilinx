@@ -919,6 +919,7 @@ class HeAPPlacer
             remaining.emplace(chain_size[cell->name], cell->name);
         }
         int ripup_radius = 2;
+        int ripup_resets = 0;
         int total_iters = 0;
         int total_iters_noreset = 0;
         while (!remaining.empty()) {
@@ -981,7 +982,8 @@ class HeAPPlacer
             total_iters_noreset++;
             if (total_iters > int(solve_cells.size())) {
                 total_iters = 0;
-                ripup_radius = std::max(std::max(max_x, max_y), ripup_radius * 2);
+                ripup_radius = std::min(std::max(max_x, max_y), ripup_radius * 2);
+                ++ripup_resets;
             }
 
             if (total_iters_noreset > std::max(5000, 8 * int(ctx->cells.size()))) {
@@ -1317,6 +1319,9 @@ class HeAPPlacer
                 }
             }
         }
+        if (ripup_resets > 0)
+            log_info("    strict legalisation: %d rip-up radius escalation(s), radius %d of grid %d\n", ripup_resets,
+                     ripup_radius, std::max(max_x, max_y));
         auto endt = std::chrono::high_resolution_clock::now();
         sl_time += std::chrono::duration<float>(endt - startt).count();
     }
