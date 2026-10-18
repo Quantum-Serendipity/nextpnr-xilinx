@@ -1126,9 +1126,7 @@ bool router1(Context *ctx, const Router1Cfg &cfg)
 
         Router1 router(ctx, cfg);
         router.setup();
-#ifndef NDEBUG
         router.check();
-#endif
 
         log_info("Routing %d arcs.\n", int(router.arc_queue.size()));
 
@@ -1153,9 +1151,7 @@ bool router1(Context *ctx, const Router1Cfg &cfg)
                 last_arcs_with_ripup = router.arcs_with_ripup;
                 last_arcs_without_ripup = router.arcs_without_ripup;
                 ctx->yield();
-#ifndef NDEBUG
                 router.check();
-#endif
             }
 
             if (ctx->debug)
@@ -1208,14 +1204,12 @@ bool router1(Context *ctx, const Router1Cfg &cfg)
         ctx->yield();
         log_info("Router1 time %.02fs\n", std::chrono::duration<float>(rend - rstart).count());
 
-#ifndef NDEBUG
         router.check();
         ctx->check();
         // With skipFailedArcs the design is intentionally left partially routed,
         // so the full-routing assertion would (correctly) fail — skip it.
         if (!cfg.skipFailedArcs)
             log_assert(ctx->checkRoutedDesign());
-#endif
 
         log_info("Checksum: 0x%08x\n", ctx->checksum());
         timing_analysis(ctx, true /* slack_histogram */, true /* print_fmax */, true /* print_path */,
@@ -1224,9 +1218,7 @@ bool router1(Context *ctx, const Router1Cfg &cfg)
         ctx->unlock();
         return true;
     } catch (log_execution_error_exception) {
-#ifndef NDEBUG
         ctx->check();
-#endif
         ctx->unlock();
         return false;
     }
