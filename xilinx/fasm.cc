@@ -5584,9 +5584,8 @@ void write_gtx_channel(CellInfo *ci)
 
         if (param_choice(ci, "SEL_PATTERN", {"PATTERN", "C"}) == "C")
             log_error("DSP48E1 '%s' at %s has SEL_PATTERN=C. That is a legal DSP48E1 value, but this flow cannot "
-                      "emit it yet: the pinned prjxray-db has no DSP48 row for it. It needs prjxray-db d3405db and "
-                      "the writer change from openXC7 cdd36a11a. Use SEL_PATTERN=PATTERN, or wait "
-                      "for that db bump.\n",
+                      "emit it yet: the pinned prjxray-db carries the SEL_PATTERN_C row (d3405db), and the writer "
+                      "change from openXC7 cdd36a11a that emits it is not carried. Use SEL_PATTERN=PATTERN.\n",
                       ctx->nameOf(ci), get_tile_name(ci->bel.tile).c_str());
 
         const bool dport_used =
