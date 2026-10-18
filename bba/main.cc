@@ -189,8 +189,11 @@ int main(int argc, char **argv)
     while (fgets(buffer, sizeof(buffer), fileIn) != nullptr) {
         inputLine++;
         size_t len = strlen(buffer);
-        if (len == sizeof(buffer) - 1 && buffer[len - 1] != '\n' && !feof(fileIn))
-            fail("line longer than %d characters", int(sizeof(buffer) - 2));
+        if (len == sizeof(buffer) - 1 && buffer[len - 1] != '\n') {
+            int next = fgetc(fileIn);
+            if (next != EOF && next != '\n')
+                fail("line longer than %d characters", int(sizeof(buffer) - 1));
+        }
         const char *first = strtok(buffer, " \t\r\n");
         if (first == nullptr)
             fail("empty line");
