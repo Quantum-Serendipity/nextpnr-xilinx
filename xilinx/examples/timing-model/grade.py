@@ -274,6 +274,67 @@ def grade_skew(argv):
            "clock-pin delay into both requirements" % (name, checked, early, late)
 
 
+def grade_srl_launch(argv):
+    routed, setup_tsv, hold_tsv, sdf_path, timings, tilegrid, netname, name = argv
+    group, q_of, bel = netlist(routed)
+    with open(routed) as f:
+        cells = json.load(f)["modules"]["top"]["cells"]
+    _, srows = read_tsv(setup_tsv)
+    hcols, hrows = read_tsv(hold_tsv)
+    if hcols is None:
+        return "FAIL %s: no NEXTPNR_HOLD_EXPORT file was written" % name
+    clk = sdf_clock_pins(sdf_path)
+    if not clk:
+        return "FAIL %s: no clock-pin INTERCONNECT in %s" % (name, os.path.basename(sdf_path))
+    drv = q_of.get(netname)
+    cell = cells.get(drv or "", {})
+    attrs = cell.get("attributes", {})
+    if cell.get("type") != "SLICE_LUTX" or not ("X_LUT_AS_SRL" in attrs or "X_LUT_AS_DRAM" in attrs):
+        return "FAIL %s: net %s is not driven by an SRL or LUTRAM (driver %s, type %s)" % (
+            name, netname, drv, cell.get("type"))
+    if drv not in clk:
+        return "FAIL %s: the SDF gives no clock-pin delay for %s" % (name, drv)
+    launch = clk[drv]
+    if launch < 0.1:
+        return "FAIL %s: %s has a clock-pin delay of %.3f ns, so its clock is not routed" % (name, drv, launch)
+    sdf = Sdf(timings, tilegrid)
+    tiletype, sitetype, b = sdf.locate(bel.get(drv, ""))
+    lut5 = (b or "").endswith("5LUT")
+    variant = "LUT_OR_MEM%d%s" % (5 if lut5 else 6, "SHFREG" if "X_LUT_AS_SRL" in attrs else "LRAM")
+    out = "O5" if lut5 else "O6"
+    arc = sdf.cells(tiletype or "").get(("%s/%s" % (sitetype, b), variant), {}).get(("CLK", out))
+    if arc is None:
+        return "FAIL %s: the SDF of %s has no %s/%s %s CLK->%s arc" % (name, tiletype, sitetype, b, variant, out)
+    rows = [r for r in srows if r["net"] == netname]
+    if not rows:
+        return "FAIL %s: no setup row on net %s" % (name, netname)
+    hold = {(r["cell"], r["port"]): r for r in hrows}
+    for r in rows:
+        arrival = float(r["driver_arrival_ns"])
+        if abs(arrival - launch - arc[1]) > TOL:
+            return "FAIL %s: %s drives %s at %.3f ns where its %.3f ns SDF clock-pin delay and the %s CLK->%s " \
+                   "max %.3f give %.3f" % (name, drv, netname, arrival, launch, variant, out, arc[1],
+                                           launch + arc[1])
+        capture = clk.get(r["cell"])
+        if capture is None:
+            return "FAIL %s: the SDF gives no clock-pin delay for the capture cell %s" % (name, r["cell"])
+        slack = float(r["period_ns"]) - (arrival + float(r["net_delay_ns"]) + float(r["setup_ns"]) - capture)
+        if abs(slack - float(r["slack_ns"])) > TOL:
+            return "FAIL %s: %s.%s setup slack %s where period, arrival, setup and the %.3f ns SDF capture clock " \
+                   "give %.3f" % (name, r["cell"], r["port"], r["slack_ns"], capture, slack)
+        h = hold.get((r["cell"], r["port"]))
+        if h is None:
+            return "FAIL %s: no hold row for %s.%s" % (name, r["cell"], r["port"])
+        min_arr = float(h["driver_min_arrival_ns"])
+        if abs(min_arr - launch - arc[0]) > TOL:
+            return "FAIL %s: %s.%s hold arrival %.3f ns where the %.3f ns SDF launch clock and the %s CLK->%s " \
+                   "min %.3f give %.3f" % (name, r["cell"], r["port"], min_arr, launch, variant, out, arc[0],
+                                           launch + arc[0])
+    return "PASS %s: %d row(s) on %s take %s's %.3f ns SDF clock-pin delay plus the %s CLK->%s max %.3f and " \
+           "min %.3f into the setup and hold arrival" % (name, len(rows), netname, drv, launch, variant, out, arc[1],
+                                                          arc[0])
+
+
 def grade_period(argv):
     routed, tsv, grp, launch, capture, column, want, name = argv
     group, _, _ = netlist(routed)
@@ -307,7 +368,7 @@ def grade_norow(argv):
 def main():
     cmd, argv = sys.argv[1], sys.argv[2:]
     print({"arcs": grade_arcs, "hold": grade_hold, "skew": grade_skew, "period": grade_period,
-           "norow": grade_norow, "zero_min": grade_zero_min}[cmd](argv))
+           "norow": grade_norow, "zero_min": grade_zero_min, "srl_launch": grade_srl_launch}[cmd](argv))
 
 
 main()
