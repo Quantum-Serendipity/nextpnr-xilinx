@@ -1061,9 +1061,6 @@ void XC7Packer::relocate_carry_o_fabric()
         ctx->id("FDRE"), ctx->id("FDSE"), ctx->id("FDCE"), ctx->id("FDPE"),
         ctx->id("FDRSE")};
     int relocated = 0, split_carries = 0;
-    // Local addition on top of upstream c2c05095a's series: the DFX branch has
-    // to be countable.  A BEL-pinned chain is skipped, and "skipped" is the
-    // same observable as "the pass was removed" unless the skip is counted.
     int chains_pinned = 0, cells_pinned = 0;
 
     // bit = GLOBAL bit index within the original 4-bit CARRY4.  Every cell
@@ -1115,10 +1112,9 @@ void XC7Packer::relocate_carry_o_fabric()
         if (s == nullptr || cin_net == nullptr || o == nullptr)
             return;
         std::unique_ptr<NetInfo> sum_copy{new NetInfo};
-        sum_copy->name = ctx->id(o->name.str(ctx) + "$sum$" + std::to_string(++autoidx));
-        std::unique_ptr<CellInfo> lut =
-                create_lut(ctx, o->name.str(ctx) + "$sumLUT$" + std::to_string(++autoidx),
-                           {s, cin_net}, sum_copy.get(), Property(6));
+        sum_copy->name = ctx->id(fresh_name(o->name.str(ctx), "$sum$"));
+        std::unique_ptr<CellInfo> lut = create_lut(ctx, fresh_name(o->name.str(ctx), "$sumLUT$"), {s, cin_net},
+                                                   sum_copy.get(), Property(6));
         // Re-point EVERY user (including any sum-FF: xc7_logic_tile_valid
         // re-evaluates the carry bits against both slice halves (eighths
         // 0..3 and 4..7), and a lone FF on the O net claims the output mux
@@ -1158,8 +1154,7 @@ void XC7Packer::relocate_carry_o_fabric()
         // slice with a free output mux (the validity check rejects carry
         // tiles), while a fixed relative row can collide with another chain's
         // absolute position and displace one of its LUTs.
-        IdString nname = sum_copy->name;
-        ctx->nets[nname] = std::move(sum_copy);
+        add_net(std::move(sum_copy));
         new_cells.push_back(std::move(lut));
         relocated++;
         if (getenv("DBG_CARRYO"))
@@ -1186,7 +1181,7 @@ void XC7Packer::relocate_carry_o_fabric()
     // assigned by the chain renumber).
     auto split_at = [&](CellInfo *c4, int i, CellInfo *root) -> CellInfo * {
         std::unique_ptr<CellInfo> nb{new CellInfo};
-        nb->name = ctx->id(c4->name.str(ctx) + "$split$" + std::to_string(++autoidx));
+        nb->name = ctx->id(fresh_name(c4->name.str(ctx), "$split$"));
         nb->type = ctx->id("CARRY4");
         auto declare = [&](IdString name, PortType t) {
             nb->ports[name].name = name;
@@ -1219,48 +1214,14 @@ void XC7Packer::relocate_carry_o_fabric()
         // Dedicated COUT->CIN spine link: the model has no fabric pips into
         // CIN, so a link via the old CO[i-1] fabric net is unroutable.
         std::unique_ptr<NetInfo> link{new NetInfo};
-        link->name = ctx->id(c4->name.str(ctx) + "$carry$" + std::to_string(++autoidx));
+        link->name = ctx->id(fresh_name(c4->name.str(ctx), "$carry$"));
         connect_port(ctx, link.get(), c4, ctx->id("CO3"));
         connect_port(ctx, link.get(), nb.get(), ctx->id("CIN"));
-        IdString lname = link->name;
-        ctx->nets[lname] = std::move(link);
+        add_net(std::move(link));
         // Pass-through fills: c4's freed head i..3 carries CO[i-1] up to its
         // CO3; nb's empty tail 0..i-1 carries its CIN up to bit i.  Realise
         // each S=1 with a local 6LUT, just like pack_carries_atomic() does
         // for constant S inputs before relocation.
-        //
-        // DI is left UNCONNECTED on a pass-through lane, where upstream
-        // c2c05095a's series ties it to $PACKER_GND_NET.  Tying it adds a
-        // constant sink that routeVcc() often cannot bridge in an already
-        // dense slice, and this fork's routeVcc refuses to write undriven
-        // constant inputs rather than emitting them silently as upstream
-        // does.  That refusal is what failed UberDDR3 x8/x16 and the
-        // nexys_video demo -- 3, 6 and 6 unbridged sinks, every one of them a
-        // pass-through DI.
-        //
-        // This does NOT weaken the DI-delivery invariant above (an unrouted
-        // carry-DI bypass reads VCC, not 0, so omitting a GND DI silently
-        // delivers 1).  That invariant governs a lane whose S is a real
-        // signal.  Here S is hardwired to 1 through the feed-through LUT just
-        // created, and the MUXCY computes CO = S ? CIN : DI, so DI cannot
-        // reach CO at all; the lane's O is disconnected too, its net having
-        // moved to the other cell.  A DI that reads 1 is unobservable.
-        // Measured on conflict.v.  The CARRY4 CONFIGURATION FASM is identical
-        // with and without the tie: the PRECYINIT|CARRY4|CY0 subset is 6 lines
-        // either way and diffs empty.  That is the claim this argument needs,
-        // and it holds.
-        //
-        // The WHOLE FASM is not identical, and an earlier revision of this
-        // comment said it was.  Over all features: 385 without the tie against
-        // 369 with it, 32 disappearing and 16 appearing.  Only 16 of the 32 are
-        // the GFAN/BYP GND routes; the rest are 4 *LUT.INIT values, 4 CLBLL
-        // site IMUX pin selections and 8 INT routing pips.  The four INIT pairs
-        // have EQUAL POPCOUNT (32 ones each), which is LUT input permutation
-        // rather than a changed function -- the router had one fewer sink to
-        // place and picked different inputs.  Two nouns: what the safety
-        // argument needs is *the carry chain's configuration unchanged*; what
-        // the original sentence asserted was *no FASM feature changed at all*,
-        // which was measured over the GND-route features only.
         for (int b = i; b < 4; b++) {
             connect_port(ctx, vcc, c4, pname("S", b));
             PortRef pr{c4, pname("S", b)};
@@ -1339,7 +1300,7 @@ void XC7Packer::relocate_carry_o_fabric()
 
     for (auto *root : roots) {
         if (root->attrs.count(ctx->id("BEL"))) {
-            ++chains_pinned; // imported (Vivado-proven) placement: leave alone
+            ++chains_pinned;
             continue;
         }
         // NOTE: roots deliberately keep constr_x/y UNCONSTR.  An earlier
@@ -1463,11 +1424,6 @@ void XC7Packer::relocate_carry_o_fabric()
         }
     }
 
-    // Unconditional whenever the design has a CARRY4 chain at all.  Upstream
-    // emits this only when the pass acted, which makes "nothing needed
-    // relocating" and "the pass no longer runs" the same observation; a
-    // regression harness cannot tell them apart.  The chain total is the
-    // denominator the other three numbers are shares of.
     if (!roots.empty())
         log_info("   Carry-O relocation: %d sum(s) duplicated, %d CARRY4 split(s) over %d chain(s); "
                  "%d BEL-pinned chain(s), %d BEL-pinned cell(s) left alone\n",

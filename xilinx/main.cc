@@ -71,14 +71,6 @@ po::options_description UspCommandHandler::getArchOptions()
 
 void UspCommandHandler::customBitstream(Context *ctx)
 {
-    // One switch, no coordinates.  Both emitters take the rectangle from
-    // NEXTPNR_PARTITION_ROI, the same file placement and routing read: two
-    // sources for one rectangle is how they drift apart.
-    //
-    // Opt-in rather than implied by roi_active(), because the containment
-    // evidence needs BOTH outputs -- the unfiltered FASM is what proves the
-    // region outside the partition is byte-identical between two RM builds,
-    // and a filter that switched itself on would delete that comparison.
     bool region_only = vm.count("region-only") > 0;
     if (vm.count("fasm")) {
         std::string filename = vm["fasm"].as<std::string>();
@@ -99,15 +91,6 @@ std::unique_ptr<Context> UspCommandHandler::createContext(std::unordered_map<std
     return std::unique_ptr<Context>(new Context(chipArgs));
 }
 
-// Deliberately here and NOT in customAfterLoad. setupArchContext runs before
-// parse_json; customAfterLoad runs after it. Interning "fixed-routes" after the
-// design's own names are interned shifts the packer's later IdStrings but not
-// the design's, and the HeAP placer iterates cell-name-keyed unordered_maps in
-// raw hash order (placer_heap.cc 190/267/380/450/653/695/1339/1352, with
-// IdString hashing to its own index). A partial shift re-partitions those
-// buckets and moves the placement -- 39 of 65 cells on counter25, with a
-// zero-pip file. Interning before parse_json shifts EVERY subsequent index
-// equally, which preserves the bucket partition and hence iteration order.
 void UspCommandHandler::setupArchContext(Context *ctx)
 {
     if (vm.count("fixed-routes"))
@@ -155,25 +138,9 @@ void UspCommandHandler::customAfterLoad(Context *ctx)
                       int(ctx->xdc_dropped.size()));
         }
     }
-    // Snapshot the reconfigurable-module cell set. This has to happen here and
-    // nowhere later: customAfterLoad runs after parse_json and
-    // attributesToArchInfo (common/command.cc:305 then :308), so the static
-    // cells are bound and the RM cells are not -- and Arch::place() ends with
-    // archInfoToAttributes() (xilinx/arch.cc:901), which stamps NEXTPNR_BEL onto
-    // every bound cell and destroys the distinction permanently.
-    //
-    // Taken unconditionally, not only when a rectangle is supplied, so that the
-    // set is available to any later diagnostic and so its cost and its census
-    // line appear in every log rather than only in confined runs.
     ctx->snapshot_rm_cells();
     if (vm.count("no-pack") && !vm.count("pack-only"))
         ctx->warn_prepacked_x9_parity();
-    // Force the partition rectangle to load NOW rather than lazily on the first
-    // checkBelAvail. Laziness would make a malformed or impossible rectangle
-    // fatal only if something later happened to ask about a bel -- so a run
-    // that placed nothing would accept a broken rectangle silently, and a test
-    // asserting "a bad rectangle is rejected" would pass for the wrong reason.
-    // The mechanism must fail at configuration time, not at first use.
     (void)ctx->roi_active();
     if (vm.count("region-only") && ctx->roi_active() && ctx->rm_cells.empty())
         log_error("--region-only: the RM cell set snapshotted at import is empty%s, so the partition rectangle "

@@ -170,9 +170,6 @@ void CommandHandler::setupContext(Context *ctx)
 {
     if (ctx->settings.find(ctx->id("seed")) != ctx->settings.end()) {
         ctx->rngstate = ctx->setting<uint64_t>("seed");
-        // settings["seed"] is overwritten with the derived rngstate at the
-        // end of this function, so record the restored value while it is
-        // still the seed and not the state.
         ctx->settings[ctx->id("seed.arg")] = ctx->rngstate;
     }
 

@@ -1,12 +1,3 @@
-// Positive control for the BEL-pinned branch, which is the DFX case: partial
-// reconfiguration pins BELs, and a stamped placement came from a tool that had
-// muxing arch_place.cc does not model.  Same lane-1 conflict as conflict.v, but
-// the CARRY4 carries a BEL attribute, so the packer must NOT split it -- the
-// import's placement wins and the cell name survives.
-//
-// Expected: 0 chains fall back, 1 conflicting chain reported BEL-pinned.
-// The site is the one nextpnr itself chose for ctl_o_to_ff.v on
-// xc7a35tcsg324 with this ballout, so it is known routable here.
 module top (
     input  wire       clk_i,
     input  wire [3:0] s_i,

@@ -939,59 +939,16 @@ struct Arch : BaseCtx
         return false;
     }
 
-    // NEXTPNR_PARTITION_ROI=<file>: confine reconfigurable-module (RM) logic to
-    // a partition rectangle given in prjxray grid_x/grid_y TILE coordinates.
-    //
-    // The file is the same prjxray ROI object `fasm2frames --roi` and
-    // `--roi-strict` already consume -- {"info": {"GRID_X_MIN": .., "GRID_X_MAX":
-    // .., "GRID_Y_MIN": .., "GRID_Y_MAX": ..}} -- so placement, routing and frame
-    // emission read ONE rectangle from ONE file instead of three that drift
-    // apart.  scripts/roi_snap.py emits exactly this, already snapped to the
-    // frame lattice.
-    //
-    // TILE coordinates, never slice coordinates.  SLICE_X40Y0 and SLICE_X41Y0
-    // are both sites of CLBLL_R_X25Y0, so a slice-space boundary can split a CLB
-    // tile column -- not a legal DFX partition boundary, and the cause of 250 of
-    // the 338 detouring nets in docs/static-lock-convergence.md section 8.2.
-    //
-    // nextpnr's Loc IS prjxray grid space, so no conversion is needed or wanted:
-    // xilinx/python/xilinx_device.py reads grid_x/grid_y straight out of
-    // tilegrid.json, xilinx/python/bbaexport.py writes tile_insts row-major over
-    // (y, x), and getBelLocation() below recovers them by divmod on
-    // chip_info->width.  Note that TILE-NAME X/Y is a different system with the
-    // same extents (INT_L_X32Y100 is grid (81,103)); do not mix them.
     mutable int roi_x0 = -1, roi_y0 = -1, roi_x1 = -1, roi_y1 = -1;
     mutable bool roi_loaded = false;
     void load_partition_roi() const;
 
-    // The ROI file's OPTIONAL "siblings" array: the other partitions on this
-    // device, which THIS RUN IS NOT BUILDING.  Empty unless the file names them,
-    // so a file carrying only "info" is the mechanism it was before this
-    // existed.
-    //
-    // They govern ROUTING ONLY.  Placement, RM steering, --region-only emission
-    // and invariant P stay the rectangle above's alone: this run's RM cells
-    // belong to it and to no other, and a sibling reserves no bel.
-    //
-    // WHY THEY HAVE TO EXIST.  In a chained replay each run frees one region and
-    // clamps that region's rectangle; every region an earlier run already
-    // contained is ordinary static logic to this one, so router2 rips it up
-    // under congestion and re-routes it with no rectangle at all.  Measured on
-    // the four-region static: RM-net pips outside their own rectangle went
-    // 0/133/155/123 after replay 0 to a fixed point of 1/4/11/0 after three full
-    // four-run passes -- iterating cannot close it, because every pass re-opens
-    // what the previous one contained.  A sibling rectangle re-clamps those nets
-    // to the rectangle they are already in.
     struct RoiRect
     {
         int x0, y0, x1, y1;
     };
     mutable std::vector<RoiRect> roi_siblings;
 
-    // Rectangle 0 is the partition; 1..roi_siblings.size() are the siblings in
-    // file order.  One numbering shared by the clamp, the route gate and the
-    // census, so a rectangle index printed in a log names the same rectangle
-    // everywhere.
     RoiRect roi_rect(int i) const
     {
         if (i == 0)
@@ -1014,17 +971,9 @@ struct Arch : BaseCtx
     }
     bool const_path_in_rect(const NetInfo *net, WireId wire, int rect) const;
 
-    // One veto counter per enforcement point, reported at the end of
-    // Arch::place().  These exist because "0 RM cells outside the rectangle" is
-    // a STATIC observation: it is equally true of a rectangle that refused a
-    // thousand escape attempts and of a rectangle that was never consulted.
-    // The counters separate "the mechanism held" from "nothing tried to leave",
-    // which is the distinction this programme has repeatedly failed to make --
-    // most recently when four malformed-rectangle tests passed under --no-place
-    // because the lazily-loaded rectangle was never opened.
-    mutable int64_t roi_veto_avail = 0; // point 1, checkBelAvail
-    mutable int64_t roi_veto_cell = 0;  // point 2, isValidBelForCell
-    mutable int64_t roi_veto_loc = 0;   // point 3, isBelLocationValid
+    mutable int64_t roi_veto_avail = 0;
+    mutable int64_t roi_veto_cell = 0;
+    mutable int64_t roi_veto_loc = 0;
 
     bool roi_active() const
     {
@@ -1041,30 +990,10 @@ struct Arch : BaseCtx
         return x < roi_x0 || x > roi_x1 || y < roi_y0 || y > roi_y1;
     }
 
-    // The RM cell set, snapshotted at import before anything binds a bel.
-    //
-    // Deliberately NOT derived from an attribute at the point of use.
-    // Arch::place() ends with archInfoToAttributes(), which stamps NEXTPNR_BEL
-    // onto EVERY bound cell -- so both "has a bel" and "has NEXTPNR_BEL" are
-    // valid static/RM discriminators BEFORE placement and tautologies after it.
-    // Three separate places in this tree re-derive the distinction from
-    // attrs["BEL"], each with its own type filter, and all three are inert on a
-    // round-tripped netlist because archInfoToAttributes erases that attribute.
-    // This set is taken once, at customAfterLoad, and is the single answer.
-    // std::unordered_set, not hashlib's pool<>: pool requires a T::hash()
-    // member and this tree's IdString has none (it is keyed through
-    // std::hash<IdString>, which is how ctx->cells works).
     std::unordered_set<IdString> rm_cells;
     bool rm_snapshot_taken = false;
     void snapshot_rm_cells();
 
-    // Set by Arch::pack(). The RM set is snapshotted at customAfterLoad, which
-    // runs BEFORE the pack step, so any run that packs invalidates it: every
-    // cell the packer creates carries a name the snapshot never saw, and
-    // is_rm_cell() fails open on a miss. The DPR flow passes --no-pack, but
-    // that pairing was unenforced -- one missing CLI flag from a rectangle that
-    // confines a shrinking subset of the RM logic while still reporting
-    // non-zero vetoes. check_partition_nets() refuses to run under a stale set.
     bool packed_since_rm_snapshot = false;
     void warn_prepacked_x9_parity() const;
 
@@ -1073,46 +1002,10 @@ struct Arch : BaseCtx
         return rm_snapshot_taken && ci != nullptr && rm_cells.count(ci->name);
     }
 
-    // NEXTPNR_PARTITION_EXEMPT_NETS=<file>: one net name per line (blank lines
-    // and '#' comments ignored), exempt from invariant P below.
-    //
-    // This file exists because of a gap the source cannot close for us.  P
-    // excludes the global clock spine, and this architecture has NO usable
-    // predicate for "is a global clock net":
-    //
-    //   - NetInfo::is_global (xilinx/archdefs.h) is declared and NEVER WRITTEN
-    //     on this arch.  Every write in the tree is ecp5/pack.cc or
-    //     ice40/arch.cc; every xilinx read would see a permanent false.  It
-    //     compiles, it reads naturally, and it would exempt nothing -- exactly
-    //     the shape of silently-inert mechanism this programme keeps shipping.
-    //   - routeClock()'s `is_global` (xilinx/arch.cc) is a function-LOCAL bool
-    //     re-derived from driver/user cell TYPES, shadowing the dead member. It
-    //     is not stored, not exported, and not a name test.
-    //   - getBelGlobalBuf() is a bel-TYPE test that also matches PSEUDO_GND and
-    //     PSEUDO_VCC, so it conflates clocks with the const drivers.
-    //
-    // A type-based exemption would also widen silently the moment a design uses
-    // a buffer type not on the list.  So the exemption is an explicit list of
-    // NAMES, supplied per design, counted and logged on every run -- unresolved
-    // entries included, because a typo'd exemption that matches no net is
-    // indistinguishable from a correct one unless it is reported.
     mutable std::unordered_set<IdString> exempt_nets;
     mutable bool exempt_nets_loaded = false;
     void load_exempt_nets() const;
 
-    // The keepout's escape list, and the reason it is a SECOND file rather than
-    // a second use of the one above.  Both sets end up unioned into the set
-    // router2 gets, so this changes nothing a run can observe -- what it
-    // changes is what a reader can conclude.  The file above says "this net is
-    // none of invariant P's business"; this one says "this net may cross a
-    // rectangle it does not belong to".  A design can need the second without
-    // the first, and folding them would make a keepout escape indistinguishable
-    // from a P escape in every log and every audit.
-    //
-    // It is the LAST resort, not the first: the keepout's own exemption is
-    // derived in router2 from getBelGlobalBuf(), so the clock spine needs no
-    // entry here.  An entry that names no net is warned about for the same
-    // reason load_exempt_nets warns.
     std::unordered_set<IdString> load_keepout_exempt_nets() const;
     mutable std::unordered_set<IdString> keepout_exempt_cache;
     mutable bool keepout_exempt_loaded = false;
@@ -1123,96 +1016,12 @@ struct Arch : BaseCtx
 
     void fill_partition_route_cfg(PartitionRouteCfg &cfg, bool clamp_off, bool keepout_off, bool narrow_off) const;
 
-    // Invariant P, asserted at the end of Arch::place().
-    //
-    //   Every signal net with at least one endpoint on an RM cell has ALL of
-    //   its endpoints on cells placed INSIDE the partition rectangle.
-    //
-    // Equivalently: no signal net crosses the partition boundary.  Each
-    // boundary signal is split by an anchor LUT sited inside the rectangle into
-    // a static-side net and an RM-side net.  P is a property of the NETLIST,
-    // not of the router, so a violation is repaired upstream by adding
-    // partition pins -- never by exempting the net here.
-    //
-    // Why the routing clamp needs this first: a net's router2 bounding box is
-    // the union over its arcs, so a net that legitimately crosses already has a
-    // box spanning both sides.  Intersecting that box with the rectangle leaves
-    // exactly two options and both are failures -- clamp it and a legal design
-    // cannot route (with the error naming a pip, pointing at the router when
-    // the defect is in the anchoring), or exempt it and the exemption is a
-    // per-net hole that pr_verify cannot see because it is intentional.
-    //
-    // $PACKER_GND_NET and $PACKER_VCC_NET are excluded by exact name equality,
-    // never by the find("$PACKER_") substring test snapshot_rm_cells uses on
-    // cell names -- a catch-all is how an exemption becomes a hole.  They
-    // cannot satisfy P by construction: usp_bel_hard_unavail above pins every
-    // PSEUDO_GND/PSEUDO_VCC bel to grid x=0, so unless the rectangle includes
-    // column 0 the const drivers are outside it always.  Containing them is
-    // Unit 7.5's problem and is a change to route_xilinx_const's
-    // "always succeeds" contract, not a bounding-box question.
     void check_partition_nets() const;
 
-    // The single definition of "a net the partition rectangle governs": any net
-    // with at least one endpoint on an RM cell, less the two const nets and the
-    // explicitly exempted ones. Empty when the rectangle is inactive.
-    //
-    // TWO CONSUMERS, ONE DEFINITION, AND THAT IS THE POINT.
-    // check_partition_nets() asserts invariant P over this set before placement
-    // finishes; Arch::route() clamps the router's pip choice over this same set.
-    // If the two ever disagreed, a net could satisfy the gate and then route
-    // wherever it liked -- a hole of exactly the kind this unit exists to close,
-    // and one that no acceptance script could see, because both halves would
-    // report success. check_partition_nets() NPNR_ASSERTs the agreement rather
-    // than documenting it.
     std::unordered_set<IdString> partition_nets() const;
 
-    // The same question the router and the route gate ask, widened by the
-    // sibling rectangles: which rectangle confines this net's pips?  Maps a net
-    // name to a roi_rect() index; a net absent from the map is unconfined.
-    //
-    // Rectangle 0 is partition_nets() unchanged -- the nets P was asserted over.
-    // A sibling rectangle takes a net iff EVERY endpoint of that net is placed
-    // and inside it, which is the strongest claim placement alone can support.
-    // It is not a no-op: a net wholly inside a region can still DETOUR outside
-    // it under congestion, and forbidding that detour is the whole point.  What
-    // it does not do is constrain a net whose endpoints are not all in one
-    // region -- that net is asking to leave, and this says nothing about it.
-    // Const nets and listed exemptions are excluded by the same exact names
-    // partition_nets() uses.
-    //
-    // Deliberately NOT a name-prefix or instance-path test.  The rectangle a
-    // region's logic occupies is a placement fact this run can read; "which slot
-    // is this cell in" is a fact only the build script knows, and encoding it
-    // here would make containment depend on a naming convention.
     std::unordered_map<IdString, int> partition_net_rects() const;
 
-    // The DETECTIVE half of route containment. router2's clamp is PREVENTIVE
-    // and covers exactly one of the ten paths in this tree that can bind a pip
-    // to a net. The others bypass it entirely, and three of them are live:
-    //
-    //   * attributesToArchInfo() binds every pip in a netlist's ROUTING
-    //     attribute at frontend import (frontend_base.h:293) -- five stages
-    //     before Arch::route() -- taking the STRENGTH VERBATIM FROM THE FILE.
-    //   * routeClock() and applyFixedRoutes() bind at STRENGTH_LOCKED before
-    //     router2 runs, with no location test of any kind.
-    //   * routeVcc() and fixupRouting() bind AFTER it, so nothing downstream
-    //     can reconcile them.
-    //
-    // Worse, router2 LAUNDERS the imported ones back out: setup_wires() seeds
-    // its per-wire state from pre-existing Arch bindings, check_arc_routing()
-    // skips any arc already consistently routed so it is never offered to the
-    // A* or the backwards BFS, and bind_and_check() then re-binds those exact
-    // pips -- with no location test. The ripup filter is
-    // `strength <= STRENGTH_STRONG`, so anything LOCKED is exempt even from
-    // that. A round-tripped netlist can therefore carry pips anywhere on the
-    // die, through router2, and out into the FASM, with the clamp reporting a
-    // clean run throughout.
-    //
-    // So this walks what was ACTUALLY BOUND rather than what was searched.
-    // net->wires is the complete record of bound pips -- Arch::bindPip is the
-    // single writer, and xilinx/fasm.cc's write_routing() reads that same map
-    // and nothing else -- so a pass over it sees every pip feature that can
-    // reach the bitstream.
     void check_partition_routing() const;
     void check_partition_keepout() const;
 
@@ -1224,25 +1033,6 @@ struct Arch : BaseCtx
         if (usp_bel_hard_unavail(bel))
             return false;
         NPNR_ASSERT(bel != BelId());
-        // Partition ROI, enforcement point 1 of 3.  Bel-only and deliberately
-        // cell-agnostic: checkBelAvail is consulted BEFORE a bind and never to
-        // re-validate one already made, so a static cell the import bound
-        // outside the rectangle is untouched by this.  This is the point that
-        // keeps out-of-rectangle bels out of HeAP's fast_bels snapshot
-        // (common/placer_heap.cc:473, :492), which is the strongest single
-        // effect the rectangle has -- but it is a ONE-SHOT snapshot taken in
-        // build_fast_bels(), and placer1's fast_bels is not filtered at all, so
-        // it cannot be the only enforcement point.  See points 2 and 3 in
-        // xilinx/arch_place.cc.
-        //
-        // ORDERING INVARIANT, load-bearing: build_fast_bels() runs once, at
-        // common/placer_heap.cc:151, and the rectangle must already be loaded
-        // by then or the snapshot is taken unfiltered.  Arch::place() is far
-        // downstream of the eager load in UspCommandHandler::customAfterLoad,
-        // so this holds -- but it holds by ordering, not by construction, and
-        // reverting the load to lazy would silently reopen HeAP's ripup escape
-        // (:1027).  scripts/partition-roi-evidence.sh asserts the ordering
-        // directly out of the log.
         if (roi_veto && bel_outside_roi(bel)) {
             ++roi_veto_avail;
             return false;
@@ -1976,6 +1766,9 @@ struct Arch : BaseCtx
     Dsp48e1Config dsp48e1Config(const CellInfo *cell) const;
     Dsp48e1Stage dsp48e1InputStage(const Dsp48e1Config &cfg, const std::string &base) const;
     SyncPinTiming dsp48e1PinTiming(const CellInfo *cell, IdString port) const;
+    bool isConstantNet(const NetInfo *net) const;
+    bool isClockNet(const NetInfo *net) const;
+    std::vector<const NetInfo *> getClockSources(const NetInfo *net, bool include_generated) const;
     TimingPortClass syncPinClass(const CellInfo *cell, IdString port, const SyncPinTiming &t,
                                  int &clockInfoCount) const;
     mutable std::unordered_set<IdString> undriven_clock_logged, unclocked_cell_logged, off_slicem_logged;
@@ -2131,7 +1924,6 @@ struct Arch : BaseCtx
     bool isGlobalClockNet(const NetInfo *clk_net, bool &lenient) const;
     std::unordered_set<IdString> fixedRouteClocks(const std::string &filename) const;
     void applyFixedRoutes(const std::string &filename, std::function<void()> route_unlocked_clocks);
-    // region_only restricts the dump to the NEXTPNR_PARTITION_ROI rectangle.
     void writeFixedRoutes(const std::string &filename, bool region_only = false) const;
     void writeFileReplacing(const std::string &filename, const char *what,
                             std::function<void(std::ostream &)> body) const;
@@ -2175,8 +1967,6 @@ struct Arch : BaseCtx
         return chip_info->tile_types[chip_info->tile_insts[id.tile].type];
     }
     // -------------------------------------------------
-    // region_only restricts emission to the NEXTPNR_PARTITION_ROI rectangle,
-    // which is what makes the output a partial bitstream source.
     void writeFasm(const std::string &filename, bool region_only = false);
 };
 

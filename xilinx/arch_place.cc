@@ -343,89 +343,6 @@ bool Arch::xc7_logic_tile_valid(IdString tileType, LogicTileStatus &lts) const
                 continue;
             any = true;
             // frozen == stamped: bound STRENGTH_USER by the BEL-attr placer.
-            //
-            // ---------------------------------------------------------------
-            // MERGE CONFLICT RESOLVED HERE, 2026-08-09 (xc7dpr Unit 7.1).
-            // The only conflicting hunk in the whole merge of
-            // fix/frozen-tile-validity-strength (8e11e04) into 4a3d7e1.  Both
-            // sides independently raised this bar off STRENGTH_STRONG and
-            // landed on different values; both rationales are kept verbatim
-            // below because they are two different measured bugs, not two
-            // opinions about one.
-            //
-            // OURS (bf78fccf, "restore real slice validation for
-            // placer-constrained tiles"):
-            //   The threshold must be STRENGTH_USER, exactly as the comment
-            //   above says.  STRENGTH_STRONG is what nextpnr's own machinery
-            //   uses for cells IT constrains: HeAP's strict legaliser binds
-            //   every chain it places with STRENGTH_STRONG and calls
-            //   isBelLocationValid() right after (placer_heap.cc,
-            //   legalise_placement_strict), and placer1 binds cluster children
-            //   the same way.  At STRENGTH_STRONG, any tile filled by a carry
-            //   chain or F7/F8 mux tree was mistaken for a frozen import and
-            //   skipped validation entirely -- making the legaliser's own
-            //   validity query vacuous, so illegal LUT pairings (two LUTs
-            //   whose logical inputs need more distinct physical pins than
-            //   the slice has) survived to the router, which then failed with
-            //   one overused SITEWIRE contended by two nets.
-            //
-            // THEIRS (a5dfa7d0, "frozen-tile fast path must require LOCKED,
-            // not STRONG"):
-            //   The bar is LOCKED, not STRONG.  STRENGTH_STRONG is what
-            //   nextpnr's OWN cluster/macro placement binds at
-            //   (place_common.cc place_macro, the radius search below), so
-            //   accepting it let a self-placed macro count as "imported, trust
-            //   it".  A dist-RAM macro landing in a tile whose FFs were
-            //   stamped by place_lef then skipped every control-set check:
-            //   RAMD64E on one clock co-packed with FDREs on another, in a
-            //   slice with ONE CLK pin.  Unroutable by construction -- it
-            //   surfaced as permanently skipped clock arcs (eth-arp: 4 slices
-            //   of the txf CDC FIFO, u_txf_wr WCLK vs u_txf_rd CK).  Imported
-            //   placements bind USER (attributesToArchInfo / HeAP / placer1),
-            //   so they still hit this fast path; nextpnr's own STRONG
-            //   bindings now get validated.
-            //
-            // ADJUDICATION.  Both rationales are about excluding
-            // STRENGTH_STRONG(2), and 4 and 5 both exclude it, so the two
-            // sides agree on every case either of them argues about.  Since
-            // LOCKED=4 and USER=5, the bars can differ for exactly one input:
-            // a cell at strength 4.  Measured, not assumed:
-            //
-            //   * Every bindBel call site in the tree, at THIS merged
-            //     revision: 23 WEAK, 10 STRONG, 3 USER, 2 LOCKED -- and both
-            //     LOCKED sites are ecp5/globals.cc:379,390, a different
-            //     architecture that is not linked into -DARCH=xilinx.  The
-            //     two variable-strength sites propagate rather than originate
-            //     (placer_heap.cc:291 copies cell->belStrength into the saved
-            //     solution; common/nextpnr.cc:620 replays the input JSON).
-            //   * So the only producer of strength 4 is an input JSON that
-            //     literally carries BEL_STRENGTH: 4.
-            //   * Observed BEL_STRENGTH across every JSON the flow has
-            //     actually produced (257 files, incl. the 19,768-cell
-            //     adversarial design and 65-cell counter25, reference and
-            //     replay): values 1, 2 and 5 only.  Zero cells at 4 anywhere
-            //     except the two artefacts of the Phase 5 experiment that
-            //     restamped 4 on purpose.
-            //   * That experiment is the one case where the bars can differ,
-            //     and it was run: --r2-strength 4 and --r2-strength 5 give
-            //     identical results on counter25 (0 post-place repairs, 0
-            //     unrouted arcs, 45/46 topo resolved, 22 pin swaps, same
-            //     semantic FASM diff), i.e. the fast path firing or not makes
-            //     no difference there.
-            //
-            // Taking THEIRS.  It is the weaker bar, so it cannot be the
-            // over-strict arm of risk 5 for an imported static stamped at
-            // LOCKED; it keeps this file identical to the branch so the next
-            // merge does not re-conflict here; and under the standing
-            // convention (the harness restamps imports to 5) it is
-            // bit-for-bit equivalent to OURS.
-            //
-            // CAVEAT, recorded rather than silently fixed: this bar is NOT
-            // single-sited.  arch_place.cc:1241 ("imported" == belStrength >=
-            // STRENGTH_USER, in the 5LUT/6LUT remerge skip) is a second
-            // is-this-frozen test, it came in with bf78fccf, and the parked
-            // branch does not touch it.  At stamp 5 the two agree.  A future
-            // unit that stamps imports at 4 must move BOTH or they disagree.
             if (c->belStrength < STRENGTH_LOCKED) {
                 all_frozen = false;
                 break;
@@ -1154,37 +1071,6 @@ void Arch::dumpTileStatus(BelId bel) const
 
 bool Arch::isBelLocationValid(BelId bel) const
 {
-    // Partition ROI, enforcement point 3 of 3: the post-bind catch.
-    //
-    // This MUST be here, above the isLogicTile dispatch, and not folded into
-    // usp_bel_hard_unavail. The only usp_bel_hard_unavail sweep in this function
-    // is in the terminal else-branch below, which a CLB/CLBLM bel never reaches
-    // -- so on exactly the tile class an RM occupies, this function is blind to
-    // the hard-unavail mechanism.
-    //
-    // ONE live path binds an out-of-rectangle bel and relies on this check to
-    // undo it -- placer1's SA move path.  Its fast_bels is built unfiltered
-    // (common/placer1.cc:89-105, in deliberate contrast to HeAP's :473/:492)
-    // and random_bel_for_cell (:846-894) gates only on force_z /
-    // check_cell_bel_region / bel_excluded / locked_bels, of which the last two
-    // are DEAD in refinement mode -- setup_exclusion_bbox() and the locked_bels
-    // insert both sit inside the `if (!refine)` arm.  try_swap_position binds
-    // at :619 and validates here at :634; try_swap_chain at :768/:771.  This is
-    // not a --placer sa curiosity: HeAP runs it by default via placer1_refine
-    // (common/placer_heap.cc:316), so on the default flow this check is the
-    // SOLE barrier on that path.
-    //
-    // HeAP's own legaliser is NOT such a path, though it looks like one.  Its
-    // ripup escape (common/placer_heap.cc:1027, `checkBelAvail(sz) || (radius >
-    // ripup_radius || rng(20000) < 10)`) does override a false from
-    // checkBelAvail -- but the candidate `sz` is drawn from fast_bels, which was
-    // built WITH the rectangle applied, so a false there means "occupied" or
-    // "hard-unavail", never "outside the rectangle".  The escape cannot reach a
-    // bel the rectangle excluded.  That neutralisation is a consequence of the
-    // ordering invariant noted at checkBelAvail in arch.h, not of this check.
-    //
-    // Cell-aware via the bound cell, because a static cell legitimately sits
-    // outside the rectangle and must stay valid there.
     if (roi_active() && bel_outside_roi(bel)) {
         CellInfo *bc = getBoundBelCell(bel);
         if (bc != nullptr && is_rm_cell(bc)) {
@@ -1241,16 +1127,6 @@ bool Arch::isValidBelForCell(CellInfo *cell, BelId bel) const
 {
     if (usp_bel_hard_unavail(bel))
         return false;
-    // Partition ROI, enforcement point 2 of 3: the per-cell gate.
-    //
-    // Cell-AWARE, unlike checkBelAvail, and that asymmetry is load-bearing. A
-    // static cell sits at whatever bel the import bound it to, which is
-    // legitimately outside the rectangle. If this test were bel-only, every
-    // static cell would become invalid at its own bel, fixupPlacement would
-    // classify the entire locked design as stranded at the strand test below
-    // (the `isValidBelForCell(m, m->bel)` sweep in fixupPlacement) -- it does
-    // NOT skip them, because its `attrs.count(id("BEL"))` guard is itself inert
-    // on a round-tripped netlist.
     if (roi_active() && is_rm_cell(cell) && bel_outside_roi(bel)) {
         ++roi_veto_cell;
         return false;
@@ -1315,26 +1191,6 @@ bool Arch::isValidBelForCell(CellInfo *cell, BelId bel) const
             get_net_or_empty(cell, id_A6) != nullptr)
             return false;
     }
-    // NEXTPNR_EXCLUDE_STAMPED_BBOX was here, and is RETIRED rather than
-    // repaired.  Unit 7.6 step 3 scoped a repair -- swap its attrs["BEL"]
-    // predicate for the RM snapshot, swap its derived bbox for the partition
-    // rectangle, invert the sense -- but carrying that out produces:
-    //
-    //     if (is_rm_cell(cell) && bel_outside_roi(bel)) return false;
-    //
-    // which is token-identical to the partition check at the head of this same
-    // function (:1073-1076), including the $PACKER_ carve-out, because
-    // snapshot_rm_cells() already drops $PACKER_* names.  Sitting ~75 lines
-    // BELOW it, the repaired knob could never fire: the earlier check has
-    // already returned.  A repair whose product is unreachable code is not a
-    // repair, and shipping it would have added a fifth mechanism that looks
-    // live and is not.
-    //
-    // The knob was also inert as written -- it gated on attrs["BEL"], which
-    // archInfoToAttributes() erases in favour of NEXTPNR_BEL, so on the
-    // round-tripped netlist a DPR static import IS it saw zero stamped cells
-    // and derived an empty bbox.  Its sense was inverted from what containment
-    // needs, too: it rejected bels INSIDE its box.
     return true;
 }
 
@@ -1562,24 +1418,6 @@ void Arch::fixupPlacement()
             }
         }
     }
-    // The input remerge below normalises which physical A-pin each net sits on.
-    // It used to re-derive the LOGICAL port label from the pin's compacted
-    // ordinal in lutInfo.input_sigs -- "I" + to_string(slot).  That is only
-    // correct when the incoming pins are already A1..An with no gaps, which is
-    // true of nextpnr's own packing and false of any netlist whose pins have
-    // been permuted before import: a --no-pack replay of a routed design, i.e.
-    // every DPR RM rebuild.  assignCellInfo() COMPACTS the connected pins
-    // (pack.cc:1436-1441), so the ordinal is neither the logical index nor the
-    // physical one.  On a LUT2 imported as A3<-I1, A5<-I0, A6<-VCC tie, the
-    // three occupied pins compact to slots 0,1,2 and the labels come out
-    // I0,I1,I2: the "I2" is a port the cell does not have -- fasm.cc's
-    // get_lut_init() refuses it -- and, silently, the two real inputs SWAP,
-    // which is a wrong truth table with no error at all.
-    //
-    // The logical identity of a net is a property of the CELL, not of the pin
-    // it happens to occupy, so snapshot the labels by net and carry them
-    // across.  A pin with no label (a VCC tie has no logical counterpart) stays
-    // unlabelled, exactly as it arrived.
     auto snapshot_orig_ports = [&](CellInfo *c, std::unordered_map<IdString, std::string> &out) {
         if (c == nullptr)
             return;
@@ -1597,9 +1435,6 @@ void Arch::fixupPlacement()
             slot += (slot.empty() ? "" : " ") + tok;
         }
     };
-    // Census: measured, not predicted.  `relabel_wrong` is how many labels the
-    // old ordinal rule would have got wrong on THIS design -- the size of the
-    // defect, reported by the build that would have suffered it.
     int remerged = 0, relabel_kept = 0, relabel_ordinal = 0, relabel_wrong = 0;
     for (auto &ts : tileStatus) {
         if (ts.lts == nullptr)
@@ -1689,10 +1524,6 @@ void Arch::fixupPlacement()
             snapshot_orig_ports(lut5, lut5_orig);
             snapshot_orig_ports(lut6, lut6_orig);
             ++remerged;
-            // Write the logical label for `net` at `port`, carrying it over from
-            // the snapshot.  Falls back to the historic ordinal derivation only
-            // for a cell that arrived with no labels at all, so a netlist this
-            // pass has always been the sole labeller of is untouched.
             auto write_orig = [&](CellInfo *c, IdString port, IdString net,
                                   const std::unordered_map<IdString, std::string> &snap,
                                   const std::unordered_map<IdString, std::vector<int>> &slots) {
@@ -1711,8 +1542,6 @@ void Arch::fixupPlacement()
                         c->attrs[ak] = ordinal;
                         ++relabel_ordinal;
                     } else {
-                        // An unlabelled pin -- a constant tie -- has no logical
-                        // counterpart and must not acquire one.
                         c->attrs.erase(ak);
                         if (!ordinal.empty())
                             ++relabel_wrong;
@@ -2188,13 +2017,8 @@ void Arch::fixupRouting()
      * and Vivado happy, preserving the original logical netlist
      */
     std::unordered_map<int, std::vector<int>> used_perm_pips; // tile -> [extra_data] for LUT perm pips
-    // Accounting for the two ways this rewrite can silently damage the netlist it
-    // is meant to relabel.  Both were found by comparing a route-lock replay's
-    // written JSON against the reference build's: the FASM was identical and the
-    // netlist was not, which is invisible to a FASM gate and fatal to the next
-    // build that re-imports the JSON.
-    int perm_label_no_net = 0; // X_ORIG_PORT suppressed because connect_port() had a null net
-    int perm_dropped_nets = 0; // input connections this pass removed and did not put back
+    int perm_label_no_net = 0;
+    int perm_dropped_nets = 0;
     bool lut_perm_drop_fatal = false;
     if (const char *pdm = getenv("NEXTPNR_LUT_PERM_DROP")) {
         const std::string m(pdm);
@@ -2251,8 +2075,6 @@ void Arch::fixupRouting()
                 if (lut5)
                     orig_ports_l5[ports[i]] = str_or_default(lut5->attrs, id("X_ORIG_PORT_" + ports[i].str(this)));
             }
-            // Per-CELL snapshot, unlike orig_nets above, which merges the pair.
-            // Used only to check afterwards that nothing was lost.
             NetInfo *l6_before[6] = {nullptr, nullptr, nullptr, nullptr, nullptr, nullptr};
             NetInfo *l5_before[6] = {nullptr, nullptr, nullptr, nullptr, nullptr, nullptr};
             for (int i = 0; i < 6; i++) {
@@ -2281,19 +2103,6 @@ void Arch::fixupRouting()
                 auto p = ports[i];
                 if (!new_connections.count(p) || new_connections.at(p).empty())
                     continue;
-                // Only a pin the cell's OWN bel actually has may be connected.
-                // The two LUTs of a slot share the slice's A1..A6 SITE wires, so
-                // a permutation pip recorded for the slot was applied to BOTH
-                // cells -- but the 5LUT BEL has no A6 pin at all, so the 5LUT
-                // cell acquired an A6 port whose bel pin does not exist.
-                // Harmless while it lasts (fixupRouting runs after routing, and
-                // the FASM writer ignores a pin with no X_ORIG_PORT), but it is
-                // written into the JSON, and re-importing that JSON aborts in
-                // router2's setup_nets with "No wire found for port A6 on
-                // destination cell ..." -- the R2 static-import blocker.  It is
-                // also the exact state xc7_logic_tile_valid() already rejects
-                // (get_net_or_empty(lut5, id_A6) != nullptr); only the frozen-
-                // tile fast path stops that check from firing on an import.
                 if (lut6 && getBelPinWire(lut6->bel, p) != WireId()) {
                     if (!lut6->ports.count(p)) {
                         lut6->ports[p].name = p;
@@ -2301,23 +2110,12 @@ void Arch::fixupRouting()
                     }
                     NetInfo *newnet = orig_nets[new_connections.at(p).front()];
                     connect_port(getCtx(), newnet, lut6, p);
-                    // connect_port() RETURNS SILENTLY on a null net
-                    // (common/design_utils.cc), so writing the label
-                    // unconditionally manufactured an X_ORIG_PORT on a pin with
-                    // no net at all -- 1,641 cells' worth in a route-lock replay,
-                    // and a self-inconsistency in every consumer of the JSON.
-                    // A pin with no net has no label.
                     if (newnet == nullptr) {
                         perm_label_no_net++;
                     } else {
                         lut6->attrs[id("X_ORIG_PORT_" + p.str(this))] = std::string("");
                         auto &orig_attr = lut6->attrs[id("X_ORIG_PORT_" + p.str(this))].str;
                         for (auto &nc : new_connections.at(p)) {
-                            // Separator BETWEEN elements, and skip elements that
-                            // are empty because this cell never used that original
-                            // port.  Appending " " after each non-first element
-                            // emitted a TRAILING space for the list ["", "I1"],
-                            // which the FASM writer split into an empty token.
                             if (orig_ports_l6[nc].empty())
                                 continue;
                             if (!orig_attr.empty())
@@ -2328,8 +2126,6 @@ void Arch::fixupRouting()
                             lut6->attrs.erase(id("X_ORIG_PORT_" + p.str(this)));
                     }
                 }
-                // Same bel-pin guard as the LUT6 block above.  This is the one
-                // that matters in practice: p == A6 on a 5LUT bel.
                 if (lut5 && getBelPinWire(lut5->bel, p) != WireId()) {
                     if (!lut5->ports.count(p)) {
                         lut5->ports[p].name = p;
@@ -2338,13 +2134,11 @@ void Arch::fixupRouting()
                     NetInfo *newnet = orig_nets[new_connections.at(p).front()];
                     connect_port(getCtx(), newnet, lut5, p);
                     if (newnet == nullptr) {
-                        // Same suppression as the LUT6 block above.
                         perm_label_no_net++;
                     } else {
                         lut5->attrs[id("X_ORIG_PORT_" + p.str(this))] = std::string("");
                         auto &orig_attr = lut5->attrs[id("X_ORIG_PORT_" + p.str(this))].str;
                         for (auto &nc : new_connections.at(p)) {
-                            // Same fix as the LUT6 block above.
                             if (orig_ports_l5[nc].empty())
                                 continue;
                             if (!orig_attr.empty())
@@ -2356,14 +2150,6 @@ void Arch::fixupRouting()
                     }
                 }
             }
-            // A permutation is a RELABELLING: every net on the slot's inputs
-            // before this rewrite must still be on one of them after it.  The
-            // disconnect phase above clears both the source and the destination
-            // of every permutation pip but the reconnect phase only refills
-            // destinations, so a net sitting on a port that is neither -- which
-            // is what an imprecise route-lock pin alignment produces -- is
-            // DELETED, silently, with the FASM unaffected.  Count it; a netlist
-            // defect that costs nothing to detect must not be silent again.
             for (int c = 0; c < 2; c++) {
                 CellInfo *cc = (c == 0) ? lut6 : lut5;
                 NetInfo **before = (c == 0) ? l6_before : l5_before;

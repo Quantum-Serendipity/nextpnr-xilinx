@@ -1049,46 +1049,6 @@ bool Arch::getBudgetOverride(const NetInfo *net_info, const PortRef &sink, delay
 bool Arch::place()
 {
     dsp48e1CacheDrive();
-    // Steer the solver into the partition rectangle, in addition to forbidding
-    // everything outside it.
-    //
-    // The three veto points (checkBelAvail, isValidBelForCell,
-    // isBelLocationValid) close every bind path, but they can only ever say NO
-    // to a location that has already been chosen.  They do not constrain
-    // `cell_locs`, so HeAP's analytic solve and its cut-spreader are free to
-    // park an RM cell's coordinates far outside the rectangle, and placer1's SA
-    // goes on proposing moves there for the whole refinement.
-    //
-    // Measured, 5 seeds, congested vehicle (docs/region-steering.md):
-    //   SA moves rejected by the rectangle   1747 -> 0        (deterministic)
-    //   router2 bounding-box growths         14.8 -> 2.8 mean (5/5 seeds down)
-    //   router2 time                         -21% mean        (4/5 seeds down)
-    //   fmax                                 NO EFFECT: 42.81 -> 43.03 mean
-    //                                        against a +-1.9 spread, 3 up 2 down
-    // The fmax column is there because a single seed showed a 3% regression and
-    // that turned out to be noise.  Four seeds more was cheaper than being
-    // wrong about it.
-    //
-    // ci->region is the only handle that changes what gets PROPOSED.  It is
-    // read as genuine steering in four live places: the per-iteration clamp on
-    // the analytic solution (common/placer_heap.cc:827-835, which feeds back
-    // through cell_pos() into the next build_equations()), the cut-spreader's
-    // bin rescale (:1794-1800), the strict legaliser's ring radius (:954-961),
-    // and placer1's SA move diameter and origin (common/placer1.cc:884-893 --
-    // live under placer1_refine, where bel_excluded and locked_bels are not).
-    //
-    // Steering only.  ci->region MUST NOT be the enforcement mechanism
-    // (correction 140): region_bounds is a bounding box, and a cell whose
-    // region is unset is unconstrained, so nothing here weakens the vetoes.
-    // The set is the same rectangle and the same RM snapshot they use, and
-    // createRectangularRegion's bounds are inclusive exactly as
-    // bel_outside_roi's are, so the steered set cannot disagree with the
-    // enforced one.
-    //
-    // This replaces NEXTPNR_FRESH_REGION_MARGIN, which did the same thing from
-    // a bbox derived off attrs["BEL"] at the tail of Arch::pack() -- dead
-    // twice over on this flow, because archInfoToAttributes() erases BEL and
-    // because --no-pack skips pack() entirely (correction 139).
     if (roi_active()) {
         IdString rname = id("partition_region");
         createRectangularRegion(rname, roi_x0, roi_y0, roi_x1, roi_y1);
@@ -1114,10 +1074,6 @@ bool Arch::place()
                           ci->name.c_str(this), ci->region->name.c_str(this), roi_x0, roi_y0, roi_x1, roi_y1);
             ++kept;
         }
-        // Unconditional, like every other partition census in this file: a
-        // mechanism that is silent when it does nothing cannot be told apart
-        // from one that never ran.  "0 steered" is a RESULT -- it means the RM
-        // snapshot is empty, which is worth seeing.
         log_info("partition region: steering %d RM cell(s) into (%d,%d)-(%d,%d), %d bel(s) in region\n", steered,
                  roi_x0, roi_y0, roi_x1, roi_y1, int(region.at(rname)->bels.size()));
         log_info("partition region: %d of them keep a region set before placement, inside the rectangle\n", kept);
@@ -1194,47 +1150,16 @@ bool Arch::place()
                      "counts both bels)\n",
                      lut_sites_used, lut_sites, 100 * lut_sites_used / lut_sites);
     }
-    // Emitted after fixupPlacement so the post-place repair's own candidate
-    // rejections are included.  Unconditional when the rectangle is active,
-    // even at zero, so the acceptance gate can grep for it and tell "held" from
-    // "never ran" -- the same reason the fixed-routes counter line at :1948 is
-    // printed unconditionally.
     if (roi_active())
         log_info("partition ROI: %lld bel-avail veto(s) [point 1], %lld cell-gate veto(s) [point 2], "
                  "%lld post-bind veto(s) [point 3]\n",
                  (long long)roi_veto_avail, (long long)roi_veto_cell, (long long)roi_veto_loc);
-    // Invariant P, checked here and not at the head of Arch::route().  This is
-    // the last point at which the placement is final -- fixupPlacement above
-    // both relocates cells and rewires LUT input ports, so net->users is not
-    // settled before it -- and the first at which nothing has been routed.  It
-    // is also before archInfoToAttributes() below, which stamps NEXTPNR_BEL
-    // onto every bound cell and thereby destroys the static/RM distinction for
-    // any subsequent round trip.
-    //
-    // The head of Arch::route() would have been the obvious site and is the
-    // wrong one: the placement-containment evidence script runs nextpnr with
-    // --no-route, so a gate there would be skipped by the very flow that exists
-    // to prove the rectangle works.
     check_partition_nets();
     getCtx()->attrs[getCtx()->id("step")] = std::string("place");
     archInfoToAttributes();
     return true;
 }
 
-// Is this constant sink's value delivered by a CONFIGURATION BIT rather than by
-// the routing graph?  If so, failing to bridge it is not a defect and must not
-// fail the build -- but it is still reported, because "not a defect" is a claim
-// that has to be re-checked whenever the FASM writer changes.
-//
-// One case today: a CARRY4's CIN / CYINIT.  write_carry_config() in
-// xilinx/fasm.cc emits PRECYINIT.C0 / .C1 for a constant carry-in and says so:
-// "The carry packer disconnects a constant carry-in and records its value here,
-// so router2 needn't route GND/VCC into CIN/CYINIT."  It goes further and warns
-// that routing the (unused) CYINIT in via the AX path emits a PRECYINIT.AX bit
-// that CONFLICTS with PRECYINIT.CIN.  Measured on an artefact: the attosoc
-// legacy-carry4 build on xc7a100tfgg484-2 cannot bridge five CARRY4 CYINIT
-// sinks, and every one of those slices carries the constant anyway --
-// e.g. CLBLL_L_X2Y71.SLICEL_X0.PRECYINIT.C0 for SLICE_X0Y71.
 static bool const_sink_is_config_delivered(const PortRef &usr)
 {
     if (usr.cell == nullptr)
@@ -1337,43 +1262,6 @@ std::vector<Arch::ConstHoldout> Arch::routeVcc()
     // Gnd was left to defaults, which floated address-path const-0 inputs high
     // -> corrupt PC = 0x..fff0.)  See bridgeConstToWire() for the per-sink BFS.
     const int iter_max = 50000;
-    // A holdout is USUALLY NOT TERMINAL, and this is the whole reason the retry
-    // below exists.  The BFS terminates on `getBoundWireNet(curr) == net`, i.e.
-    // on the const net's OWN existing routing, as well as on a pseudo-intent
-    // wire.  So the graph this search runs on is not fixed: every sink that is
-    // bridged makes the const tree bigger and puts a terminator closer to the
-    // sinks that have not been tried yet.  A sink processed EARLY in
-    // net->users order can therefore fail -- it has to trek all the way to some
-    // tile's GND_WIRE -- where the identical sink processed LATE succeeds in a
-    // handful of hops, because by then a sibling sink in the same tile has
-    // already dragged the constant in.  That is exactly the asymmetry measured
-    // between a fresh build (max BFS 50000, one holdout) and a --fixed-routes
-    // replay of it (max BFS 40, none): the replay starts with the whole tree
-    // pre-bound.  Re-running the failures against the finished tree gives a
-    // fresh build the same advantage.
-    //
-    // BOTH failure modes are real and they need different treatment, which is
-    // why the retry also escalates the budget rather than only re-ordering:
-    //   * measured holdouts that EXHAUST the reachable free-wire graph at 9, 12,
-    //     34, 178, 683, 4366 and 5303 wires -- far below the cap.  Nothing that
-    //     spends more iterations helps those; there is nothing left to look at.
-    //   * a measured holdout found on the retry only at 136,077 wires, i.e.
-    //     beyond the 50,000 cap.  A path existed and the search was cut off.
-    // Simply raising iter_max for everyone would make every congested sink pay
-    // an unknown, device-size-dependent budget to fix the second class and do
-    // nothing at all for the first.
-    //
-    // Rip-up is NOT an option here, unlike in router1's route_const_arc (which
-    // does have a second, ripping pass): routeVcc runs AFTER the main router, so
-    // a signal net torn up here would never be re-routed by anything.
-    // Budget is escalated on the retry, and the two halves do different jobs.
-    // Pass 1 keeps the original 50,000 so a normal build costs exactly what it
-    // used to.  A sink that has already failed once is rare -- single digits on
-    // every design measured -- so it can afford a search large enough to
-    // EXHAUST the reachable free-wire graph rather than be cut off by it, which
-    // is what turns "we do not know whether a path exists" into an answer.
-    // Raising pass 1 to this value instead would make every congested sink pay
-    // it; the escalation is the same budget spent only where it is needed.
     const int iter_max_retry = 4000000;
     const int max_fill_passes = 8;
     std::vector<std::pair<IdString, int>> cnets = {
@@ -1405,9 +1293,6 @@ std::vector<Arch::ConstHoldout> Arch::routeVcc()
         if (src != WireId())
             bindWire(src, net, STRENGTH_STRONG);
         int max_iter_seen = 0, passes = 0;
-        // Sinks still to try, by index into net->users.  Pass 1 is every sink,
-        // in the original order, so a build with no holdout is bit-identical to
-        // the pre-retry behaviour; later passes carry only the failures.
         std::vector<size_t> pending, failed;
         for (size_t i = 0; i < net->users.size(); i++)
             pending.push_back(i);
@@ -1438,8 +1323,6 @@ std::vector<Arch::ConstHoldout> Arch::routeVcc()
             }
             if (failed.empty())
                 break;
-            // No progress: this pass bound nothing, so the next one would search
-            // an identical graph and fail identically.
             if (failed.size() == pending.size())
                 break;
             if (passes >= max_fill_passes)
@@ -2050,10 +1933,6 @@ void Arch::applyFixedRoutes(const std::string &filename, std::function<void()> r
                 continue;
             }
 
-            // Two accepted pip forms:
-            //  (a) index form  <tile>/<src_idx>.<dst_idx>   (nextpnr-native; writeFixedRoutes emits this)
-            //  (b) wire-name   <src_wire>-><dst_wire>       (from Vivado/RapidWright extraction; wire names
-            //                                                are shared Xilinx nomenclature, resolved by getWireByName)
             PipId pip;
             size_t arrow = pipspec.find("->");
             if (arrow != std::string::npos) {
@@ -2066,9 +1945,6 @@ void Arch::applyFixedRoutes(const std::string &filename, std::function<void()> r
                         log_warning("fixed-routes: wire not found: '%s' or '%s'\n", srcname.c_str(), dstname.c_str());
                     continue;
                 }
-                // Vivado-extracted names may be ANY member wire of a node (Vivado's
-                // node root differs from ours); pips attach only to the canonical
-                // node-root WireId, so canonicalise before the pip scan.
                 src = canonicalWireId(chip_info, src.tile, src.index);
                 dst = canonicalWireId(chip_info, dst.tile, dst.index);
                 for (auto p : getPipsDownhill(src))
@@ -2076,7 +1952,7 @@ void Arch::applyFixedRoutes(const std::string &filename, std::function<void()> r
                         pip = p;
                         break;
                     }
-                if (pip == PipId()) // fall back to an uphill scan (e.g. site-pin entry pips)
+                if (pip == PipId())
                     for (auto p : getPipsUphill(dst))
                         if (getPipSrcWire(p) == src) {
                             pip = p;
@@ -2128,8 +2004,6 @@ void Arch::applyFixedRoutes(const std::string &filename, std::function<void()> r
                     continue;
                 }
             }
-            // Already claimed (e.g. by the clock spine or a duplicate line)?  Skip
-            // rather than trip the bindPip assert; warn only on a real conflict.
             NetInfo *pn = getBoundPipNet(pip);
             if (pn != nullptr) {
                 if (pn != net && conflict++ < 20)
@@ -2139,9 +2013,6 @@ void Arch::applyFixedRoutes(const std::string &filename, std::function<void()> r
             }
             WireId src = getPipSrcWire(pip), dst = getPipDstWire(pip);
             NetInfo *sn = getBoundWireNet(src), *dn = getBoundWireNet(dst);
-            // A wire already owned by a DIFFERENT net means the file mis-associates
-            // pips (e.g. a lossy net-name mapping).  Skip with a warning rather than
-            // trip bindPip's wire-ownership assert.
             if ((sn != nullptr && sn != net) || (dn != nullptr && dn != net)) {
                 if (conflict++ < 20)
                     log_warning("fixed-routes: pip %s wire owned by another net (%s); skipping\n",
@@ -2175,98 +2046,12 @@ void Arch::applyFixedRoutes(const std::string &filename, std::function<void()> r
     log_info("    fixed-routes: bound %d/%d pips (net-miss %d, tile-miss %d, pip-miss %d, conflict %d, malformed %d, "
              "redundant-driver %d)\n",
              nbound, nlines, miss_net, miss_tile, miss_pip, conflict, malformed, redundant);
-    // In an interactive run these are advisory: you read the warnings and
-    // decide.  In a DPR build they are not.  Every one of the five paths below
-    // ends in `continue`, so a non-zero count means pips named in the static
-    // lock were NOT bound -- and the partial bitstream that follows is built
-    // against a static design that is not the one on the board.  Nothing
-    // downstream can detect that, because the FASM is self-consistent; it is
-    // simply consistent with the wrong static.
-    //
-    // redundant-driver is deliberately EXCLUDED.  It counts a second driver
-    // skipped because routeClock() already drove that wire, which a
-    // whole-design import legitimately offers (the clock nets come through as
-    // TYPE == SIGNAL).  It is an expected non-zero on the working flow; making
-    // it fatal would break the very configuration this exists to protect.
-    //
-    // Gated on roi_active() rather than a new env var: a partition rectangle
-    // IS the DPR signal, non-DPR users are unaffected, and no knob is added
-    // that could later be set to make this inert.
     if (roi_active() && (miss_net || miss_tile || miss_pip || conflict || malformed))
         log_error("fixed-routes: %d pip(s) from the static lock were not bound (net-miss %d, tile-miss %d, pip-miss "
                   "%d, conflict %d, malformed %d); the static lock did not fully apply\n",
                   miss_net + miss_tile + miss_pip + conflict + malformed, miss_net, miss_tile, miss_pip, conflict,
                   malformed);
 
-    // -------- DRIVERLESS LOCK: a partial lock that omits the driver ---------
-    // A lock file may legitimately specify only PART of a net's route, and the
-    // two orientations of "part" are NOT symmetric.  Measured (work/f1-fragment,
-    // scripts/f1-fragment-lock.sh):
-    //
-    //   * omitted pips on the SINK side -- the router completes the last mile
-    //     correctly.  Net u_rm.rst: 17 of its 21 pips locked (the driver-side
-    //     ones), output carries all 21 and is identical to the reference.
-    //
-    //   * omitted pips on the SOURCE side -- the net is SILENTLY TRUNCATED.
-    //     Nets rm_out[0,1,2,4]: the written route equals the lock file exactly
-    //     (new=0 pips, 0.0 ms of router time), the routing tree's root moves off
-    //     the driver's bel pin (SITEWIRE/SLICE_X52Y124/A6LUT_O6, strength 1) onto
-    //     a fabric wire (INT_L_X32Y124/EE4BEG2, strength 4), and the FASM loses
-    //     the driver's output-mux rows (CLBLL_L_X32Y124.SLICEL_X0.AOUTMUX.O6 and
-    //     CLBLL_L_X32Y124.CLBLL_LOGIC_OUTS20.CLBLL_LL_AMUX).  The LUT output is
-    //     connected to nothing: dead silicon.  And EVERYTHING reported success --
-    //     rc=0, the bound-pips line above clean on all six counters, zero
-    //     "Failed to route arc", zero warnings, zero errors, both partition gates
-    //     passing, 948 lines of FASM emitted.
-    //
-    // Mechanism, at common/router2.cc:1091-1093:
-    //     // Case of arcs that were pre-routed strongly (e.g. clocks)
-    //     if (net->wires.count(dst_wire) && net->wires.at(dst_wire).strength > STRENGTH_STRONG)
-    //         return ARC_SUCCESS;
-    // check_arc_routing() has already returned false for that arc one line
-    // earlier (router2.cc:1087), so the arc is KNOWN INCOMPLETE; the sink wire is
-    // nonetheless bound at STRENGTH_LOCKED (4) > STRENGTH_STRONG (2), so
-    // route_net() returns ARC_SUCCESS (enumerator 0 of ArcRouteResult,
-    // router2.cc:368-373, i.e. also `false` out of the bool route_net at :1065)
-    // and abandons the whole net.  That guard is upstream (ffd679cd3, David Shah,
-    // 2019-11-19) and is deliberately NOT touched here -- changing shared router
-    // behaviour is a different, larger change.  This is DETECTION, placed at the
-    // one point in the flow that knows the lock was partial.
-    //
-    // Predicate, measured exact on both orientations above: for every net that
-    // received a locked pip, take W = its driver's output wire.  If the net has a
-    // driver wire at all and does not own W, the lock specifies part of that
-    // net's route but omits its driver -- the router cannot reconnect it and, per
-    // the guard above, will not try.
-    //
-    // EXEMPT: the packer's const nets.  $PACKER_GND_NET / $PACKER_VCC_NET are
-    // driven by the synthetic PSEUDO_GND / PSEUDO_VCC cells the packer creates
-    // (xilinx/pack.cc:877 and :888).  Their driver wire --
-    // PSEUDO_{GND,VCC}_WIRE_GLBL -- IS bound in a fully routed build, where it
-    // shows up as the net's root triplet with an empty pip.  It is simply not
-    // bound YET at this point: the const router binds it later, and no pip in
-    // any lock file will ever bind it because no pip has it as a source.  So
-    // for these nets its absence carries NO information about whether the lock
-    // is partial, which is the only thing this check is asking.
-    //
-    // That is measured, not argued.  fixed-routes-roundtrip's replay arm locks a
-    // COMPLETE route -- 742/742 pips bound, 0 unrouted arcs, 0 lines of semantic
-    // FASM diff against the reference it replays -- and the un-exempted predicate
-    // still flagged $PACKER_VCC_NET.  On a whole route, so partiality cannot be
-    // what it saw.  On the whole-chip clock-containment arm the count is exactly
-    // 2 of 19,686 locked nets and both are these two.
-    //
-    // Keyed on the driver cell TYPE.  The RM-set snapshot at
-    // xilinx/arch.cc:3428-3436 makes the same carve-out by '$PACKER_' name
-    // substring; that is precedent for the exemption EXISTING, not for how to
-    // spell it.  A name substring also matches any user net that happens to
-    // contain the text and misses a const driver that arrives renamed, whereas
-    // the type is what pack.cc actually sets.
-    //
-    // LIMITATION, stated so the exemption cannot be read as a clean bill of
-    // health: this check now says NOTHING about whether a const net's lock is
-    // complete.  A truncated GND/VCC tree is a real failure and it is NOT
-    // covered here -- const containment is Unit 7.5's.
     std::vector<NetInfo *> driverless_nets;
     int with_driver = 0, const_exempt = 0;
     for (NetInfo *net : fixed_nets) {
@@ -2276,10 +2061,6 @@ void Arch::applyFixedRoutes(const std::string &filename, std::function<void()> r
             continue;
         }
         WireId src_wire = getCtx()->getNetinfoSourceWire(net);
-        // No driver cell, or a driver with no placement/bel pin: nothing to
-        // compare against, and not a defect in the lock file.  Such a net lands
-        // in none of the three buckets below, so if the census line's numbers do
-        // not add up to the denominator, that gap is exactly this case.
         if (src_wire == WireId())
             continue;
         if (net->wires.count(src_wire)) {
@@ -2288,14 +2069,9 @@ void Arch::applyFixedRoutes(const std::string &filename, std::function<void()> r
         }
         driverless_nets.push_back(net);
     }
-    // fixed_nets is an unordered_set; sort so the census and the name list below
-    // are reproducible between runs of the same binary on the same input.
     std::sort(driverless_nets.begin(), driverless_nets.end(),
               [&](NetInfo *a, NetInfo *b) { return a->name.str(this) < b->name.str(this); });
     int driverless = int(driverless_nets.size());
-    // The exempt count is REPORTED, not merely applied: an exemption that leaves
-    // no trace in the log is how a hole opens without anyone noticing it opened.
-    // Same shape as the 'partition RM set:' census at xilinx/arch.cc:3441-3443.
     log_info("    fixed-routes: %d/%d locked nets contain their driver (%d driverless, %d const driver(s) exempt)\n",
              with_driver, int(fixed_nets.size()), driverless, const_exempt);
     if (driverless > 0) {
@@ -2310,22 +2086,16 @@ void Arch::applyFixedRoutes(const std::string &filename, std::function<void()> r
         }
         if (driverless > shown)
             names += ", ...";
-        // Same advisory/fatal split, and for the same reason, as the not-bound
-        // check above: outside a rectangle a deliberately partial lock is an
-        // interactive experiment and this is advice.  A partition rectangle IS
-        // the DPR signal, and there a truncated net reaches a partial bitstream
-        // that loads cleanly and drives nothing -- self-consistent FASM for a
-        // design that is not the one anybody asked for.  Gated on roi_active()
-        // rather than a new env var, so no knob exists that could make this inert.
         if (roi_active())
             log_error("fixed-routes: %d locked net(s) do not contain their own driver (%s); the locked fragment "
                       "omits the net's driver wire, so router2 silently truncates the net to the fragment "
-                      "(common/router2.cc:1091-1093) and the driver's output mux is lost from the FASM\n",
+                      "(Router2::route_net, strongly pre-routed sink branch) and the driver's output mux is lost "
+                      "from the FASM\n",
                       driverless, names.c_str());
         else
             log_warning("fixed-routes: %d locked net(s) do not contain their own driver (%s); the locked fragment "
                         "omits the net's driver wire, so router2 will silently truncate the net to the fragment "
-                        "(common/router2.cc:1091-1093)\n",
+                        "(Router2::route_net, strongly pre-routed sink branch)\n",
                         driverless, names.c_str());
     }
 
@@ -2366,55 +2136,11 @@ void Arch::applyFixedRoutes(const std::string &filename, std::function<void()> r
     // 2235, i.e. essentially every flip-flop left with an unconfigured D mux --
     // dead on hardware.  So allow "keep Vivado's pin assignment" while still
     // letting the router complete the last mile.
-    //
-    // NEXTPNR_FIXEDROUTES_NOSWAP=1 also skips the whole loop.  It predates the
-    // NO_PINSWAP knob directly above in our tree and is the name the DPR gate
-    // fixtures use (scripts/fixed-routes-roundtrip.sh --noswap,
-    // scripts/nightly-regression.sh), so it is folded in here rather than
-    // renamed: one boolean, two spellings, identical behaviour.  Default is ON,
-    // i.e. unchanged; the knob exists because the loop's necessity is a
-    // measurable question and it used to require an out-of-tree binary to ask.
-    // Measured on xc7a100tcsg324-1 over a 65-cell design and a 19,768-cell one:
-    //   - replaying the ORIGINAL synthesis JSON under the lock, the swap is
-    //     unnecessary.  Skipping it routes clean (0 unrouted arcs), leaves the
-    //     FASM identical as a multiset, and additionally makes the written
-    //     netlist match the reference EXACTLY, which it does not otherwise.
-    //   - replaying the ROUTED JSON under --no-pack, the swap is REQUIRED.
-    //     Skipping it makes router2 fail to converge -- 19 overused site wires
-    //     on the small design, 31,386 on the large one.  The imported ports do
-    //     not agree with the locked route and only this loop reconciles them.
-    // So the KNOWN BUG note below stands, but not for the reason it gives.
     const bool noswap_env = getenv("NEXTPNR_FIXEDROUTES_NOSWAP") != nullptr;
     bool replicate = getenv("NEXTPNR_FIXEDROUTES_NO_PINSWAP") != nullptr || noswap_env ||
                      (getenv("NEXTPNR_ROUTE_FIXED_ONLY") != nullptr &&
                       getenv("NEXTPNR_FIXEDROUTES_PINSWAP") == nullptr);
     const bool swap_lut_pins = !replicate;
-    //
-    // WHERE THE TARGET ASSIGNMENT COMES FROM.  The lock records the LUT input
-    // crossbar as PIP_LUT_PERMUTATION pips, and those pips ARE the mapping:
-    // extra_data is eight[3:0];from[3:0];to[3:0], where `from` indexes the TILE
-    // INPUT the net arrives on and `to` indexes the BELPIN it is delivered to
-    // (xilinx/java/bbaexport.java, addSiteIOPIP).  Read the desired per-belpin
-    // net straight out of them.
-    //
-    // This replaces a wire-name probe that answered in the WRONG COORDINATE
-    // SYSTEM for part of its domain.  That probe took the net bound on the
-    // belpin's own site wire when there was one, and otherwise fell back to
-    // "the net on the direct tile input wire whose name ends in the same pin
-    // id" -- which is the `from` index, i.e. fixupRouting()'s OUTPUT labelling,
-    // not the input labelling this loop is supposed to produce.  Measured on
-    // counter25 with the two candidate nets computed side by side: of the 19
-    // input pins where they differ, a freshly packed netlist agrees with the
-    // BELPIN net 19 times and with the tile input 0 times, and all 4 swaps the
-    // loop performed in that configuration came from the fallback -- i.e. every
-    // one of them was damage.  On the 14,054-LUT adversarial design the same
-    // damage is 7,015 swaps and it costs 1,870 LUT input connections, because
-    // fixupRouting() then reads a port that no longer holds the net it expects
-    // and deletes the connection instead of moving it.
-    //
-    // Reading the permutation pips has a second property the probe did not:
-    // it is the SAME data fixupRouting() reads (arch_place.cc, used_perm_pips),
-    // so the two passes cannot disagree about the permutation.
     std::unordered_map<int, std::unordered_map<int, NetInfo *>> locked_lut_input;
     for (NetInfo *net : fixed_nets) {
         for (auto &w : net->wires) {
@@ -2424,7 +2150,6 @@ void Arch::applyFixedRoutes(const std::string &filename, std::function<void()> r
             auto &pd = locInfo(pip).pip_data[pip.index];
             if (pd.flags != PIP_LUT_PERMUTATION)
                 continue;
-            // key: slot[3:0] << 4 | belpin index[3:0]
             locked_lut_input[pip.tile][(((pd.extra_data >> 8) & 0xF) << 4) | (pd.extra_data & 0xF)] = net;
         }
     }
@@ -2461,46 +2186,12 @@ void Arch::applyFixedRoutes(const std::string &filename, std::function<void()> r
             if (n != nullptr)
                 net_orig[n] = ci->attrs.at(ak).as_string();
         }
-        // Align all inputs: nextpnr's router treats each belpin as fixed to its
-        // tile input (A6-only leaves A1..A5 mismatched -> hooking collides ->
-        // 516-overused livelock), so the swap IS needed for routing.
-        //
-        // CORRECTION, measured: the "hooking collides" half of that sentence is
-        // stale -- the external BFS hook it names has been off by default since
-        // the reserved-net contract landed (see the early return below).  The
-        // CONCLUSION survives anyway, for a different reason: replaying a routed
-        // JSON with --no-pack, the imported ports disagree with the locked route
-        // and router2 cannot reconcile them, so without this loop the design is
-        // unroutable (31,386 overused wires on a 12k-LUT design).  Replaying the
-        // original synthesis JSON, by contrast, does NOT need it.
-        //
-        // KNOWN BUG: for some frozen LUTs the A1..A5 swap + INIT permutation
-        // writes a WRONG function (popcount changes) -- the detected pin
-        // disagrees with golden's INIT.  The FASM half of that is closed (the
-        // corruption was the writer aliasing an empty X_ORIG_PORT token onto
-        // logical I0; see the fasm-lut-pin-alias fix), but a NETLIST half
-        // remains and is not fixed here: with this loop enabled the replay drops
-        // 1,870 LUT input connections that the reference build has, and leaves
-        // 1,641 cells carrying an X_ORIG_PORT_Ak on a pin with no net.  Both
-        // counts fall to 0 under NEXTPNR_FIXEDROUTES_NOSWAP=1, so this loop is
-        // the cause.  The FASM is unaffected; a consumer of the WRITTEN JSON is
-        // not.  TODO: reconcile the direct-input detection with the golden INIT.
-        //
-        // BOTH halves of that TODO are now closed and the paragraph above is
-        // kept only as the historical record: the target assignment is read from
-        // the locked permutation pips above (no wire-name probe, no fallback in
-        // the wrong coordinate system), and fixupRouting() no longer writes a
-        // label for a connect_port() that was a no-op.
         auto tile_it = locked_lut_input.find(ci->bel.tile);
         const int slot = getBelLocation(ci->bel).z >> 4;
         for (int t = 1; t <= npin; t++) {
             IdString tgt = id("A" + std::to_string(t));
             if (getBelPinWire(ci->bel, tgt) == WireId())
                 continue;
-            // The net the LOCK delivers to THIS belpin, by index, from the
-            // permutation pip's `to` field.  Absent means the lock routes nothing
-            // to this belpin, which is not the same thing as "look somewhere else
-            // for a net" -- the old fallback's mistake.
             NetInfo *dnet = nullptr;
             if (tile_it != locked_lut_input.end()) {
                 auto pit = tile_it->second.find((slot << 4) | (t - 1));
@@ -2526,10 +2217,6 @@ void Arch::applyFixedRoutes(const std::string &filename, std::function<void()> r
                 }
             }
             if (src_pin == IdString()) {
-                // The two LUTs of a slot share the slice's input site wires, so a
-                // net the lock delivers to this belpin may belong to the partner
-                // cell and not to this one.  Leave it alone; it is not this cell's
-                // to move.
                 pins_net_not_on_cell++;
                 continue;
             }
@@ -2581,9 +2268,6 @@ void Arch::applyFixedRoutes(const std::string &filename, std::function<void()> r
                  "netlist's INIT and pin assignment are authoritative)\n");
     else
         log_info("    fixed-routes: %d LUT-pin template swaps\n", pin_swaps);
-    // Keep the counter line greppable in NOSWAP mode: the DPR gate parses
-    // "fixed-routes: <n> LUT-pin template swaps" out of the log, and the
-    // replicate branch above does not print it.
     if (noswap_env)
         log_info("    fixed-routes: 0 LUT-pin template swaps (alignment swap disabled by "
                  "NEXTPNR_FIXEDROUTES_NOSWAP)\n");
@@ -2835,13 +2519,6 @@ void Arch::writeFixedRoutes(const std::string &filename, bool region_only) const
                 PipId pip = w.second.pip;
                 if (pip == PipId())
                     continue;
-                // The format is one self-contained line per pip -- the net name is
-                // re-emitted on every line and there is no per-net header -- so a
-                // per-pip filter needs no format change.  What it DOES produce is a
-                // disconnected locked tree for any net the rectangle cuts, which is
-                // the reader's normal case (applyFixedRoutes hands the remainder to
-                // router2) but is invisible in the file: nothing records that a
-                // fragment is a fragment.
                 if (region_only) {
                     Loc l = getPipLocation(pip);
                     if (l.x < roi_x0 || l.x > roi_x1 || l.y < roi_y0 || l.y > roi_y1) {
@@ -2885,13 +2562,6 @@ bool Arch::isGlobalClockNet(const NetInfo *clk_net, bool &lenient) const
         clk_net_user_type == id_MMCME2_ADV_MMCME2_ADV;
     auto to_pll_mmcm_clkin1 = to_pll_or_mmcm && clk_net->users.front().port == id_CLKIN1;
 
-    // A single-user net feeding a BUFGCTRL clock input (I0) — e.g. the
-    // IBUFDS->BUFG input net — must reach the buffer through the dedicated
-    // CCIO->HCLK_CMT->CLK_HROW->CK_MUXED backbone.  Left to the general
-    // router it grabs the fabric pip CLK_BUFG_..._IMUX*_*->BUFGCTRL_I0,
-    // which does NOT deliver a working clock (the BUFG output is dead and
-    // the whole design freezes).  Route it here as a global so the
-    // dedicated path is bound LOCKED before the general router runs.
     auto to_bufg_input = (no_users == 1 && clk_net_user_type == id_BUFGCTRL &&
                           clk_net->users.front().port == id_I0);
 
@@ -3326,9 +2996,6 @@ bool Arch::route()
                       "bit (listed above). The design would be written out with undriven constant inputs.\n",
                       int(holdouts.size()));
         fixupRouting();
-        // This path never runs router2, so the clamp does not exist here at
-        // all -- every pip came from the imported ROUTING attribute or
-        // applyFixedRoutes. It is precisely the case the backstop is for.
         check_partition_routing();
         check_partition_keepout();
         getCtx()->settings[getCtx()->id("route")] = 1;
@@ -3341,10 +3008,6 @@ bool Arch::route()
     // hands the placed-but-otherwise-unrouted design off to an external router
     // (RapidWright's classic 7-series Router) that fills in all general nets.
     if (settings.find(id("route-clock-only")) != settings.end()) {
-        // routeClock() and applyFixedRoutes() have both already bound
-        // STRENGTH_LOCKED pips above, with no location test. The general nets
-        // are deliberately left for an external router, but whatever THIS tool
-        // bound is still ours to answer for.
         check_partition_routing();
         check_partition_keepout();
         getCtx()->settings[getCtx()->id("route")] = 1;
@@ -3387,18 +3050,6 @@ bool Arch::route()
             cfg.bb_margin_y = 4;
             cfg.backwards_max_iter = 200;
             cfg.perf_profile = true;
-            // Unit 7.4: confine the reconfigurable module's routing to the same
-            // rectangle that confined its placement. One rectangle, both phases --
-            // a routing clamp on a different rectangle than the placer used would
-            // be a guarantee about the wrong region.
-            // NEXTPNR_PARTITION_CLAMP=off is the DISCRIMINATION ARM, not a workaround.
-            // A clamp that has only ever been observed to pass is untested: the
-            // acceptance evidence needs a run where the same design, same placement
-            // and same rectangle routes WITHOUT the clamp, so that "0 pips outside
-            // the rectangle" can be shown to be caused by the clamp rather than by
-            // the router never having wanted to leave. It is logged as an error-level
-            // warning and named in assert-no-escape-hatches.sh so it cannot survive
-            // into a real DPR build unnoticed.
             const char *clamp_mode = getenv("NEXTPNR_PARTITION_CLAMP");
             const bool clamp_off = clamp_mode != nullptr && std::string(clamp_mode) == "off";
             if (roi_active() && clamp_off) {
@@ -3408,19 +3059,6 @@ bool Arch::route()
                             "unclamped control arm for the acceptance evidence. It must never be set for a build whose "
                             "bitstream will be loaded.\n");
             }
-            // The keepout is the clamp's complement, so it gets its own switch and
-            // its own default rather than riding on the clamp's. ON whenever a
-            // rectangle is active, because a rectangle that static routing crosses
-            // is a rectangle no partial bitstream can be relocated into, and that
-            // is true of every build with an ROI whether or not it has an RM.
-            //
-            // Independent in both directions, deliberately. NEXTPNR_PARTITION_CLAMP
-            // =off is the clamp's discrimination arm and it must stay a clean one:
-            // a run with the clamp off and the keepout on is a different experiment
-            // from either, and neither flag may quietly imply the other. The
-            // consequence is that an existing clamp control arm now also carries
-            // the keepout unless it sets this too, which is the honest reading --
-            // the two mechanisms were never the same claim.
             const char *keepout_mode = getenv("NEXTPNR_PARTITION_KEEPOUT");
             const bool keepout_off = keepout_mode != nullptr && std::string(keepout_mode) == "off";
             if (roi_active() && keepout_off) {
@@ -3445,23 +3083,9 @@ bool Arch::route()
                 for (const auto &pn : cfg.partition_nets)
                     if (pn.second == 0)
                         in_rect0++;
-                // Unconditional, pass or fail, for the same reason the net gate's
-                // census is unconditional: a clamp that says nothing is
-                // indistinguishable from a clamp that was never installed, and this
-                // programme has shipped four silently-inert mechanisms already.
-                // The count is rectangle 0's, not the map's size: with siblings the
-                // two differ, and this line names one rectangle.
                 if (cfg.partition_active) {
                     log_info("partition route clamp: %d net(s) confined to tiles (%d,%d)-(%d,%d)\n", in_rect0, roi_x0,
                              roi_y0, roi_x1, roi_y1);
-                    // An empty governed set stopped meaning what this warning says
-                    // the moment the keepout existed. On a STATIC build the regions
-                    // hold no RM logic by construction, so the set is empty and
-                    // correct, and the rectangle is doing its work through the
-                    // keepout instead -- warning there would be crying wolf on the
-                    // flow's main path. With the keepout off the original reading
-                    // stands: a rectangle was asked for, nothing is confined,
-                    // nothing will happen.
                     if (cfg.partition_nets.empty()) {
                         if (cfg.keepout_active)
                             log_info("partition route clamp: the rectangle governs no nets, so the clamp has nothing to "
@@ -3492,46 +3116,8 @@ bool Arch::route()
     // Runs after fixupRouting() so a pass-through pip fixupRouting() decides to
     // un-pip doesn't get its CE needlessly tied to VCC on an unused BUFHCE.
     routeBufhcePassthroughCE();
-    // LAST point at which anything can bind a pip, and the first at which
-    // nothing further will. Deliberately before archInfoToAttributes() below,
-    // so a violation aborts BEFORE the offending routing is stamped back into
-    // the ROUTING attribute and becomes re-importable.
     check_partition_routing();
     check_partition_keepout();
-    // POST-ROUTE timing, ON BY DEFAULT UNDER router2.
-    //
-    // router1 calls timing_analysis itself once routing is done, so a router1
-    // log has always carried a routed grading.  router2 does not, so without
-    // this the ONLY "Max frequency" lines in a router2 log come from placer1's
-    // post-placement call -- an estimate built from predictDelay(), a
-    // fixed-slope Manhattan function of two bels' tile coordinates, evaluated
-    // before a single wire is chosen.  It has no pip, wire, fanout or
-    // congestion term in it, and it is NOT the weaker of two models for want of
-    // data: the chipdb already carries a characterised max delay and a
-    // resistance on every interconnect pip and an SDF cell arc table per tile
-    // type, and getPipDelay()/getCellDelay() already consume them.  Opt-in,
-    // that database was reachable and unreached, and every Fmax this fork
-    // printed on a router2 build was a guess at what the router would do rather
-    // than a reading of what it did.
-    //
-    // The default is router2's alone BECAUSE router1 already analyses: making
-    // it unconditional would put a THIRD "Max frequency" block in every router1
-    // log, and callers in the openXC7 flow census those lines.
-    //
-    // A router2 log now carries two blocks, the routed one last and headed
-    // "Post-route timing analysis:".  A reader taking the last "Max frequency"
-    // line per clock name gets the routed figure; one counting lines sees two
-    // per graded clock, which is what a router1 log has always looked like.
-    //
-    // warn_on_failure stays false deliberately.  True would make a missed
-    // constraint an ERROR line, and log adjudication downstream of this fork
-    // treats an ERROR line in a nextpnr log as a failed stage -- so switching
-    // the default on would have turned every design that misses its period from
-    // a build with a bad number into a build that failed.
-    //
-    //   NEXTPNR_POST_ROUTE_TIMING=0  skip it; the analysis is not free
-    //   NEXTPNR_POST_ROUTE_TIMING=1  ask for it under router1 as well
-    //   NEXTPNR_CRIT_PATH_REPORT=1   also dump the critical path stage by stage
     dsp48e1CheckCache();
     dsp48e1WarnInternalPaths();
     const char *post_route_timing = getenv("NEXTPNR_POST_ROUTE_TIMING");
@@ -4192,6 +3778,70 @@ Arch::SyncPinTiming Arch::dsp48e1PinTiming(const CellInfo *cell, IdString port) 
     return t;
 }
 
+bool Arch::isConstantNet(const NetInfo *net) const
+{
+    if (net->driver.cell == nullptr)
+        return net->undef_const != 0;
+    const std::string &type = net->driver.cell->type.str(this);
+    return type == "PSEUDO_GND" || type == "PSEUDO_VCC" || type == "GND" || type == "VCC";
+}
+
+bool Arch::isClockNet(const NetInfo *net) const
+{
+    if (net->clkconstr != nullptr)
+        return true;
+    if (net->driver.cell == nullptr)
+        return false;
+    const std::string &type = net->driver.cell->type.str(this);
+    return type.find("BUF") != std::string::npos || type.find("PLL") != std::string::npos ||
+           type.find("MMCM") != std::string::npos;
+}
+
+std::vector<const NetInfo *> Arch::getClockSources(const NetInfo *net, bool include_generated) const
+{
+    std::vector<const NetInfo *> sources;
+    const CellInfo *drv = net->driver.cell;
+    if (drv == nullptr)
+        return sources;
+    const std::string &type = drv->type.str(this);
+    std::vector<const char *> inputs, alternates;
+    if (type.find("BUF") != std::string::npos) {
+        if (type.find("BUFR") != std::string::npos && !include_generated) {
+            auto div = drv->params.find(id("BUFR_DIVIDE"));
+            if (div != drv->params.end() && div->second.is_string && div->second.as_string() != "BYPASS" &&
+                div->second.as_string() != "1")
+                return sources;
+        }
+        inputs = {"I", "I0", "PAD"};
+        if (type.find("BUFGCTRL") != std::string::npos || type.find("BUFGMUX") != std::string::npos)
+            alternates = {"I1"};
+    } else if (include_generated &&
+               (type.find("PLLE2") != std::string::npos || type.find("MMCME2") != std::string::npos)) {
+        inputs = {"CLKIN1"};
+        alternates = {"CLKIN2"};
+    }
+    const bool mux = !alternates.empty();
+    auto input_net = [&](const char *in) -> const NetInfo * {
+        auto fnd = drv->ports.find(id(in));
+        if (fnd == drv->ports.end() || fnd->second.type != PORT_IN || fnd->second.net == nullptr ||
+            isConstantNet(fnd->second.net))
+            return nullptr;
+        const NetInfo *n = fnd->second.net;
+        if (mux && n->driver.cell == nullptr && n->clkconstr == nullptr)
+            return nullptr;
+        return n;
+    };
+    for (auto in : inputs)
+        if (const NetInfo *n = input_net(in)) {
+            sources.push_back(n);
+            break;
+        }
+    for (auto in : alternates)
+        if (const NetInfo *n = input_net(in))
+            sources.push_back(n);
+    return sources;
+}
+
 TimingPortClass Arch::syncPinClass(const CellInfo *cell, IdString port, const SyncPinTiming &t,
                                    int &clockInfoCount) const
 {
@@ -4200,8 +3850,7 @@ TimingPortClass Arch::syncPinClass(const CellInfo *cell, IdString port, const Sy
     if (t.kind == SYNC_PIN_COMB_INPUT)
         return TMG_COMB_INPUT;
     const NetInfo *clk = get_net_or_empty(cell, t.clock);
-    bool clk_const = clk != nullptr && clk->driver.cell != nullptr &&
-                     (clk->driver.cell->type == id_PSEUDO_VCC || clk->driver.cell->type == id_PSEUDO_GND);
+    bool clk_const = clk != nullptr && clk->driver.cell != nullptr && isConstantNet(clk);
     bool clk_live = clk != nullptr && !clk_const;
     if (clk_live && clk->driver.cell == nullptr && !undriven_clock_logged.count(clk->name) &&
         undriven_clock_logged.insert(clk->name).second)
@@ -4827,45 +4476,19 @@ void Arch::load_bel_blacklist() const
                   miss, f, first_miss.c_str());
 }
 
-// A structural scan of the ROI object. It records the byte offset of every
-// key's value and, walking the same members, refuses any key the ROI parser
-// does not act on.
-//
-// UNKNOWN-KEY REJECTION IS THE MECHANISM, not a special case for any one key.
-// The flat find("\"GRID_X_MIN\"") this replaces accepted a file whose four
-// rectangles lived in a `regions` array, took the FIRST GRID_X_MIN, and placed
-// every region in slot 0 at rc 0 -- a green log and a routed design measuring a
-// population nobody asked for. Any key Arch does not read is that same hazard,
-// so the accepted set is closed rather than open.
-//
-// Still not a general JSON parser and still no JSON dependency in Arch: it
-// understands objects, arrays, strings and opaque scalars, which is the whole
-// of the prjxray ROI schema. Values are located, not decoded.
 struct RoiJsonScan
 {
     const std::string &s;
     const char *fn;
     size_t p = 0;
 
-    // container path -> the member names legal directly inside it. "" is the
-    // root object. A path present as a key here is walked into; one absent is a
-    // leaf whose value is located but not interpreted.
     std::map<std::string, std::set<std::string>> containers;
-    // Legal containers whose contents Arch never reads. The subtree is skipped
-    // wholesale, so the producer may add fields inside without this parser
-    // having to be taught them.
     std::set<std::string> skip_subtree;
-    // Legal containers whose value is an ARRAY OF OBJECTS. Every element is
-    // validated against the array's own entry in `containers`, and its keys are
-    // recorded under "<path>[i].<key>" so the duplicate test stays per element.
     std::set<std::string> array_of_objects;
-    // Filled by walk_array: how many elements each such array had.
     std::map<std::string, int> array_len;
-    // Members of skip_subtree that are inert only while empty; see the
-    // ignore-list in load_partition_roi for why each one is on this list.
     std::set<std::string> must_be_empty;
 
-    std::map<std::string, size_t> value_at; // key path -> first byte of its value
+    std::map<std::string, size_t> value_at;
 
     RoiJsonScan(const std::string &str, const char *file) : s(str), fn(file) {}
 
@@ -4881,12 +4504,9 @@ struct RoiJsonScan
                   int(p));
     }
 
-    // Escapes are copied verbatim rather than decoded. No key in the ROI schema
-    // contains one, and a key that does will fail to match the accepted set and
-    // is therefore refused rather than silently mis-read.
     std::string str_lit()
     {
-        ++p; // opening quote
+        ++p;
         std::string out;
         while (p < s.size() && s[p] != '"') {
             if (s[p] == '\\') {
@@ -4898,7 +4518,7 @@ struct RoiJsonScan
         }
         if (p >= s.size())
             bad("unterminated string");
-        ++p; // closing quote
+        ++p;
         return out;
     }
 
@@ -4941,10 +4561,6 @@ struct RoiJsonScan
             ++p;
     }
 
-    // An array of objects. Each element is validated against `legal_path` --
-    // every element of one array has the same legal key set -- while its values
-    // are recorded under "<legal_path>[i]", so two elements naming the same key
-    // are not a duplicate but one element naming it twice still is.
     void walk_array(const std::string &legal_path)
     {
         ws();
@@ -4977,9 +4593,6 @@ struct RoiJsonScan
 
     void walk_object(const std::string &path) { walk_object(path, path); }
 
-    // legal_path selects the accepted key set; value_path prefixes the recorded
-    // key paths. They differ only inside an array element, where every element
-    // shares one key set but must keep its own values.
     void walk_object(const std::string &legal_path, const std::string &value_path)
     {
         ws();
@@ -5006,9 +4619,6 @@ struct RoiJsonScan
             ++p;
             ws();
 
-            // The refusal. Naming both the offending key and the container it
-            // was found in, because "regions" at the root and "regions" inside
-            // "info" are different mistakes.
             const std::set<std::string> &legal = containers[legal_path];
             if (!legal.count(key)) {
                 std::string allowed;
@@ -5023,9 +4633,6 @@ struct RoiJsonScan
                           allowed.c_str());
             }
 
-            // Duplicate detection closes the other half of the same hazard: two
-            // GRID_X_MIN keys make the rectangle a function of which one the
-            // reader happens to reach first.
             size_t val = p;
             if (!value_at.emplace(full, val).second)
                 log_error("NEXTPNR_PARTITION_ROI: '%s' names \"%s\" more than once; the rectangle it describes is "
@@ -5035,9 +4642,6 @@ struct RoiJsonScan
             if (skip_subtree.count(legal_full)) {
                 skip_value();
                 if (must_be_empty.count(legal_full)) {
-                    // Inert only while empty -- verified on the raw bytes, so
-                    // "[]", "[ ]" and "[\n]" pass and anything with content,
-                    // or any non-array value, does not.
                     for (size_t q = val; q < p; ++q) {
                         char d = s[q];
                         if (d == '[' || d == ']' || d == ' ' || d == '\t' || d == '\n' || d == '\r')
@@ -5073,8 +4677,6 @@ struct RoiJsonScan
 
 void Arch::load_partition_roi() const
 {
-    // Set first, so a re-entrant roi_active() from the bel walk below cannot
-    // recurse into this function. Same idiom as load_bel_blacklist above.
     roi_loaded = true;
     const char *f = getenv("NEXTPNR_PARTITION_ROI");
     if (f == nullptr)
@@ -5084,15 +4686,6 @@ void Arch::load_partition_roi() const
         log_error("NEXTPNR_PARTITION_ROI: cannot open '%s'\n", f);
     std::string all((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
 
-    // THE keys Arch consumes, and the fields they land in. This table is the
-    // only enumeration of them: the scan below derives the accepted set from it
-    // and the reads below take their values through it, so adding a key here
-    // makes it legal and reading it in one edit. A second hand-written list of
-    // legal keys would be a second source of truth, and the first key added
-    // without touching it would be refused by a parser that reads it.
-    //
-    // Every key is mandatory and a missing one is a hard error, so this
-    // mechanism cannot be half-configured.
     const std::pair<const char *, int *> consumed[] = {
             {"info.GRID_X_MIN", &roi_x0},
             {"info.GRID_X_MAX", &roi_x1},
@@ -5108,28 +4701,6 @@ void Arch::load_partition_roi() const
         scan.containers[""].insert(path.substr(0, dot));
     }
 
-    // THE IGNORE-LIST. Keys the ROI object legitimately carries that Arch does
-    // not act on. Each entry is here because ignoring it provably cannot move a
-    // bel; anything not on it is refused.
-    //
-    // `ports` -- prjxray's ROI-harness boundary-port list
-    //   (prjxray/minitests/roi_harness/create_design_json.py:45). Nothing in
-    //   nextpnr routes ROI boundary ports, and fasm2frames.py never reads the
-    //   key at all, so an EMPTY list is inert. A populated one names wires
-    //   crossing the rectangle this run is placing into, so it is refused.
-    // `required_features` -- extra FASM features injected at frame assembly by
-    //   prjxray/utils/fasm2frames.py:190-192. nextpnr emits FASM and never
-    //   reads it back, so an EMPTY list is inert. A populated one sets bits
-    //   inside the same rectangle this run places into without the placer
-    //   knowing, so it is refused.
-    // `roi_snap` -- provenance written by scripts/roi_snap.py:569 (tool,
-    //   tilegrid, input_roi, snapped, frames): a record of how the rectangle
-    //   was derived, not an instruction. The whole subtree is skipped, so
-    //   roi_snap.py may add fields without this parser having to be taught them.
-    //
-    // Note what is NOT here: a general "provenance" or "comment" escape. An
-    // open ignore-list would readmit exactly the defect this scan exists to
-    // stop, because the next silently-unread key would arrive spelled as one.
     for (const char *k : {"ports", "required_features", "roi_snap"}) {
         scan.containers[""].insert(k);
         scan.skip_subtree.insert(k);
@@ -5137,18 +4708,6 @@ void Arch::load_partition_roi() const
     scan.must_be_empty.insert("ports");
     scan.must_be_empty.insert("required_features");
 
-    // `siblings` -- the OPTIONAL array of other partitions on this device, each
-    // element carrying exactly the four keys `info` does. Derived from the same
-    // `consumed` table so the two rectangle schemas cannot drift: a key added
-    // above becomes legal in both places in one edit.
-    //
-    // This is NOT `regions`. A `regions` array is still refused, and must stay
-    // refused: work/quad-static writes one, lock-identity.py hashes it, and the
-    // whole point of that file is that handing it to nextpnr is impossible to do
-    // by accident. `siblings` says something `regions` does not -- WHICH
-    // rectangle this run is building -- and that asymmetry is real: rectangle 0
-    // confines placement, the RM steering region and --region-only emission, and
-    // a sibling confines none of them.
     scan.containers[""].insert("siblings");
     scan.array_of_objects.insert("siblings");
     for (const auto &c : consumed) {
@@ -5162,14 +4721,8 @@ void Arch::load_partition_roi() const
         log_error("NEXTPNR_PARTITION_ROI: '%s' has trailing content after the ROI object (at byte %d)\n", f,
                   int(scan.p));
 
-    // One reader for both schemas: `info.KEY` and `siblings[i].KEY` differ only
-    // in their path prefix, so a key that is mandatory, integral and range-
-    // checked for the partition is all three for a sibling too.
     auto read_rect = [&](const std::string &prefix, int &x0, int &y0, int &x1, int &y1) {
         for (const auto &c : consumed) {
-            // Which of the four corners this key is, taken from `consumed`'s own
-            // target rather than from its position in the table: a reordered
-            // table must not silently transpose a rectangle.
             NPNR_ASSERT(c.second == &roi_x0 || c.second == &roi_x1 || c.second == &roi_y0 || c.second == &roi_y1);
             int *dst = c.second == &roi_x0 ? &x0
                        : c.second == &roi_x1 ? &x1
@@ -5179,10 +4732,6 @@ void Arch::load_partition_roi() const
             auto it = scan.value_at.find(key);
             if (it == scan.value_at.end())
                 log_error("NEXTPNR_PARTITION_ROI: '%s' has no \"%s\" key\n", f, key.c_str());
-            // The value must actually be an integer. strtol answers 0 for a
-            // string or a null, which is a legal grid coordinate, so an
-            // unchecked read turns a typo into a rectangle in the corner of the
-            // device.
             const char *v = all.c_str() + it->second;
             if (!(isdigit((unsigned char)*v) || (*v == '-' && isdigit((unsigned char)v[1]))))
                 log_error("NEXTPNR_PARTITION_ROI: '%s' key \"%s\" is not an integer\n", f, key.c_str());
@@ -5205,14 +4754,6 @@ void Arch::load_partition_roi() const
         read_rect("siblings[" + std::to_string(i) + "]", r.x0, r.y0, r.x1, r.y1);
         roi_siblings.push_back(r);
     }
-    // OVERLAP IS FATAL, because partition_net_rects() assigns a net to a
-    // rectangle by asking which one holds all its endpoints. Two rectangles
-    // sharing a tile make that question have two answers, the assignment
-    // becomes a function of iteration order, and a net would be confined to
-    // whichever rectangle happened to be tested first -- silently, at rc 0.
-    // The four-region static's own frame-set disjointness check would also be
-    // false for such a pair, so this refuses a floorplan that could not be
-    // partially reconfigured anyway.
     for (int a = 0; a < roi_rect_count(); a++)
         for (int b = a + 1; b < roi_rect_count(); b++) {
             const RoiRect ra = roi_rect(a), rb = roi_rect(b);
@@ -5222,12 +4763,6 @@ void Arch::load_partition_roi() const
                           f, a, ra.x0, ra.y0, ra.x1, ra.y1, b, rb.x0, rb.y0, rb.x1, rb.y1);
         }
 
-    // Report the reservation count the way load_bel_blacklist does. A silent
-    // containment mechanism is the failure mode this programme keeps hitting --
-    // NEXTPNR_EXCLUDE_STAMPED_BBOX and NEXTPNR_FRESH_REGION_MARGIN were both
-    // inert for months and said nothing. If `outside` is 0 the rectangle covers
-    // the whole device and confines nothing, which is a configuration error
-    // rather than a successful run, so it is fatal rather than merely logged.
     int inside = 0, outside = 0;
     for (BelId b : getBels()) {
         int x = b.tile % chip_info->width, y = b.tile / chip_info->width;
@@ -5242,11 +4777,6 @@ void Arch::load_partition_roi() const
                   f, roi_x0, roi_y0, roi_x1, roi_y1);
     log_info("partition ROI: grid (%d,%d)-(%d,%d) from %s; %d bel(s) reserved outside, %d inside\n", roi_x0, roi_y0,
              roi_x1, roi_y1, f, outside, inside);
-    // Logged only when the file names siblings, matching the ROI's own
-    // convention: an unset NEXTPNR_PARTITION_ROI prints nothing either, and the
-    // acceptance scripts assert the ABSENCE of these lines on their control
-    // arms. A file with no "siblings" key has not configured this mechanism, so
-    // there is nothing whose firing could be mistaken for its absence.
     for (size_t i = 0; i < roi_siblings.size(); i++)
         log_info("partition ROI sibling %d: grid (%d,%d)-(%d,%d) -- routing only; reserves no bel and steers no "
                  "cell\n",
@@ -5255,28 +4785,12 @@ void Arch::load_partition_roi() const
 
 void Arch::snapshot_rm_cells()
 {
-    // Called from UspCommandHandler::customAfterLoad, i.e. after parse_json and
-    // attributesToArchInfo have run and before anything else binds a bel. At
-    // that instant -- and at no later one -- "has no bel" means "is an RM cell":
-    // the import binds exactly the cells carrying NEXTPNR_BEL, and the next
-    // thing to bind anything is the placer.
-    //
-    // attrs["BEL"] is also tested because a cell carrying the LEGACY BEL
-    // attribute is bel-less here and is bound later by HeAP's place_constraints
-    // (common/placer_heap.cc:398-410). Such a cell is stamped, not RM, and
-    // classifying it RM would confine a cell the user pinned deliberately.
     rm_snapshot_taken = true;
     int n = 0, packer = 0;
     for (auto &cp : cells) {
         CellInfo *ci = cp.second.get();
         if (ci->bel != BelId() || ci->attrs.count(id("BEL")))
             continue;
-        // Packer const drivers ($PACKER_GND_DRV / $PACKER_VCC_DRV, created at
-        // xilinx/pack.cc:876 and :887) and the frontend's own constant drivers
-        // arrive bel-less like RM logic but belong to neither side: they are
-        // legalisation helpers that must be placeable next to their loads,
-        // including inside the locked static region. The same carve-out is made
-        // by NEXTPNR_EXCLUDE_STAMPED_BBOX at xilinx/arch_place.cc:1088.
         if (ci->name.str(this).find("$PACKER_") != std::string::npos) {
             packer++;
             continue;
@@ -5306,11 +4820,6 @@ void Arch::load_exempt_nets() const
         if (ln.empty() || ln[0] == '#')
             continue;
         IdString nn = id(ln);
-        // An entry matching no net is reported, not silently dropped. It fails
-        // CLOSED -- the net it was meant to exempt keeps being checked -- but a
-        // typo'd exemption and a correct one are otherwise indistinguishable,
-        // and "the exemption list I thought I applied" is precisely the kind of
-        // belief this gate exists to stop anyone holding unverified.
         if (!nets.count(nn)) {
             log_warning("NEXTPNR_PARTITION_EXEMPT_NETS: '%s' names net '%s', which does not exist in this "
                         "design\n",
@@ -5331,11 +4840,6 @@ std::unordered_set<IdString> Arch::load_keepout_exempt_nets() const
         return out;
     if (keepout_exempt_loaded)
         return keepout_exempt_cache;
-    // The P exemptions come along. A net the operator has already declared out
-    // of the rectangle's scope for placement cannot then be forbidden to route
-    // past it -- that would leave the clock spine holding a P exemption it
-    // cannot use. Counted apart from the derived rule in router2's census, so
-    // the two are still distinguishable in a log.
     if (!exempt_nets_loaded)
         load_exempt_nets();
     for (IdString n : exempt_nets)
@@ -5465,15 +4969,10 @@ std::unordered_set<IdString> Arch::partition_nets() const
     const IdString gnd_net = id("$PACKER_GND_NET"), vcc_net = id("$PACKER_VCC_NET");
     for (auto np : sorted(nets)) {
         NetInfo *net = np.second;
-        // Const nets and listed exemptions (the clock spine) are Unit 7.5's,
-        // contained by pre-binding and applyFixedRoutes rather than by the bbox
-        // clamp. Excluded by exact name, never by a catch-all predicate -- a
-        // catch-all is how an exemption silently becomes a hole.
         if (net->name == gnd_net || net->name == vcc_net)
             continue;
         if (exempt_nets.count(net->name))
             continue;
-        // is_rm_cell() tolerates a null cell, which an undriven net has.
         bool touches_rm = is_rm_cell(net->driver.cell);
         if (!touches_rm)
             for (auto &u : net->users)
@@ -5492,8 +4991,6 @@ std::unordered_map<IdString, int> Arch::partition_net_rects() const
     std::unordered_map<IdString, int> out;
     if (!roi_active())
         return out;
-    // partition_nets() loads the exemption list, so exempt_nets is populated
-    // before the sibling loop reads it.
     for (IdString n : partition_nets())
         out.emplace(n, 0);
     if (roi_siblings.empty())
@@ -5502,14 +4999,8 @@ std::unordered_map<IdString, int> Arch::partition_net_rects() const
     const IdString gnd_net = id("$PACKER_GND_NET"), vcc_net = id("$PACKER_VCC_NET");
     for (auto np : sorted(nets)) {
         NetInfo *net = np.second;
-        // Rectangle 0 wins. The rectangles are asserted disjoint at load, so an
-        // RM net cannot also be wholly inside a sibling -- but if it somehow
-        // were, the rectangle that confined its PLACEMENT is the one whose
-        // frames its bitstream will be cut from.
         if (out.count(net->name))
             continue;
-        // Excluded by the same exact names partition_nets() uses, for the same
-        // reason: a catch-all predicate is how an exemption becomes a hole.
         if (net->name == gnd_net || net->name == vcc_net || exempt_nets.count(net->name))
             continue;
 
@@ -5521,10 +5012,6 @@ std::unordered_map<IdString, int> Arch::partition_net_rects() const
         if (eps.empty())
             continue;
 
-        // The rectangle every endpoint is inside, if there is one. An UNPLACED
-        // endpoint disqualifies the net: bel_outside_roi() answers false for
-        // BelId(), so an unplaced cell would otherwise read as "inside" and a
-        // net could be confined on the strength of an endpoint that is nowhere.
         int rect = -1;
         for (const PortRef *pr : eps) {
             if (pr->cell == nullptr || pr->cell->bel == BelId()) {
@@ -5555,11 +5042,6 @@ void Arch::check_partition_routing() const
     if (!roi_active())
         return;
 
-    // The SAME map the clamp governs, from the same call. Never a re-derived
-    // predicate: a backstop that disagreed with the thing it is backstopping
-    // would be checking a different design -- and with N rectangles it could
-    // agree about WHICH nets and still disagree about which rectangle each one
-    // is confined to, which is the same hole one level down.
     const std::unordered_map<IdString, int> governed = partition_net_rects();
 
     int nets_checked = 0, bad_nets = 0;
@@ -5589,9 +5071,6 @@ void Arch::check_partition_routing() const
             pips_outside++;
             rect_outside.at(ri)++;
             bad_here++;
-            // Collected and sorted rather than logged in place: net->wires is a
-            // hash map, so iteration order is not stable and an unsorted report
-            // would differ run to run on the same design.
             offenders.emplace_back(std::string(net->name.c_str(this)),
                                    std::string(nameOfPip(w.second.pip)) + " at tile (" + std::to_string(l.x) + "," +
                                            std::to_string(l.y) + "), rectangle " + std::to_string(ri) + " (" +
@@ -5611,15 +5090,9 @@ void Arch::check_partition_routing() const
         log_warning("partition route gate: %d further out-of-rectangle pip(s) not listed\n",
                     int(offenders.size() - report_cap));
 
-    // Unconditional census, pass or fail, for the third time in this file and
-    // for the same reason: a gate that is silent on success cannot be told
-    // apart from a gate that never ran.
     log_info("partition route gate: %d net(s) examined, %lld pip(s) bound, %lld outside the rectangle in %d net(s), "
              "rectangle (%d,%d)-(%d,%d)\n",
              nets_checked, (long long)pips_checked, (long long)pips_outside, bad_nets, roi_x0, roi_y0, roi_x1, roi_y1);
-    // With siblings the aggregate above sums over rectangles, so its counts and
-    // its rectangle are about different populations. The per-rectangle rows are
-    // the four numbers a chained replay is actually judged on.
     if (!roi_siblings.empty())
         for (int i = 0; i < roi_rect_count(); i++) {
             const RoiRect r = roi_rect(i);
@@ -5628,12 +5101,6 @@ void Arch::check_partition_routing() const
                      (long long)rect_pips.at(i), (long long)rect_outside.at(i));
         }
 
-    // No downgrade knob, deliberately. The two existing ones (PARTITION_NETS,
-    // PARTITION_CLAMP) are already BANNED escape hatches; a third would be the
-    // one most likely to be reached for, because this gate fires late, after a
-    // build that otherwise looks finished. If it fires the repair is real:
-    // either the design routes outside its region, or a net that legitimately
-    // leaves (the clock spine) belongs in NEXTPNR_PARTITION_EXEMPT_NETS.
     if (pips_outside > 0)
         log_error("partition route gate: %d net(s) have routing outside the partition rectangle (listed above). "
                   "router2's clamp cannot have allowed this -- it refuses such pips during search -- so the binding "
@@ -5804,21 +5271,6 @@ void Arch::check_partition_nets() const
     if (!exempt_nets_loaded)
         load_exempt_nets();
 
-    // The RM set is a snapshot of cell NAMES taken at import, and is_rm_cell()
-    // is a name lookup, so it fails OPEN: a miss is indistinguishable from
-    // "this cell is static". Arch::pack() invalidates the set wholesale --
-    // flush_cells() erases originals and installs freshly-named replacements
-    // (feed-through LUTs "$LUT$N", MUXFs "$MUX$N", split LUT6_2 halves, carry
-    // splits "$split$xorcy"/"$split$muxcy", DRAM/DSP sub-cells), none of which
-    // are in the snapshot. Under a stale set this gate would examine a
-    // shrinking subset of the RM logic and report zero violations on a design
-    // that crosses the boundary freely -- a clean pass that means nothing.
-    //
-    // The DPR flow passes --no-pack so the pairing holds, but NOTHING in the
-    // code enforced it: the whole failure was one missing CLI flag away. Two
-    // independent checks, because they catch different halves. The flag is
-    // definitive for "pack ran"; the dangling-name scan also catches any future
-    // path that erases or renames a cell between import and placement.
     if (packed_since_rm_snapshot)
         log_error("partition net gate: Arch::pack() ran after the RM cell set was snapshotted, so the set is "
                   "stale and every packer-created cell would be misclassified as static. Re-run with "
@@ -5843,19 +5295,12 @@ void Arch::check_partition_nets() const
     int bad_nets = 0, bad_outside = 0, bad_unplaced = 0, reported = 0;
     const int report_cap = 20;
 
-    // The set Arch::route() will hand the router as its clamp list. Checked
-    // against this loop's own scope decision in both directions below, so that
-    // "the gate validated it" and "the clamp governs it" cannot drift apart.
     const std::unordered_set<IdString> governed = partition_nets();
     int in_scope = 0;
 
     for (auto np : sorted(nets)) {
         NetInfo *net = np.second;
 
-        // An endpoint list, driver first. driver.cell is null on an undriven
-        // net; users are assumed non-null tree-wide (Context::check does the
-        // same). A net is in scope iff ANY endpoint sits on an RM cell -- the
-        // whole point is to catch the net with one RM end and one static end.
         std::vector<const PortRef *> eps;
         if (net->driver.cell != nullptr)
             eps.push_back(&net->driver);
@@ -5881,23 +5326,12 @@ void Arch::check_partition_nets() const
             continue;
         }
 
-        // This net is in scope for P. partition_nets() must have reached the
-        // same conclusion, or the clamp and the gate are governing different
-        // sets and one of them is lying.
         NPNR_ASSERT(governed.count(net->name));
         in_scope++;
 
         int outside = 0, unplaced = 0;
         for (const PortRef *pr : eps) {
             CellInfo *c = pr->cell;
-            // bel_outside_roi() answers false for BelId(), i.e. an UNPLACED
-            // cell reads as "inside". That is right for its three enforcement
-            // callers -- you cannot veto a bind that has not happened -- and
-            // exactly backwards here, where it would let an unplaced RM
-            // endpoint satisfy P silently. fixupPlacement's give-up path can
-            // leave a stranded cluster unbound with only a log_warning, so this
-            // state is reachable at precisely the moment this gate runs. Test
-            // the sentinel first, and report it as its own class.
             const bool is_unplaced = (c->bel == BelId());
             const bool is_outside = !is_unplaced && bel_outside_roi(c->bel);
             if (!is_unplaced && !is_outside)
@@ -5925,18 +5359,8 @@ void Arch::check_partition_nets() const
     if (reported > report_cap)
         log_warning("partition net gate: %d further violating endpoint(s) not listed\n", reported - report_cap);
 
-    // The other direction: every net partition_nets() claims is governed must
-    // have been reached by this loop. Together with the per-net assert above
-    // this is set equality, not merely containment -- a governed net this gate
-    // never examined would be clamped by the router without P ever having been
-    // checked for it.
     NPNR_ASSERT(size_t(in_scope) == governed.size());
 
-    // Emit the census UNCONDITIONALLY whenever the rectangle is active, pass or
-    // fail, and state which mode it ran in. A gate that says nothing when it
-    // passes is indistinguishable from a gate that did not run, and this
-    // programme has shipped four such mechanisms already. The acceptance script
-    // requires this line's presence, not merely the absence of an error.
     log_info("partition net gate [%s]: %d net(s) touch RM logic, %d crossing (%d endpoint(s) outside, %d "
              "unplaced), %d const-exempt, %d list-exempt\n",
              fatal ? "fatal" : "warn", rm_nets, bad_nets, bad_outside, bad_unplaced, excl_const, excl_listed);

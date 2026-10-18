@@ -44,36 +44,10 @@ struct FasmBackend
 
     FasmBackend(Context *ctx, std::ostream &out) : ctx(ctx), out(out){};
 
-    // ---------------------------------------------------------------------
-    // Region-filtered emission (--region-only).
-    //
-    // Restricts the FASM to the NEXTPNR_PARTITION_ROI rectangle, which is what
-    // makes the output a PARTIAL bitstream source rather than a whole-device
-    // one.  The filter is purely SPATIAL and deliberately owner-blind: a
-    // configuration frame is rewritten wholesale, so every feature in a frame
-    // this partition owns must appear, including static features that happen
-    // to sit in the same tiles.  Filtering by owner instead would drop static
-    // routing that crosses the region and erase it at reconfiguration time.
-    //
-    // Two filter points, not one.  The plan for this unit assumed a single
-    // hook at write_prefix() covered all emission; it does not.  write_pip()
-    // composes its lines directly (three sites) and runs with an EMPTY prefix
-    // stack, so a write_prefix() hook could not have filtered routing PIPs
-    // even in principle -- and routing PIPs are the largest line class in a
-    // real FASM file.  See docs/region-emission.md.
-    //
-    // cur_tile is the tile index owning the current prefix context.  It is an
-    // INDEX, never a name: tile-name X/Y is a different coordinate system from
-    // prjxray grid space (INT_L_X32Y100 is grid (81,103)), and deriving a
-    // location from a name is how this programme last got a containment result
-    // wrong.  index -> getTileLocation() is exact.
     bool region_filter = false;
     int rx0 = -1, ry0 = -1, rx1 = -1, ry1 = -1;
     int cur_tile = -1;
     int64_t lines_kept = 0, lines_dropped = 0, pips_kept = 0, pips_dropped = 0;
-    // Governed (RM-touching) nets whose pips were dropped as out-of-region.
-    // This must be empty: an RM pip outside the rectangle is a containment
-    // failure, and this is the LAST point on the path that can still see it.
     std::set<std::string> rm_outside;
     std::unordered_set<IdString> governed;
 
@@ -83,8 +57,6 @@ struct FasmBackend
         return l.x >= rx0 && l.x <= rx1 && l.y >= ry0 && l.y <= ry1;
     }
 
-    // False => suppress this line.  Fails CLOSED on a missing tile context:
-    // an untagged emission is a bug, not a licence to emit.
     bool emit_allowed()
     {
         if (!region_filter)
@@ -450,11 +422,6 @@ struct FasmBackend
 
     void write_pip(PipId pip, NetInfo *net)
     {
-        // Bookkeeping first, deliberately unfiltered: used_wires_starting_with()
-        // derives features from this map, and those features are themselves
-        // emitted through the prefix path where they get filtered on their own
-        // tile.  Filtering the map instead would change what gets DERIVED, not
-        // just what gets written.
         pips_by_tile[pip.tile].push_back(pip);
 
         auto dst_intent = ctx->wireIntent(ctx->getPipDstWire(pip));
@@ -465,29 +432,8 @@ struct FasmBackend
         if (pd.flags != PIP_TILE_ROUTING)
             return;
 
-        // Filter point 2 of 2.  All three emission sites below print
-        // get_tile_name(pip.tile), so one test on pip.tile covers them.
-        //
-        // Placed AFTER the early returns above, deliberately: before them it
-        // also counts pips that emit nothing anyway (pseudo-GND/VCC, non-
-        // tile-routing), which inflates the census into a number that is
-        // neither a pip count anyone cares about nor a line count.  Here,
-        // "dropped" means "reached emission and was suppressed".
-        //
-        // It is still a PIP count, not a LINE count: the pseudo-pip branch
-        // expands one pip into several features, and the IOI OCLK branch emits
-        // two lines for one pip.  Nothing here can know how many lines a
-        // suppressed pip would have produced, so the census does not pretend
-        // to.  The line-exact claim is the gate's, which diffs this output
-        // against scripts/roi-filter-fasm.py -- an independent implementation
-        // that resolves tiles through tilegrid.json by name rather than
-        // through the chipdb by index.
         if (region_filter && !tile_in_region(pip.tile)) {
             pips_dropped++;
-            // Last-line backstop, and narrower than it looks: this sees only
-            // pips that would have been EMITTED.  Whole-net containment is
-            // Arch::check_partition_routes()' job, which walks every bound pip
-            // with no early returns at all.
             if (net != nullptr && governed.count(net->name))
                 rm_outside.insert(net->name.str(ctx));
             return;
@@ -716,13 +662,6 @@ struct FasmBackend
                 std::string orig = lut->attrs.at(ctx->id("X_ORIG_PORT_" + phys_inputs[j].str(ctx))).as_string();
                 std::vector<std::string> toks;
                 boost::split(toks, orig, boost::is_any_of(" "));
-                // X_ORIG_PORT_<phys> is a SPACE-SEPARATED LIST of the logical
-                // ports sharing this physical input.  boost::split is not a
-                // tokeniser: a leading, trailing or doubled separator yields an
-                // EMPTY string, which is not the name of any logical port.
-                // Dropping it here is what stops log_to_bit's operator[] from
-                // default-inserting 0 and silently aliasing the pin onto logical
-                // input I0 -- see the file-level note on this patch.
                 for (auto &t : toks) {
                     if (t.empty())
                         continue;
@@ -787,9 +726,6 @@ struct FasmBackend
                 for (int k = 0; k < 6; k++) {
                     if ((j & (1 << k)) == 0)
                         continue;
-                    // .at(), not operator[]: every entry was validated against
-                    // log_to_bit above, so a miss here is a logic error and must
-                    // throw rather than silently resolve to logical input 0.
                     for (auto &p2l : phys_to_log[k])
                         log_index |= (1 << log_to_bit.at(p2l));
                 }
@@ -860,7 +796,7 @@ struct FasmBackend
                 }
 
                 if (!emit_allowed())
-                    continue; // loop over uphill pips -- not a function exit
+                    continue;
                 write_prefix();
                 out << belname;
                 if (!skip_pinname)
@@ -1771,11 +1707,6 @@ struct FasmBackend
         pop(); // tile
     }
 
-    // OLOGIC sites whose tristate flip-flop (TFF) holds an ODDR that drives the
-    // pad's T input, as "TILE/OLOGIC_Yn".  The pseudo-pip that crosses the site
-    // for the fabric data (D1 -> OQ) also sets DATA_RATE_TQ.BUF, the unregistered
-    // tristate; Vivado sets DATA_RATE_TQ.DDR for such a site instead, and the two
-    // are alternatives of one field.
     std::set<std::string> ologic_t_registered;
 
     void write_iol_config(CellInfo *ci)
@@ -1876,13 +1807,6 @@ struct FasmBackend
                     write_bit("IFF.ZSRVAL_Q" + std::to_string(i));
             }
         } else if (ci->type == ctx->id("OLOGICE2_OUTFF") || ci->type == ctx->id("OLOGICE3_OUTFF")) {
-            // prjxray characterises ODDR.DDR_CLK_EDGE.SAME_EDGE as a lone bit
-            // (LIOI3.OLOGIC_Y0 31_92) with no OPPOSITE_EDGE counterpart, so an
-            // absent bit IS OPPOSITE_EDGE and no third value can be expressed.
-            // Falling through silently emitted an OPPOSITE_EDGE bitstream for a
-            // design that asked for SAME_EDGE_PIPELINED -- correct rc, wrong
-            // hardware. The ILOGICE3_IFF arm above rejects the same string
-            // loudly because IFF.DDR_CLK_EDGE has both bits; this one did not.
             std::string edge = str_or_default(ci->params, ctx->id("DDR_CLK_EDGE"), "OPPOSITE_EDGE");
             if (edge == "SAME_EDGE")
                 write_bit("ODDR.DDR_CLK_EDGE.SAME_EDGE");
@@ -2199,19 +2123,10 @@ struct FasmBackend
 
     void write_cfg()
     {
-        // ICAP_WIDTH is a TILE-level 6-bit field (X8 = 0b000111, X16 = 0b111000,
-        // X32 = 0b000000), not a per-site one, so it is emitted once per tile and
-        // the first ICAPE2 seen in a tile owns it.  The value carries the cell
-        // alongside the width so a disagreement can name both cells.
         std::unordered_map<int, std::pair<std::string, CellInfo *>> icap_width_by_tile;
 
         for (auto &cell : ctx->cells) {
             CellInfo *ci = cell.second.get();
-            // An unbound cell has BelId{-1, -1} and get_tile_name() would index
-            // tile_insts[-1].  It is also the "only for actually-bound bels"
-            // discipline that the phantom-BUFGCTRL guard exists to enforce (see
-            // bufgctrl_bound_slots): a per-site enable emitted for a site with
-            // no cell on it is a bit set in real silicon.
             if (ci->bel == BelId())
                 continue;
             auto tile_name = get_tile_name(ci->bel.tile);
@@ -2233,14 +2148,6 @@ struct FasmBackend
             }
 
             if (ci->type == id_ICAP_ICAP) {
-                // ENABLE_TR is PER SITE, and the site name is already the tag
-                // component: getBelSite() gives "ICAP_X0Y1", and prjxray splits
-                // a feature line on the FIRST dot only, so the emitted
-                // CFG_CENTER_MID_X46Y84.ICAP_X0Y1.ENABLE_TR resolves against
-                // the db key CFG_CENTER_MID.ICAP_X0Y1.ENABLE_TR.  Vivado sets
-                // these three bits for whichever of ICAP_X0Y0/ICAP_X0Y1 carries
-                // an ICAPE2; nextpnr emitted neither, so the site came up
-                // disabled and the ICAP was inert.
                 push(ctx->getBelSite(ci->bel));
                 write_bit("ENABLE_TR");
                 pop();
@@ -2248,10 +2155,6 @@ struct FasmBackend
                 std::string width = str_or_default(ci->params, id_ICAP_WIDTH, "X32");
                 if (width != "X32" && width != "X16" && width != "X8")
                     log_error("Unknown ICAP_WIDTH of '%s\n'. Allowed values are: X32, X16 and X8.", width.c_str());
-                // One field, two possible cells.  Emitting the width per cell put
-                // BOTH tags on one tile for a two-ICAPE2 design and programmed
-                // 0b111111, which is not any width's encoding -- see
-                // work/icap/probe-two/top.fasm in the toolchain repo.
                 auto seen = icap_width_by_tile.emplace(ci->bel.tile, std::make_pair(width, ci));
                 if (!seen.second) {
                     if (seen.first->second.first != width)
@@ -2529,11 +2432,6 @@ struct FasmBackend
         }
     }
 
-    // The width one port's WIDTH parameter encodes to in a single RAMB18 half.
-    // A RAMB36E1 splits its width across the two halves, so 72 lands here as 36.
-    // 36 means SDP and nothing else: TDP tops out at 36 on a RAMB36E1 and 18 on
-    // a RAMB18E1, so no TDP port reaches 36 in half terms.  This is the same
-    // test XC7Packer::pack_bram uses to select sdp_bram_rules (pack.cc:1198).
     int bram_half_width(CellInfo *ci, const std::string &name, bool is_36)
     {
         int width = int_or_default(ci->params, ctx->id(name), 0);
@@ -2546,30 +2444,11 @@ struct FasmBackend
 
     void write_bram_width(CellInfo *ci, const std::string &name, bool is_36, bool is_y1)
     {
-        // SDP drives ONE port per direction and leaves the other implicit:
-        // reads are port A, writes are port B, and the implicit port's WIDTH
-        // parameter is 0 (a nonzero one is a Vivado DRC error, so there is no
-        // width here to lose).  The wide port's call below emits the implicit
-        // port's *_18 feature itself, so this call must emit nothing.  Taking
-        // the width-0 -> width-1 default instead put READ_WIDTH_B_1
-        // (!27_43 !27_44 !27_45) beside READ_WIDTH_B_18 (!27_43 !27_44 27_45)
-        // for one cell, and fasm2frames refused the whole file with
-        // FasmInconsistentBits -- no bitstream at all for any SDP BRAM, either
-        // primitive, both halves.
         if (name == "READ_WIDTH_B" && bram_half_width(ci, "READ_WIDTH_A", is_36) == 36)
             return;
         if (name == "WRITE_WIDTH_A" && bram_half_width(ci, "WRITE_WIDTH_B", is_36) == 36)
             return;
         int actual_width = bram_half_width(ci, name, is_36);
-        // THE READ DIRECTION IS NOT SYMMETRIC WITH THE WRITE DIRECTION AND
-        // GOLDEN SAYS SO.  Measured on Vivado 2025.2 bitstreams for
-        // xc7a100tfgg484-2 read back with prjxray bit2fasm: an SDP RAMB36E1
-        // sets READ_WIDTH_A_18 in BOTH halves, but an SDP RAMB18E1 in the LOWER
-        // half leaves the A read field at its all-zero width-1 encoding and
-        // carries the read width in B alone.  The write direction sets both
-        // A_18 and B_18 in every case.  Written as actual_width rather than
-        // `width == 72` so the one condition is spelled once; the two agree
-        // because for is_36 a half width of 36 can only come from 72.
         if (name == "READ_WIDTH_A" && actual_width == 36 && (is_36 || is_y1))
             write_bit(name + "_18");
         if (actual_width == 36) {
@@ -2876,9 +2755,6 @@ struct FasmBackend
         edge = (half_cycles % 2) != 0;
     }
 
-    // A PLL/MMCM output phase in degrees.  Vivado takes -360..360 (both ends included); outside
-    // that range it drops the value with a critical warning (Netlist 29-72) and programs a phase
-    // of 0, so the clock is not the one the design asks for.  Stop instead.
     double clkout_phase(CellInfo *ci, const std::string &name)
     {
         const double phase = float_or_default(ci, name + "_PHASE", 0);
@@ -3171,10 +3047,6 @@ struct FasmBackend
             auto is_clkout0 = name == "CLKOUT0";
             auto is_clkfbout = name == "CLKFBOUT";
 
-            // Fractional divide, as Vivado programs it: the integer counter splits on the parity
-            // of the integer part, and the fall of the fractional output goes to the CLKOUT5
-            // (CLKOUT0) or CLKOUT6 (CLKFBOUT) fractional registers, moved by the phase.  EDGE stays
-            // what the duty cycle gives for the integer part.
             const bool is_fractional_counter = (is_clkout0 || is_clkfbout) && frac != 0;
             bool frac_wf_r = false;
             if (is_fractional_counter) {
@@ -3635,9 +3507,6 @@ struct FasmBackend
         // which wants FILTREG1=0x8 and TABLE=filter_lookup[mult-1].)
         write_int_vector("FILTREG1_RESERVED[11:0]", 0x8, 12);
 
-        // POWER_REG is 0x9900 when a fractional counter is in use or an output is
-        // shifted by something other than half a VCO period (PHASE_MUX not a
-        // multiple of 4), 0x0100 otherwise.
         bool needs_fractional_power = false;
         for (const char *name : {"CLKFBOUT", "CLKOUT0", "CLKOUT1", "CLKOUT2", "CLKOUT3", "CLKOUT4", "CLKOUT5", "CLKOUT6"}) {
             const std::string n = name;
@@ -5748,11 +5617,6 @@ void write_gtx_channel(CellInfo *ci)
             boost::split(pins, attr_value, boost::is_any_of(" "));
             for (auto pin : pins) {
                 if (boost::empty(pin)) continue;
-                // The tile bit sits ahead of the site's input inverter, which
-                // write_bus_zinv() holds off for every tile-tied pin, so the
-                // bit has to carry the LOGICAL value --
-                // flip the constant when the netlist asked for an inversion.
-                //
                 // Splitting the trailing index off matters: erase_all() of
                 // "0123456789" turned "INMODE1" into "INMODE" and then looked
                 // up IS_INMODE_INVERTED, which yosys never emits (it writes
@@ -5845,25 +5709,11 @@ void write_gtx_channel(CellInfo *ci)
     {
         if (!region_filter)
             return;
-        // Unconditional census, pass or fail, for the same reason as every
-        // other gate in this tree: a filter that is silent on success cannot
-        // be told apart from a filter that never ran.  These numbers are the
-        // evidence that emission was actually scoped, and "0 dropped" is a
-        // RESULT -- on a whole-device design it means the filter is inert.
-        // Units differ between the two halves and are named so: the prefix path
-        // is one call per LINE, the pip path is one call per PIP and a pip can
-        // expand to several lines.  Adding them would produce a number that is
-        // not a count of anything.
         log_info("    region emission: kept %lld feature line(s) + %lld routing pip(s), dropped %lld line(s) + %lld "
                  "pip(s), rectangle (%d,%d)-(%d,%d)\n",
                  (long long)lines_kept, (long long)pips_kept, (long long)lines_dropped, (long long)pips_dropped,
                  rx0, ry0, rx1, ry1);
         if (!rm_outside.empty()) {
-            // The emission point is the last place on the path that can see
-            // this.  Arch::check_partition_routes() audits what router2 bound,
-            // but pips reach the bitstream from ten binding paths and only one
-            // of them is router2's search; anything bound after that gate, or
-            // laundered through an import, arrives here unexamined.
             for (auto &n : rm_outside)
                 log_warning("    region emission: governed net '%s' has routing outside the rectangle\n", n.c_str());
             log_error("region emission: %zu governed net(s) route outside the partition rectangle; the partial "
@@ -5884,9 +5734,6 @@ void Arch::writeFasm(const std::string &filename, bool region_only)
     writeFileReplacing(filename, "FASM", [&](std::ostream &out) {
         FasmBackend be(getCtx(), out);
         if (region_only) {
-            // One rectangle from one source.  --region-only carries no coordinates
-            // of its own precisely so that emission cannot drift away from the
-            // rectangle placement and routing were held to.
             if (!roi_active())
                 log_error("--region-only needs a partition rectangle; set NEXTPNR_PARTITION_ROI\n");
             be.region_filter = true;

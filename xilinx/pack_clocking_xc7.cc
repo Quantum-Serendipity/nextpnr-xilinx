@@ -74,13 +74,6 @@ void XC7Packer::prepare_clocking()
             if (!ci->attrs.count(ctx->id("X_ORIG_TYPE")))
                 ci->attrs[ctx->id("X_ORIG_TYPE")] = ci->type.str(ctx);
         };
-        // Tag a port rename so downstream consumers (json2dcp / fasm.cc)
-        // can reconstruct the source-RTL port name.  The general xform_cell
-        // path does this automatically; this lambda mirrors
-        // that behaviour for the rename_port() calls in this loop that
-        // bypass xform_cell.  Without these tags the json2dcp EDIF leaves
-        // the packed cell's pins floating (e.g. clk_raw had no sink because
-        // BUFG.I → BUFGCTRL.I0 had no X_ORIG_PORT_I0 mapping).
         auto save_orig_port = [&](const std::string &new_name, const std::string &orig_name) {
             ci->attrs[ctx->id("X_ORIG_PORT_" + new_name)] = orig_name;
         };

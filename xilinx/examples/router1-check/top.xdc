@@ -1,0 +1,7 @@
+set_property -dict {PACKAGE_PIN W19 IOSTANDARD LVCMOS33} [get_ports clk_i]
+set_property -dict {PACKAGE_PIN N15 IOSTANDARD LVCMOS33} [get_ports btn]
+set_property -dict {PACKAGE_PIN P19 IOSTANDARD LVCMOS33} [get_ports {led[0]}]
+set_property -dict {PACKAGE_PIN P20 IOSTANDARD LVCMOS33} [get_ports {led[1]}]
+set_property -dict {PACKAGE_PIN T21 IOSTANDARD LVCMOS33} [get_ports {led[2]}]
+set_property -dict {PACKAGE_PIN R19 IOSTANDARD LVCMOS33} [get_ports {led[3]}]
+create_clock -period 10.0 -name sysclk [get_ports clk_i]

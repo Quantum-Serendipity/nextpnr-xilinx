@@ -70,12 +70,6 @@ struct Router2
         int total_route_us = 0;
         float max_crit = 0;
         int fail_count = 0;
-        // Unit 7.4: this net is confined to one of the partition rectangles, so
-        // every pip it binds must lie inside px0..py1. -1 means unconfined.
-        // Resolved once in setup_nets() from cfg.partition_nets, and the
-        // rectangle is COPIED here rather than indexed per pip: the test below
-        // is on the hottest path in the router, and neither a name lookup nor a
-        // vector index belongs there.
         int partition_rect = -1;
         int px0 = 0, py0 = 0, px1 = 0, py1 = 0;
         PartitionKeepoutLicence keepout;
@@ -185,23 +179,11 @@ struct Router2
     Context *ctx;
     Router2Cfg cfg;
 
-    // Unit 7.4 veto counters. Atomic because route_arc() runs on up to eight
-    // worker threads; relaxed ordering is right -- these are pure counters, no
-    // other state is published through them, and they are read only after the
-    // routing loop has joined.
     std::atomic<int64_t> partition_veto_fwd{0};
     std::atomic<int64_t> partition_veto_bwd{0};
-    // update_congestion() is called from the single-threaded main loop only, so
-    // these two need no synchronisation.
     int64_t partition_bb_growths = 0;
     int64_t partition_bb_reclamps = 0;
 
-    // Static keepout. Per rectangle, and atomic for the same reason the two
-    // above are. keepout_admit counts the pips a net WAS allowed to bind inside
-    // a rectangle, which is what makes a zero veto count readable: with admits
-    // and vetoes both zero the predicate was never consulted, and a census that
-    // cannot tell those apart is the failure this file already has three
-    // comments about.
     static constexpr int max_keepout_rects = 64;
     std::vector<Router2Cfg::PartitionRect> keepout_rects;
     std::array<std::atomic<int64_t>, max_keepout_rects> keepout_veto_fwd;
@@ -210,15 +192,11 @@ struct Router2
     std::array<std::atomic<int64_t>, max_keepout_rects> keepout_veto_narrow;
     std::atomic<int64_t> keepout_arcs{0};
     std::atomic<int64_t> keepout_bb_retries{0};
-    // setup_nets() is single-threaded, so these need no synchronisation.
     int64_t keepout_nets_scope = 0;
     int64_t keepout_nets_exempt_buf = 0, keepout_nets_exempt_named = 0, keepout_nets_exempt_both = 0;
     std::vector<int> keepout_nets_governed, keepout_nets_anchored;
     int64_t keepout_nets_narrowed = 0, keepout_narrow_pips = 0, keepout_narrow_pips_unbound = 0;
     std::vector<int> keepout_nets_narrowed_rect, keepout_locked_pips_rect;
-    // The derived exemption is the half nobody wrote down, so it is named in
-    // the log rather than only counted. Bounded by construction -- a device has
-    // a fixed, small number of global buffers -- and capped anyway.
     static constexpr size_t keepout_exempt_buf_report_cap = 16;
     std::vector<IdString> keepout_exempt_buf_names;
 
@@ -327,13 +305,6 @@ struct Router2
             nets.at(i).bb.y0 = std::max(nets.at(i).bb.y0 - cfg.bb_margin_y, 0);
             nets.at(i).bb.x1 = std::min(nets.at(i).bb.x1 + cfg.bb_margin_x, ctx->getGridDimX());
             nets.at(i).bb.y1 = std::min(nets.at(i).bb.y1 + cfg.bb_margin_y, ctx->getGridDimY());
-            // Unit 7.4. Intersect AFTER the margin, never before. The margin is
-            // 4 per side on xilinx -- xilinx/arch.cc overwrites bb_margin_x/y
-            // immediately after constructing Router2Cfg, so the header's
-            // default of 3 is dead on this path -- and the four lines above
-            // apply it unconditionally. A clamp placed before them would be
-            // widened straight back out by 4 tiles on every side, which on
-            // 7-series is a whole CLB column plus its INT.
             if (cfg.partition_active) {
                 auto pit = cfg.partition_nets.find(ni->name);
                 if (pit != cfg.partition_nets.end()) {
@@ -349,12 +320,6 @@ struct Router2
                     nets.at(i).bb.y1 = std::min(nets.at(i).bb.y1, r.y1);
                 }
             }
-            // The keepout's three-way licence, resolved once here and never
-            // re-derived on the routing path. Deliberately NOT folded into the
-            // bounding box either, and for a stronger reason than the clamp's:
-            // a transiting static net's box legitimately spans the rectangle,
-            // because its own endpoints are on both sides of it. There is no
-            // box that expresses "anywhere but here".
             if (cfg.keepout_active) {
                 PartitionKeepoutLicence &kl = nets.at(i).keepout;
                 kl = partition_keepout_licence(ctx, cfg, ni);
@@ -537,51 +502,12 @@ struct Router2
 
     bool hit_test_pip(ArcBounds &bb, Loc l) { return l.x >= bb.x0 && l.x <= bb.x1 && l.y >= bb.y0 && l.y <= bb.y1; }
 
-    // Unit 7.4: the partition containment predicate.
-    //
-    // DELIBERATELY NOT FOLDED INTO THE BOUNDING BOX. Three separate paths lift
-    // or ignore the box, each of them verified at source rather than assumed:
-    //
-    //  1. route_arc()'s no-bb retry calls itself with is_bb=false (the
-    //     ARC_RETRY_WITHOUT_BB handler in route_net), which switches off the
-    //     only live box test -- at exactly the moment routing is hardest and
-    //     the router is most tempted to wander. A containment guarantee that
-    //     evaporates under congestion is not a guarantee.
-    //  2. The backwards BFS earlier in route_arc() has NO box test at all. It
-    //     filters on availability, reservation and congestion, then binds the
-    //     whole path it found. With xilinx's backwards_max_iter = 200 (and
-    //     20x that for nets with >40 users) it reaches a long way off-region.
-    //  3. update_congestion() grows the box every ten failures, bounded only
-    //     by the die.
-    //
-    // So the box is advisory and this predicate is mandatory. Intersecting the
-    // box with the rectangle is still worth doing -- it prunes the A* search
-    // space -- but it is an optimisation, not the mechanism.
-    //
-    // Pip locations and the rectangle are the same coordinate space: both are
-    // tile (grid_x, grid_y), getPipLocation() being tile % width / tile / width.
-    //
-    // The rectangle is the NET'S OWN, not a global one: with a chained replay
-    // the run confines its own region and every sibling region at once, and a
-    // single rectangle could only ever hold one of them.
     bool pip_in_partition(const PerNetData &nd, PipId pip) const
     {
         Loc l = ctx->getPipLocation(pip);
         return l.x >= nd.px0 && l.x <= nd.px1 && l.y >= nd.py0 && l.y <= nd.py1;
     }
 
-    // The keepout's census, unconditional whenever it is active, and it carries
-    // the ADMIT count for a reason the clamp's does not have to. The clamp's
-    // population is the governed nets, which a build either has or does not;
-    // the keepout's is everything else, so "0 vetoed" is the expected reading
-    // of a healthy static and the only thing separating it from a predicate
-    // that never ran is the arc and admit counts beside it.
-    //
-    // Also emitted from the unroutable-arc path, and that is the case it exists
-    // for: a design the keepout has made unroutable fails with a message naming
-    // one arc, which says nothing about which rectangle refused what. The
-    // numbers a reader needs to decide between "this rectangle is too wide" and
-    // "this net needed an exemption" are these.
     void log_keepout_census()
     {
         if (!cfg.keepout_active)
@@ -618,10 +544,6 @@ struct Router2
                             "cell inside a rectangle owns a STRENGTH_LOCKED pip or a licence-file pip there. The "
                             "wide licence is what ran, and this arm is the keepout arm under another name.\n");
         }
-        // Both exemption rules on one line, with their overlap, so the
-        // arithmetic closes without the reader having to assume the two
-        // populations are disjoint. They are not: a named clock net is usually
-        // global-buffer-driven as well.
         log_info("partition static keepout: %lld net(s) exempt (%lld by global clock buffer driver, %lld by name "
                  "list, %lld by both)\n",
                  (long long)(keepout_nets_exempt_buf + keepout_nets_exempt_named - keepout_nets_exempt_both),
@@ -651,17 +573,6 @@ struct Router2
         }
     }
 
-    // What the operator needs when the keepout has made an arc unroutable, and
-    // it is DATA rather than advice. The three causes look identical from the
-    // arc-failure message alone and the repairs point in opposite directions:
-    // a rectangle edge that separates a cell from the interconnect tile that
-    // serves it, a net that genuinely has no corridor, and a net that ought to
-    // have been exempt. Only the first is unconditional -- a cell reaches the
-    // general interconnect through its own tile's switchbox and through nothing
-    // else, so a rectangle taking that switchbox while leaving the cell outside
-    // makes the sink unreachable at any bounding box and any congestion. It is
-    // also the one a reader can settle instantly from the coordinates below, so
-    // they are printed first and the advice is left for afterwards.
     void report_keepout_blocked_net(NetInfo *net)
     {
         if (!cfg.keepout_active)
@@ -719,9 +630,6 @@ struct Router2
                     "restores the whole-rectangle licence and separates a narrow refusal from a keepout one.\n");
     }
 
-    // Which rectangle holds this pip, or -1 for none. First match wins, which
-    // is exact rather than approximate: the rectangles are asserted pairwise
-    // disjoint when the ROI file is loaded, so no pip is in two of them.
     int pip_keepout_rect(PipId pip) const
     {
         Loc l = ctx->getPipLocation(pip);
@@ -1240,11 +1148,6 @@ struct Router2
             std::queue<int> new_queue;
             t.backwards_queue.swap(new_queue);
         }
-        // Counted once per arc rather than once per pip: with a single
-        // rectangle every in-scope net has an empty licence, so admits are
-        // structurally zero and admits-plus-vetoes cannot separate "refused
-        // nothing" from "never ran". This can, and it costs one atomic per arc
-        // instead of one per pip explored.
         if (nd.keepout.check || nd.keepout.narrow)
             keepout_arcs.fetch_add(1, std::memory_order_relaxed);
         // First try strongly iteration-limited routing backwards BFS
@@ -1292,12 +1195,6 @@ struct Router2
                 did_something = true;
                 if (!ctx->checkPipAvail(uh) && ctx->getBoundPipNet(uh) != net)
                     continue;
-                // Unit 7.4, backwards BFS. This search had NO bounding-box test
-                // of any kind before this line -- it is not that the box was
-                // lifted here, it was never applied -- and on success the block
-                // below binds every pip on the path it found. That made it the
-                // widest of the four ways an RM net could leave its rectangle,
-                // and the only one the unit's original scoping did not name.
                 if (nd.partition_rect >= 0 && !pip_in_partition(nd, uh)) {
                     partition_veto_bwd.fetch_add(1, std::memory_order_relaxed);
                     continue;
@@ -1417,15 +1314,10 @@ struct Router2
 #else
                 if (is_bb && !hit_test_pip(nd.bb, ctx->getPipLocation(dh)))
                     continue;
-                // Unit 7.4, forward A*. Note this is NOT guarded by is_bb: the
-                // no-bb retry sets is_bb=false and would otherwise lift the
-                // containment along with the box.
                 if (nd.partition_rect >= 0 && !pip_in_partition(nd, dh)) {
                     partition_veto_fwd.fetch_add(1, std::memory_order_relaxed);
                     continue;
                 }
-                // Not guarded by is_bb either, and here the box could not have
-                // done the job in the first place.
                 if (nd.keepout.check || nd.keepout.narrow) {
                     int kr = -1;
                     const PartitionKeepoutVerdict v = keepout_verdict(nd, dh, kr);
@@ -1539,53 +1431,6 @@ struct Router2
             auto &usr = net->users.at(i);
             WireId dst_wire = ctx->getNetinfoSinkWire(net, usr);
             // Case of arcs that were pre-routed strongly (e.g. clocks)
-            //
-            // Reaching this line means check_arc_routing() has ALREADY decided this
-            // arc is not connected to the net's source wire, while its sink is bound
-            // above STRENGTH_STRONG.  A genuinely complete pre-routed clock arc
-            // continues at the check above and never gets here, so this branch only
-            // ever sees arcs that are already broken.
-            //
-            // The historic `return ARC_SUCCESS` did two things, one of them intended.
-            // Intended: keep ripup_arc() off a frozen fragment -- tearing up a clock
-            // spine is exactly the disaster the guard was added to prevent.
-            // Not intended: abandon the whole net.  ARC_SUCCESS is enumerator 0 of
-            // ArcRouteResult, so in this bool function it returns FALSE, and it
-            // returns out of the per-sink loop before the route_arcs loop below runs
-            // -- so every sibling arc already collected is dropped too, and every
-            // later sink is never examined.  Silently: no counter moves, no warning
-            // is printed, and the run still exits 0 with a truncated net in the FASM
-            // (docs/fragment-lock-truncation.md).
-            //
-            // Separate the two.  Skip the ripup, keep the routing: hand the arc to
-            // route_arc() and let it succeed or fail on the merits.
-            //
-            // This does NOT make a source-omitting fragment lock route.  Measured
-            // (docs/fragment-lock-graft.md): it still fails, but now it fails LOUDLY
-            // -- "Failed to route arc 0 of net 'rm_out[0]', from
-            // SITEWIRE/SLICE_X52Y124/A6LUT_O6 to SITEWIRE/SLICE_X82Y124/A5FFMUX_OUT",
-            // rc 255 -- instead of exiting 0 with a dead net in the FASM.  Turning a
-            // silent wrong answer into a named failure is the whole of this change.
-            //
-            // It still fails because a DRIVERLESS locked fragment violates an
-            // assumption router2 makes in three further places, each on its own
-            // sufficient to keep the net dead:
-            //   :1008      the forward A* admits a wire this net already occupies
-            //              only via its recorded driver pip; a bindWire-claimed
-            //              fragment root records PipId(), so no real pip can enter
-            //              it, and every path to the sink runs through it.  The
-            //              no-bounding-box retry drains the whole reachable graph
-            //              and still cannot get there.
-            //   :852       the backwards BFS merges onto existing routing only when
-            //              that routing's root IS src_wire.
-            //   :1303/1326 bind_and_check returns early when the sink is already
-            //              bound, and its walk-back breaks on the first bound wire
-            //              -- which in this orientation is the sink itself.
-            // Relaxing :1008 alone was tried and REVERTED: the router then reports
-            // success while the Arch keeps the truncated net, i.e. it puts the
-            // silence back.  Fixing this properly means changing "a net's existing
-            // routing is always connected to its driver" everywhere it is assumed,
-            // which is a project, not a patch.
             if (net->wires.count(dst_wire) && net->wires.at(dst_wire).strength > STRENGTH_STRONG) {
                 t.route_arcs.push_back(i);
                 continue;
@@ -1673,14 +1518,6 @@ struct Router2
                 net_data.bb.y0 = std::max(net_data.bb.y0 - 1, 0);
                 net_data.bb.x1 = std::min(net_data.bb.x1 + 1, ctx->getGridDimX());
                 net_data.bb.y1 = std::min(net_data.bb.y1 + 1, ctx->getGridDimY());
-                // Unit 7.4, escape 1. Growth is bounded only by the die, so an
-                // RM net that fails ten times would otherwise walk its box out
-                // of the partition one tile per side per ten failures. Re-clamp
-                // after every expansion. Containment does not depend on this --
-                // pip_in_partition() is checked per pip regardless -- but
-                // letting the box grow past the rectangle would send the A*
-                // exploring tiles it can never legally use, which is pure
-                // wasted routing effort and a misleading debug picture.
                 if (net_data.partition_rect >= 0) {
                     const int bx0 = net_data.bb.x0, by0 = net_data.bb.y0;
                     const int bx1 = net_data.bb.x1, by1 = net_data.bb.y1;
@@ -1688,12 +1525,6 @@ struct Router2
                     net_data.bb.y0 = std::max(net_data.bb.y0, net_data.py0);
                     net_data.bb.x1 = std::min(net_data.bb.x1, net_data.px1);
                     net_data.bb.y1 = std::min(net_data.bb.y1, net_data.py1);
-                    // Counted, so the census can say the re-clamp ACTUALLY BIT
-                    // rather than merely that it was compiled in. Without this
-                    // the only evidence would be indirect -- "the forward veto
-                    // count is still zero after N iterations, therefore the box
-                    // never escaped" -- which is a sound argument that silently
-                    // becomes vacuous if growth never happens at all.
                     if (net_data.bb.x0 != bx0 || net_data.bb.y0 != by0 || net_data.bb.x1 != bx1 ||
                         net_data.bb.y1 != by1)
                         partition_bb_reclamps++;
@@ -2171,15 +2002,6 @@ struct Router2
                           overused_wires, iter - 1, stall_iters);
             }
         } while (!failed_nets.empty());
-        // Unit 7.4. Emit the clamp census UNCONDITIONALLY whenever the rectangle
-        // is active, exactly like the placement ROI's veto counters and for the
-        // same reason: "no RM net left the rectangle" is a STATIC observation,
-        // equally true of a clamp that refused ten thousand pips and of a clamp
-        // that was never consulted because partition_nets was empty or the
-        // predicate never ran. The veto counts separate "the mechanism held"
-        // from "nothing tried to leave". Non-zero counts here are the evidence
-        // that the clamp is load-bearing; the acceptance script asserts on them,
-        // not merely on the absence of an out-of-region pip.
         if (cfg.partition_active) {
             log_info("partition route clamp: %d net(s) governed, %lld pip(s) vetoed (%lld forward A*, %lld backwards "
                      "BFS), %lld box growth(s) of which %lld re-clamped, rectangle (%d,%d)-(%d,%d)\n",
@@ -2187,9 +2009,6 @@ struct Router2
                      (long long)partition_veto_fwd, (long long)partition_veto_bwd, (long long)partition_bb_growths,
                      (long long)partition_bb_reclamps, cfg.partition_x0, cfg.partition_y0, cfg.partition_x1,
                      cfg.partition_y1);
-            // The line above aggregates over every rectangle, so with siblings
-            // present its net count and its rectangle are about different
-            // things. Break it down rather than let a reader pair them.
             if (!cfg.partition_siblings.empty()) {
                 std::vector<int> per_rect(cfg.partition_siblings.size() + 1, 0);
                 for (const auto &pn : cfg.partition_nets)
@@ -2219,14 +2038,6 @@ struct Router2
         auto rend = std::chrono::high_resolution_clock::now();
         log_info("Router2 time %.02fs\n", std::chrono::duration<float>(rend - rstart).count());
 
-        // The historical "re-route with
-        // router1 to double-check" pass is both redundant AND destructive on
-        // a large imported-placement design: router1 rips up router2's result
-        // and re-routes from scratch with weaker congestion negotiation, then
-        // dies on a net router2 had already routed cleanly ("Failed to find a
-        // route for arc ... 3184 arcs still pending") -- aborting BEFORE the
-        // FASM is written, so the emitted bitstream is stale.  Skip it by
-        // default; set NPNR_ROUTER1_RECHECK to opt back in.
         if (getenv("NPNR_ROUTER1_RECHECK")) {
             log_info("Running router1 to check that route is legal...\n");
             router1(ctx, Router1Cfg(ctx));

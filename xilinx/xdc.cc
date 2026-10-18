@@ -21,6 +21,7 @@
 #include <numeric>
 #include "log.h"
 #include "nextpnr.h"
+#include "util.h"
 NEXTPNR_NAMESPACE_BEGIN
 
 void Arch::parseXdc(std::istream &in)
@@ -173,18 +174,6 @@ void Arch::parseXdc(std::istream &in)
         return tgt_nets;
     };
 
-    auto glob_match = [](const std::string &name, const std::string &pat) {
-        size_t n = 0, p = 0, star = std::string::npos, mark = 0;
-        while (n < name.size()) {
-            if (p < pat.size() && (pat[p] == name[n] || pat[p] == '?')) { ++n; ++p; }
-            else if (p < pat.size() && pat[p] == '*') { star = p++; mark = n; }
-            else if (star != std::string::npos) { p = star + 1; n = ++mark; }
-            else return false;
-        }
-        while (p < pat.size() && pat[p] == '*') ++p;
-        return p == pat.size();
-    };
-
     struct Selection
     {
         bool ok = true;
@@ -228,13 +217,7 @@ void Arch::parseXdc(std::istream &in)
     auto clock_known = [&](const std::string &pat) {
         for (auto &n : nets) {
             const NetInfo *ni = n.second.get();
-            bool clocky = ni->clkconstr != nullptr;
-            if (!clocky && ni->driver.cell != nullptr) {
-                const std::string &dt = ni->driver.cell->type.str(this);
-                clocky = dt.find("BUF") != std::string::npos || dt.find("PLL") != std::string::npos ||
-                         dt.find("MMCM") != std::string::npos;
-            }
-            if (!clocky)
+            if (!isClockNet(ni))
                 continue;
             if (glob_match(n.first.str(this), pat))
                 return true;
@@ -656,11 +639,6 @@ void Arch::parseXdc(std::istream &in)
         std::string &cmd = arguments.front();
         if (cmd == "set_property") {
             std::vector<std::pair<std::string, std::string>> arg_pairs;
-            // COPIED BEFORE THE std::move BELOW. The INTERNAL_VREF test used to
-            // read arguments.at(1) after that element had been moved into
-            // arg_pairs, so it compared against a moved-from string and the
-            // branch was unreachable; the property fell through to get_cells()
-            // and surfaced as "target get_iobanks not supported".
             const std::string property = arguments.size() > 1 ? arguments.at(1) : std::string();
             if (arguments.size() != 4)
                 log_error("expected four arguments to 'set_property' (on line %d)\n", lineno);
@@ -674,14 +652,6 @@ void Arch::parseXdc(std::istream &in)
                 }
             } else
                 arg_pairs.emplace_back(std::move(arguments.at(1)), std::move(arguments.at(2)));
-            // NOT SILENTLY. The VREF level is not read from the XDC at all: it is
-            // derived from the bank's IOSTANDARD -- any single-ended SSTL input
-            // sets the HCLK row's vref flag (fasm.cc:1467) -- and then written as
-            // the fixed level VREF.V_675_MV (fasm.cc:1845). 0.675 V is VCCO/2 for
-            // SSTL135 and so happens to be right for DDR3L; an SSTL15 design
-            // needs 0.75 V and would be given 0.675 V regardless of what this
-            // property asks for. Saying so is the difference between a design
-            // that is correct and a design that is correct by luck.
             if (property == "INTERNAL_VREF") {
                 log_warning("INTERNAL_VREF is not read from the XDC; the VREF level is derived from the bank's "
                             "IOSTANDARD and fixed at 0.675 V (on line %d)\n",
