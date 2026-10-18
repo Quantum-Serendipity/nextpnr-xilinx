@@ -134,10 +134,22 @@ Arch::Arch(ArchArgs args) : args(args)
                     break;
                 }
     }
+    int64_t chipdb_cell_delays = 0;
+    for (int t = 0; td != nullptr && t < td->num_tile_types; t++) {
+        const TileCellTimingPOD &tt = td->tile_cell_timings[t];
+        for (int i = 0; i < tt.num_instances; i++)
+            for (int v = 0; v < tt.instances[i].num_celltypes; v++)
+                chipdb_cell_delays += tt.instances[i].celltypes[v].num_delays;
+    }
+    if (xc7 && !chipdb_has_timing_checks && chipdb_cell_delays > 0)
+        log_error("chipdb %s carries %lld SDF propagation delays and no cell timing checks, so its exporter dropped "
+                  "the SETUP/HOLD/RECOVERY/REMOVAL entries; every SLICE flip-flop would be timed with the fixed "
+                  "setup 0.050ns, hold 0.143ns, clk->Q 0.259/0.117ns. Rebuild the chipdb with an exporter that "
+                  "reads them.\n",
+                  args.chipdb.c_str(), (long long)chipdb_cell_delays);
     if (xc7 && !chipdb_has_timing_checks)
-        log_warning("chipdb %s carries no cell timing checks; every SLICE flip-flop is timed with the fixed "
-                    "setup 0.050ns, hold 0.143ns, clk->Q 0.259/0.117ns. Rebuild the chipdb with an exporter "
-                    "that reads the SDF's SETUP/HOLD/RECOVERY/REMOVAL entries.\n",
+        log_warning("chipdb %s carries no cell timing data; every SLICE flip-flop is timed with the fixed "
+                    "setup 0.050ns, hold 0.143ns, clk->Q 0.259/0.117ns.\n",
                     args.chipdb.c_str());
 }
 
@@ -4254,7 +4266,7 @@ bool Arch::getCellDelay(const CellInfo *cell, IdString fromPort, IdString toPort
             if (fromPort == id_CLK)
                 return false;
             return xc7_cell_timing_lookup(tt_id, inst_id, variant, (is_lut5 && fromPort == id_A6) ? id_A5 : fromPort,
-                                          (is_lut5 && toPort == id_O6) ? id_O5 : toPort, delay);
+                                          (is_lut5 && toPort == id_O6) ? id_O5 : toPort, delay, &delay.min);
         }
 
         if (fromPort == id_A1 || fromPort == id_A2 || fromPort == id_A3 || fromPort == id_A4 || fromPort == id_A5 ||
@@ -4266,12 +4278,12 @@ bool Arch::getCellDelay(const CellInfo *cell, IdString fromPort, IdString toPort
         }
     } else if (cell->type == id_CARRY4) {
         if (xc7 && inst_id != -1) {
-            return xc7_cell_timing_lookup(tt_id, inst_id, id("CARRY4"), fromPort, toPort, delay);
+            return xc7_cell_timing_lookup(tt_id, inst_id, id("CARRY4"), fromPort, toPort, delay, &delay.min);
         }
     } else if (cell->type == id_F7MUX || cell->type == id_F8MUX || cell->type == id_F9MUX ||
                cell->type == id("SELMUX2_1")) {
         if (xc7 && inst_id != -1) {
-            return xc7_cell_timing_lookup(tt_id, inst_id, cell->type, fromPort, toPort, delay);
+            return xc7_cell_timing_lookup(tt_id, inst_id, cell->type, fromPort, toPort, delay, &delay.min);
         }
         delay.delay = 100;
         return true;
@@ -4706,6 +4718,21 @@ const CellTimingPOD *Arch::xc7_cell_timing_variant(int tt_id, int inst_id, IdStr
     return found_var ? &*found_var : nullptr;
 }
 
+int Arch::cmtDutyHalfCycles(int d, double duty)
+{
+    const long long duty_fixed = llround(duty * 100000);
+    const long long scaled = 2LL * d * duty_fixed;
+    const int rounded_up = int((scaled + 50000) / 100000);
+    const bool is_tie = scaled % 100000 == 50000;
+    auto encodable = [d](int half_cycles) {
+        const int high = half_cycles / 2, low = d - high;
+        return high >= 1 && high <= 64 && low >= 1 && low <= 64;
+    };
+    if (is_tie && !encodable(rounded_up) && encodable(rounded_up - 1))
+        return rounded_up - 1;
+    return rounded_up;
+}
+
 bool Arch::xc7_cell_timing_lookup(int tt_id, int inst_id, IdString variant, IdString from_port, IdString to_port,
                                   DelayInfo &delay, delay_t *min_delay) const
 {
@@ -4721,7 +4748,9 @@ bool Arch::xc7_cell_timing_lookup(int tt_id, int inst_id, IdString variant, IdSt
     if (!found_delay)
         return false;
     delay.delay = found_delay->max_delay;
-    if (min_delay != nullptr)
+    if (min_delay == &delay.min)
+        delay.setMin(found_delay->min_delay);
+    else if (min_delay != nullptr)
         *min_delay = found_delay->min_delay;
     return true;
 }

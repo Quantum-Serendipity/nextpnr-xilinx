@@ -1915,6 +1915,7 @@ struct Arch : BaseCtx
     TimingPortClass getPortTimingClass(const CellInfo *cell, IdString port, int &clockInfoCount) const;
 
     IdString dspStripBusIndex(IdString port) const;
+    static int cmtDutyHalfCycles(int divide, double duty);
     bool dsp48e1IsCombinational(const CellInfo *cell) const;
     double dsp48e1CombInputDelayNS(IdString base) const;
     bool dsp48e1IsTimedOutput(IdString base) const;

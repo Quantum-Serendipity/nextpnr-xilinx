@@ -734,10 +734,14 @@ void XC7Packer::propagate_clock_constraints()
     auto is_scaffold = [&](NetInfo *n) { return carried.count(n->name) || scaffold.count(n->name); };
 
     auto set_derived = [&](CellInfo *ci, NetInfo *from, NetInfo *to, double ratio, int64_t num = 0, int64_t den = 0,
-                           ExactFrac shift = ExactFrac()) {
+                           ExactFrac shift = ExactFrac(), ExactFrac high = ExactFrac()) {
         if (from == nullptr || from->clkconstr == nullptr || to == nullptr || ratio <= 0)
             return;
         delay_t period = delay_t(from->clkconstr->period.delay / ratio);
+        if (high.n <= 0 || !high.ok || high.n >= high.d)
+            high = (from->clkconstr->high_den > 0 && from->clkconstr->high_num > 0)
+                           ? ExactFrac::of(from->clkconstr->high_num, from->clkconstr->high_den)
+                           : ExactFrac::of(1, 2);
         bool from_scaffold = is_scaffold(from);
         if (to->clkconstr != nullptr) {
             bool mismatch = std::abs(to->clkconstr->period.delay - period) > 1;
@@ -778,8 +782,15 @@ void XC7Packer::propagate_clock_constraints()
             to->clkconstr = std::unique_ptr<ClockConstraint>(new ClockConstraint);
         }
         to->clkconstr->period.delay = period;
-        to->clkconstr->high.delay = period / 2;
-        to->clkconstr->low.delay = period / 2;
+        if (high.n * 2 == high.d) {
+            to->clkconstr->high.delay = period / 2;
+            to->clkconstr->low.delay = period / 2;
+        } else {
+            to->clkconstr->high.delay = delay_t(int64_t(period) * high.n / high.d);
+            to->clkconstr->low.delay = period - to->clkconstr->high.delay;
+        }
+        to->clkconstr->high_num = high.n;
+        to->clkconstr->high_den = high.d;
         if (from_scaffold)
             scaffold.insert(to->name);
         else
@@ -844,6 +855,8 @@ void XC7Packer::propagate_clock_constraints()
             in->clkconstr->period = out->clkconstr->period;
             in->clkconstr->high = out->clkconstr->high;
             in->clkconstr->low = out->clkconstr->low;
+            in->clkconstr->high_num = out->clkconstr->high_num;
+            in->clkconstr->high_den = out->clkconstr->high_den;
             auto origin = carried.find(out->name);
             carried[in->name] = (origin == carried.end()) ? out->name : origin->second;
             changed_nets.insert(in->name);
@@ -888,7 +901,11 @@ void XC7Packer::propagate_clock_constraints()
                         den = 1;
                     }
                 }
-                copy_through(ci, "I", "O", 1, den);
+                if (den == 1)
+                    copy_through(ci, "I", "O", 1, den);
+                else
+                    set_derived(ci, get_net_or_empty(ci, ctx->id("I")), get_net_or_empty(ci, ctx->id("O")),
+                                1.0 / double(den), 1, den, ExactFrac(), ExactFrac::of(1, 2));
             } else if (t == t_PLLE2_ADV || t == t_PLLE2_BASE || t == t_MMCME2_ADV || t == t_MMCME2_BASE) {
                 bool is_mmcm = (t == t_MMCME2_ADV || t == t_MMCME2_BASE);
                 NetInfo *in = get_net_or_empty(ci, ctx->id("CLKIN1"));
@@ -926,18 +943,27 @@ void XC7Packer::propagate_clock_constraints()
                     bool out_exact = exact && div8 != 0;
                     ExactFrac out_period = ExactFrac::of(divclk_n * div8, mult8);
                     ExactFrac shift = fb_shift + param_phase(ci, port + "_PHASE") * out_period;
+                    ExactFrac duty = half;
+                    double duty_param = param_double(ci, port + "_DUTY_CYCLE", 0.5);
+                    if (div8 != 0 && div8 % 8 == 0 && div8 > 8 && duty_param > 0 && duty_param < 1 &&
+                        duty_param != 0.5) {
+                        int d = int(div8 / 8);
+                        int half_cycles = Arch::cmtDutyHalfCycles(d, duty_param);
+                        if (half_cycles > 0 && half_cycles < 2 * d)
+                            duty = ExactFrac::of(half_cycles, 2 * d);
+                    }
                     set_derived(ci, in, get_net_or_empty(ci, ctx->id(port)), vco_ratio / div, out_exact ? mult8 : 0,
-                                out_exact ? divclk_n * div8 : 0, shift);
+                                out_exact ? divclk_n * div8 : 0, shift, duty);
                     if (is_mmcm && n <= 3)
                         set_derived(ci, in, get_net_or_empty(ci, ctx->id(port + "B")), vco_ratio / div,
                                     out_exact ? mult8 : 0, out_exact ? divclk_n * div8 : 0,
-                                    shift + out_period * half);
+                                    shift + out_period * duty, ExactFrac::of(duty.d - duty.n, duty.d));
                 }
                 set_derived(ci, in, get_net_or_empty(ci, ctx->id("CLKFBOUT")), 1.0 / divclk, exact ? 1 : 0, divclk_n,
-                            fb_shift);
+                            fb_shift, half);
                 if (is_mmcm)
                     set_derived(ci, in, get_net_or_empty(ci, ctx->id("CLKFBOUTB")), 1.0 / divclk, exact ? 1 : 0,
-                                divclk_n, fb_shift + fb_period * half);
+                                divclk_n, fb_shift + fb_period * half, half);
             }
         }
     }

@@ -18,6 +18,7 @@
  */
 
 #include <functional>
+#include <numeric>
 #include "log.h"
 #include "nextpnr.h"
 NEXTPNR_NAMESPACE_BEGIN
@@ -216,7 +217,7 @@ void Arch::parseXdc(std::istream &in)
         static const std::vector<std::string> prefixes{"LUT", "SLICE_LUTX", "CARRY4", "MUXF", "F7MUX", "F8MUX",
                                                        "F9MUX", "SELMUX2_1", "INV", "VCC", "GND", "PSEUDO_"};
         const std::string &t = ci->type.str(this);
-        if (ci->attrs.count(id_X_LUT_AS_DRAM))
+        if (ci->attrs.count(id_X_LUT_AS_DRAM) || ci->attrs.count(id_X_LUT_AS_SRL))
             return false;
         for (auto &pre : prefixes)
             if (t.compare(0, pre.size(), pre) == 0)
@@ -456,14 +457,15 @@ void Arch::parseXdc(std::istream &in)
         ci->attrs[a] = v;
     };
 
-    auto parse_exception = [&](const std::vector<std::string> &args, bool is_max) {
+    auto parse_exception = [&](const std::vector<std::string> &args, TimingException::Kind kind) {
         const std::string &what = args.front();
+        const bool is_max = kind == TimingException::MAX_DELAY, is_mcp = kind == TimingException::MULTICYCLE;
         TimingException exc;
-        exc.kind = is_max ? TimingException::MAX_DELAY : TimingException::FALSE_PATH;
+        exc.kind = kind;
         exc.source = stringf("%s line %d", xdc_file.c_str(), lineno);
         Selection from, to, through;
         bool got_from = false, got_to = false, got_through = false, got_value = false;
-        bool setup_only = false, hold_only = false;
+        bool setup_only = false, hold_only = false, got_start = false, got_end = false;
         for (size_t i = 1; i < args.size(); i++) {
             const std::string &a = args.at(i);
             if ((a == "-from" || a == "-to" || a == "-through") && i + 1 < args.size()) {
@@ -480,7 +482,16 @@ void Arch::parseXdc(std::istream &in)
                 exc.datapath_only = true;
             else if (a == "-quiet" || a == "-reset_path")
                 ;
-            else if (is_max && !got_value && !a.empty() && a.front() != '-') {
+            else if (is_mcp && a == "-start")
+                got_start = true;
+            else if (is_mcp && a == "-end")
+                got_end = true;
+            else if (is_mcp && !got_value && !a.empty() && a.front() != '-') {
+                if (!std::all_of(a.begin(), a.end(), ::isdigit) || a.size() > 6)
+                    return refuse(what, "cannot read path multiplier '" + a + "'");
+                exc.multiplier = std::stoi(a);
+                got_value = true;
+            } else if (is_max && !got_value && !a.empty() && a.front() != '-') {
                 try {
                     size_t used = 0;
                     double ns = std::stod(a, &used);
@@ -498,7 +509,25 @@ void Arch::parseXdc(std::istream &in)
             return refuse(what, "no delay value");
         if (is_max && (setup_only || hold_only))
             return refuse(what, "-setup/-hold are not read for set_max_delay");
-        if (setup_only != hold_only) {
+        if (is_mcp) {
+            if (!got_value)
+                return refuse(what, "no path multiplier");
+            if (setup_only && hold_only)
+                return refuse(what, "-setup and -hold together; give each its own set_multicycle_path");
+            if (got_start && got_end)
+                return refuse(what, "-start and -end together");
+            if (exc.datapath_only)
+                return refuse(what, "-datapath_only is not read for set_multicycle_path");
+            if (exc.multiplier < (hold_only ? 0 : 1))
+                return refuse(what, stringf("a %s multiplier of %d", hold_only ? "hold" : "setup", exc.multiplier));
+            if (got_through)
+                return refuse(what, "-through is not read for set_multicycle_path");
+            exc.setup = !hold_only;
+            exc.hold = hold_only;
+            exc.launch_period = hold_only ? !got_end : got_start;
+        } else if (got_start || got_end)
+            return refuse(what, "-start/-end are read only for set_multicycle_path");
+        else if (setup_only != hold_only) {
             exc.setup = setup_only;
             exc.hold = hold_only;
         }
@@ -563,11 +592,16 @@ void Arch::parseXdc(std::istream &in)
         for (auto &pin : to.pins)
             stamp(pin.first, "NEXTPNR_TEXC_TO", std::to_string(idx) + ":" + ff_pin(pin.first, pin.second));
         timing_exceptions.push_back(exc);
+        std::string detail;
+        if (is_max)
+            detail = stringf(", max %.3f ns", getDelayNS(exc.value));
+        else if (is_mcp)
+            detail = stringf(", %s multiplier %d in %s clock periods", exc.setup ? "setup" : "hold", exc.multiplier,
+                             exc.launch_period ? "launch" : "capture");
         log_info("%s: exception #%d, from %d cell(s) %d clock pattern(s), to %d cell(s) %d pin(s) %d clock "
                  "pattern(s)%s (on line %d)\n",
                  what.c_str(), idx, int(from.cells.size()), int(from.clocks.size()), int(to.cells.size()),
-                 int(to.pins.size()), int(to.clocks.size()),
-                 is_max ? stringf(", max %.3f ns", getDelayNS(exc.value)).c_str() : "", lineno);
+                 int(to.pins.size()), int(to.clocks.size()), detail.c_str(), lineno);
     };
 
     auto parse_clock_groups = [&](const std::vector<std::string> &args) {
@@ -665,7 +699,8 @@ void Arch::parseXdc(std::istream &in)
         } else if (cmd == "create_clock") {
             double period = 0;
             bool got_period = false;
-            std::string clock_name;
+            std::string clock_name, waveform;
+            bool got_waveform = false;
             int cursor = 1;
             for (cursor = 1; cursor < int(arguments.size()); cursor++) {
                 std::string opt = arguments.at(cursor);
@@ -675,9 +710,12 @@ void Arch::parseXdc(std::istream &in)
                     cursor++;
                     if (cursor < int(arguments.size()))
                         clock_name = strip_quotes(arguments.at(cursor));
-                } else if (opt == "-waveform")
+                } else if (opt == "-waveform") {
                     cursor++;
-                else if (opt == "-period") {
+                    got_waveform = cursor < int(arguments.size());
+                    if (got_waveform)
+                        waveform = arguments.at(cursor);
+                } else if (opt == "-period") {
                     cursor++;
                     period = std::stod(arguments.at(cursor));
                     got_period = true;
@@ -686,10 +724,50 @@ void Arch::parseXdc(std::istream &in)
             }
             if (!got_period)
                 log_error("found create_clock without period (on line %d)", lineno);
+            delay_t period_ps = getDelayFromNS(period).maxDelay(), high_ps = period_ps / 2;
+            int64_t high_num = 1, high_den = 2;
+            if (got_waveform) {
+                std::vector<double> edges;
+                bool readable = true;
+                for (auto &t : split_to_args(strip_quotes(waveform), false)) {
+                    try {
+                        size_t used = 0;
+                        edges.push_back(std::stod(t, &used));
+                        readable = readable && used == t.size();
+                    } catch (std::exception &) {
+                        readable = false;
+                    }
+                }
+                std::string why;
+                if (!readable || edges.size() != 2)
+                    why = "-waveform '" + waveform + "' is not two edge times";
+                else if (edges.at(0) < 0 || edges.at(1) <= edges.at(0) || edges.at(1) - edges.at(0) >= period)
+                    why = "-waveform '" + waveform + "' does not give a rising edge before a falling edge less than "
+                                                     "one period later";
+                if (!why.empty()) {
+                    got_waveform = false;
+                    if (xdc_strict)
+                        xdc_dropped.push_back(stringf("%s line %d: create_clock: %s (not applied)", xdc_file.c_str(),
+                                                      lineno, why.c_str()));
+                    else
+                        log_warning("create_clock: %s; the clock is timed at a 50%% duty cycle (on line %d)\n",
+                                    why.c_str(), lineno);
+                } else {
+                    high_ps = getDelayFromNS(edges.at(1) - edges.at(0)).maxDelay();
+                    int64_t g = std::gcd(int64_t(high_ps), int64_t(period_ps));
+                    if (high_ps > 0 && period_ps > 0 && g > 0) {
+                        high_num = high_ps / g;
+                        high_den = period_ps / g;
+                    }
+                }
+            }
             if (cursor >= int(arguments.size())) {
-                // virtual clock (no target ports/nets): not supported; skip it
-                // instead of crashing with std::out_of_range
-                log_warning("ignoring virtual clock (unsupported, on line %d)\n", lineno);
+                if (xdc_strict)
+                    xdc_dropped.push_back(stringf("%s line %d: create_clock: a virtual clock has no target (not "
+                                                  "applied)",
+                                                  xdc_file.c_str(), lineno));
+                else
+                    log_warning("ignoring virtual clock (unsupported, on line %d)\n", lineno);
                 continue;
             }
             std::vector<NetInfo *> dest = get_nets(arguments.at(cursor));
@@ -701,54 +779,22 @@ void Arch::parseXdc(std::istream &in)
             for (auto n : dest) {
                 n->clkconstr = std::unique_ptr<ClockConstraint>(new ClockConstraint);
                 n->clkconstr->period = getDelayFromNS(period);
-                n->clkconstr->high.delay = n->clkconstr->period.delay / 2;
-                n->clkconstr->low.delay = n->clkconstr->period.delay / 2;
+                n->clkconstr->high.delay = high_ps;
+                n->clkconstr->low.delay = got_waveform ? n->clkconstr->period.delay - high_ps : high_ps;
+                n->clkconstr->high_num = high_num;
+                n->clkconstr->high_den = high_den;
                 n->clkconstr->name = clock_name;
             }
         } else if (cmd == "set_multicycle_path") {
-            // set_multicycle_path <N> [-setup|-hold] -from [<sel>] -to [<sel>]
-            // Tags the destination (capture) cells with a multicycle factor so the
-            // timing engine can relax the setup requirement on those endpoints.
-            // Previously this command was silently ignored. Supports a NAME glob in the
-            // -to selector, e.g. -to [get_cells -hier -filter {NAME =~ *rf_reg*}]
-            // group_brackets=true keeps a whole "[get_cells ... {NAME =~ *pat*}]" as ONE argument.
-            int mcp = 1; bool is_hold = false;
-            std::string to_sel;
-            for (int c = 1; c < int(arguments.size()); c++) {
-                const std::string &a = arguments.at(c);
-                if (a == "-hold") is_hold = true;
-                else if (a == "-to" && c + 1 < int(arguments.size())) to_sel = arguments.at(c + 1);
-                else if (!a.empty() && std::all_of(a.begin(), a.end(), ::isdigit)) mcp = std::stoi(a);
-            }
-            // extract the NAME glob from the -to selector (substring after "=~")
-            std::string to_pat;
-            size_t eq = to_sel.find("=~");
-            if (eq != std::string::npos) to_pat = to_sel.substr(eq + 2);
-            // trim whitespace and any leftover braces/brackets around the pattern
-            auto clean = [](std::string s) {
-                std::string o;
-                for (char ch : s) if (ch != '{' && ch != '}' && ch != ']' && ch != '[' && !std::isspace(ch)) o += ch;
-                return o;
-            };
-            to_pat = clean(to_pat);
-            if (!is_hold && !to_pat.empty()) {
-                int tagged = 0;
-                for (auto &kv : cells) {
-                    std::string cn = kv.first.str(this);
-                    if (glob_match(cn, to_pat)) {
-                        kv.second->attrs[id("NEXTPNR_MCP_SETUP")] = std::to_string(mcp);
-                        ++tagged;
-                    }
-                }
-                log_info("set_multicycle_path: setup multicycle %d tagged on %d cells matching '%s' (on line %d)\n",
-                         mcp, tagged, to_pat.c_str(), lineno);
-            } else {
-                log_info("set_multicycle_path: parsed (hold or no -to glob) — no setup tag (on line %d)\n", lineno);
-            }
+            parse_exception(arguments, TimingException::MULTICYCLE);
         } else if (cmd == "set_false_path" || cmd == "set_max_delay") {
-            parse_exception(arguments, cmd == "set_max_delay");
+            parse_exception(arguments, cmd == "set_max_delay" ? TimingException::MAX_DELAY
+                                                              : TimingException::FALSE_PATH);
         } else if (cmd == "set_clock_groups") {
             parse_clock_groups(arguments);
+        } else if (xdc_strict) {
+            xdc_dropped.push_back(
+                    stringf("%s line %d: unsupported XDC command '%s' (not applied)", xdc_file.c_str(), lineno, cmd.c_str()));
         } else {
             log_info("ignoring unsupported XDC command '%s' (on line %d)\n", cmd.c_str(), lineno);
         }
