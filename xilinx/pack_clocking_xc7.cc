@@ -742,7 +742,13 @@ void XC7Packer::propagate_clock_constraints()
         if (to->clkconstr != nullptr) {
             bool mismatch = std::abs(to->clkconstr->period.delay - period) > 1;
             if (user_constrained.count(to->name)) {
-                if (mismatch) {
+                if (mismatch && from_scaffold) {
+                    log_warning("    net '%s' is constrained to %.1f MHz by the XDC; the %.1f MHz derived through "
+                                "'%s' from the carried constraint on net '%s' is not applied, and a derivation from "
+                                "a real clock may still relate it\n",
+                                to->name.c_str(ctx), MHz(to->clkconstr->period.delay), MHz(period),
+                                ci->name.c_str(ctx), from->name.c_str(ctx));
+                } else if (mismatch) {
                     log_warning("    net '%s' is constrained to %.1f MHz by the XDC; the %.1f MHz derived through "
                                 "'%s' is not applied\n",
                                 to->name.c_str(ctx), MHz(to->clkconstr->period.delay), MHz(period),
