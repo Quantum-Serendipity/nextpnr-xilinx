@@ -69,8 +69,18 @@ def vcc_block(args):
         sys.exit("no INT tile in the column of %s" % args.clb)
 
 
+def by_xy(grid):
+    return {(t["grid_x"], t["grid_y"]): name for name, t in grid.items()}
+
+
+def int_column(name, x):
+    side = name.split("_")[1]
+    return x + 1 if side == "L" else x - 1
+
+
 def window_luts(args):
     grid = load(args.tilegrid)
+    at = by_xy(grid)
     bound = {c["attributes"].get("NEXTPNR_BEL", "") for c in cells_of(args.placed).values()}
     inside = lambda x, y: args.rx0 <= x <= args.rx1 and args.ry0 <= y <= args.ry1
     for name in sorted(grid):
@@ -80,24 +90,64 @@ def window_luts(args):
         x, y = t["grid_x"], t["grid_y"]
         if max(abs(x - args.x), abs(y - args.y)) > args.radius:
             continue
-        interior = inside(x - 1, y) and inside(x, y) and inside(x + 1, y)
+        if inside(x - 1, y) and inside(x, y) and inside(x + 1, y):
+            cls = "interior"
+        elif inside(x - 1, y) or inside(x, y) or inside(x + 1, y):
+            ix = int_column(name, x)
+            unsafe = at.get((ix, y), "").startswith("INT_") and inside(ix, y)
+            cls = "adjacent-int-inside" if unsafe else "adjacent-int-outside"
+        else:
+            cls = "outside"
         for site in sorted(t.get("sites", {})):
             if not site.startswith("SLICE_"):
                 continue
             for z in "ABCD":
                 bel = "%s/%s6LUT" % (site, z)
                 if bel not in bound:
-                    yield interior, bel
+                    yield cls, bel
 
 
 def lut_blacklist(args):
-    for interior, bel in window_luts(args):
-        if not interior:
+    for cls, bel in window_luts(args):
+        if cls not in args.keep:
             print(bel)
 
 
-def lut_interior(args):
-    print(sum(1 for interior, _ in window_luts(args) if interior))
+def lut_count(args):
+    print(sum(1 for cls, _ in window_luts(args) if cls in args.keep))
+
+
+def adjacent_rect(args):
+    grid = load(args.tilegrid)
+    at = by_xy(grid)
+    width = 1 + max(t["grid_x"] for t in grid.values())
+    for d in range(2, args.span):
+        for rx0, rx1, clb_x in ((args.x + d, args.x + d + args.span, args.x + d - 1),
+                                (args.x - d - args.span, args.x - d, args.x - d + 1)):
+            if rx0 < 0 or rx1 >= width:
+                continue
+            clb = at.get((clb_x, args.y), "")
+            if not clb.startswith("CLBL"):
+                continue
+            ix = int_column(clb, clb_x)
+            if rx0 <= ix <= rx1 and at.get((ix, args.y), "").startswith("INT_"):
+                print(rx0, args.y - args.half_h, rx1, args.y + args.half_h, clb)
+                return
+    sys.exit("no logic tile beside a rectangle edge has its INT tile inside it")
+
+
+def unplace(args):
+    doc = load(args.placed)
+    n = 0
+    for c in doc["modules"]["top"]["cells"].values():
+        if c["attributes"].get("X_ORIG_TYPE", "") == args.orig_type:
+            c["attributes"].pop("NEXTPNR_BEL", None)
+            n += 1
+    if n == 0:
+        sys.exit("no %s cell to unplace" % args.orig_type)
+    with open(args.out, "w") as f:
+        json.dump(doc, f)
+    print(n)
 
 
 def holdouts(args):
@@ -122,12 +172,23 @@ def main():
     p.add_argument("db")
     p.add_argument("clb")
     p.set_defaults(fn=vcc_block)
-    for cmd, fn in (("lut-blacklist", lut_blacklist), ("lut-interior", lut_interior)):
+    for cmd, fn in (("lut-blacklist", lut_blacklist), ("lut-count", lut_count)):
         p = sub.add_parser(cmd)
         p.add_argument("placed")
         for k in ("x", "y", "radius", "rx0", "ry0", "rx1", "ry1"):
             p.add_argument(k, type=int)
+        p.add_argument("--keep", action="append", required=True,
+                       choices=("interior", "adjacent-int-inside", "adjacent-int-outside", "outside"))
         p.set_defaults(fn=fn)
+    p = sub.add_parser("adjacent-rect")
+    for k in ("x", "y", "span", "half_h"):
+        p.add_argument(k, type=int)
+    p.set_defaults(fn=adjacent_rect)
+    p = sub.add_parser("unplace")
+    p.add_argument("placed")
+    p.add_argument("orig_type")
+    p.add_argument("out")
+    p.set_defaults(fn=unplace)
     p = sub.add_parser("holdouts")
     p.add_argument("routed")
     p.set_defaults(fn=holdouts)

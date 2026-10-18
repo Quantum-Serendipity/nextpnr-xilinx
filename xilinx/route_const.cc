@@ -21,6 +21,7 @@
 // constant LUT and the design is re-routed; leftovers are fatal unless allowed.
 
 #include <algorithm>
+#include <boost/algorithm/string.hpp>
 #include <map>
 #include <set>
 #include "cells.h"
@@ -161,11 +162,7 @@ int Arch::insertConstDrivers(const std::vector<ConstHoldout> &holdouts, std::vec
                t == id_CLEL_R || t == id_CLEM || t == id_CLEM_R;
     };
     const bool partition_rect_active = roi_active();
-    auto bel_free = [&](BelId b) {
-        if (!partition_rect_active)
-            return checkBelAvail(b);
-        return !usp_bel_hard_unavail(b) && getBoundBelCell(b) == nullptr;
-    };
+    auto bel_free = [&](BelId b) { return partition_rect_active ? checkBelAvailIgnoringRoi(b) : checkBelAvail(b); };
     // Ring search outwards from the sink's tile for a free, valid 6LUT+5LUT pair.
     auto place_lut = [&](CellInfo *lut, Loc origin) -> BelId {
         for (int r = 0; r <= max_radius; r++) {
@@ -379,11 +376,29 @@ void Arch::routeConstants(std::function<void()> reroute)
                               "NEXTPNR_PARTITION_ROI";
     const char *why_fenced = "constant LUT drivers disabled for a sink whose interconnect lies only inside a "
                              "partition rectangle under NEXTPNR_PARTITION_ROI";
+    const char *why_walk_exhausted = "constant LUT drivers disabled for a sink whose interconnect search exhausted its "
+                                     "budget before reaching an interconnect pip outside every partition rectangle "
+                                     "under NEXTPNR_PARTITION_ROI";
+    int fence_walk_budget = 512;
+    if (const char *b = getenv("NEXTPNR_CONST_FENCE_WALK_BUDGET"))
+        fence_walk_budget = atoi(b);
+    std::vector<bool> interconnect_tile_type(chip_info->num_tiletypes, false);
+    for (int t = 0; t < chip_info->num_tiletypes; t++) {
+        const std::string type = IdString(chip_info->tile_types[t].type).str(this);
+        interconnect_tile_type[t] = boost::starts_with(type, "INT");
+    }
+    enum class SinkReach
+    {
+        Outside,
+        Fenced,
+        Exhausted
+    };
     auto interconnect_outside_rects = [&](WireId sink) {
         std::vector<WireId> todo{sink};
         std::set<WireId> seen{sink};
-        int budget = 512;
-        while (!todo.empty() && budget-- > 0) {
+        for (int budget = fence_walk_budget; !todo.empty(); budget--) {
+            if (budget <= 0)
+                return SinkReach::Exhausted;
             WireId w = todo.back();
             todo.pop_back();
             for (PipId p : getPipsUphill(w)) {
@@ -391,17 +406,15 @@ void Arch::routeConstants(std::function<void()> reroute)
                 const bool pip_in_rect = partition_rect_at(l) >= 0;
                 if (pip_in_rect)
                     continue;
-                int tile = l.y * getGridDimX() + l.x;
-                std::string type = IdString(chip_info->tile_types[chip_info->tile_insts[tile].type].type).str(this);
-                const bool interconnect_pip = type.compare(0, 3, "INT") == 0;
+                const bool interconnect_pip = interconnect_tile_type[chip_info->tile_insts[p.tile].type];
                 if (interconnect_pip)
-                    return true;
+                    return SinkReach::Outside;
                 WireId s = getPipSrcWire(p);
                 if (seen.insert(s).second)
                     todo.push_back(s);
             }
         }
-        return false;
+        return SinkReach::Fenced;
     };
     auto give_up = [&](const ConstHoldout &h, const char *why) {
         given_up.insert(std::make_pair(h.cell->name, h.port));
@@ -448,9 +461,13 @@ void Arch::routeConstants(std::function<void()> reroute)
                 give_up(h, why_in_rect);
                 continue;
             }
-            const bool sink_fenced_by_rect = partition_rect_active && !interconnect_outside_rects(sink);
-            if (sink_fenced_by_rect) {
+            const SinkReach reach = partition_rect_active ? interconnect_outside_rects(sink) : SinkReach::Outside;
+            if (reach == SinkReach::Fenced) {
                 give_up(h, why_fenced);
+                continue;
+            }
+            if (reach == SinkReach::Exhausted) {
+                give_up(h, why_walk_exhausted);
                 continue;
             }
             real.push_back(h);

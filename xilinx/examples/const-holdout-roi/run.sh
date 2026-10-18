@@ -23,10 +23,15 @@ CHIPDB=$(abspath "${CHIPDB:?set CHIPDB to an xc7a100tfgg484.bin}")
 PRJXRAY_DB=$(abspath "${PRJXRAY_DB:-$HERE/../../external/prjxray-db}")
 TILEGRID=$PRJXRAY_DB/artix7/xc7a100t/tilegrid.json
 NPNR_TIMEOUT=${NPNR_TIMEOUT:-600}
-RADIUS=${RADIUS:-24}
+RADIUS=${RADIUS:-$(sed -n 's/^const int const_lut_search_radius = \([0-9][0-9]*\);$/\1/p' "$HERE/../../route_const.cc")}
 OUT=$(abspath "${OUT:-$(mktemp -d)}")
 mkdir -p "$OUT" || exit 1
 cd "$HERE" || exit 1
+
+if [ -z "$RADIUS" ]; then
+    echo "FAIL no const_lut_search_radius in $HERE/../../route_const.cc; set RADIUS"
+    exit 1
+fi
 
 if [ ! -r "$TILEGRID" ]; then
     echo "FAIL no tilegrid at $TILEGRID; set PRJXRAY_DB"
@@ -145,13 +150,13 @@ arm_rect_clear_of_sink() {
 
 arm_only_driver_inside_rect() {
     local log=$OUT/inside.log
-    if ! geom lut-blacklist "$OUT/placed.json" "$SX" "$SY" "$RADIUS" "$RX0" "$RY0" "$RX1" "$RY1" \
+    if ! geom lut-blacklist "$OUT/placed.json" "$SX" "$SY" "$RADIUS" "$RX0" "$RY0" "$RX1" "$RY1" --keep interior \
             >"$OUT/outside-luts.bels"; then
         report "FAIL only driver inside a rectangle: could not list the LUT bels"
         return
     fi
     local interior
-    interior=$(geom lut-interior "$OUT/placed.json" "$SX" "$SY" "$RADIUS" "$RX0" "$RY0" "$RX1" "$RY1")
+    interior=$(geom lut-count "$OUT/placed.json" "$SX" "$SY" "$RADIUS" "$RX0" "$RY0" "$RX1" "$RY1" --keep interior)
     if [ "${interior:-0}" -eq 0 ]; then
         report "FAIL only driver inside a rectangle: the rectangle holds no free LUT bel, so the arm cannot fail"
         return
@@ -190,10 +195,115 @@ arm_sink_inside_rect() {
     fi
 }
 
+arm_only_driver_beside_rect() {
+    local log=$OUT/beside.log ax0 ay0 ax1 ay1 clb
+    if ! read -r ax0 ay0 ax1 ay1 clb < <(geom adjacent-rect "$SX" "$SY" 12 4); then
+        report "FAIL only driver beside a rectangle: no rectangle has a logic tile beside its edge with that tile's INT inside it"
+        return
+    fi
+    roi "$OUT/beside-rect.json" "$ax0" "$ay0" "$ax1" "$ay1"
+    if ! geom lut-blacklist "$OUT/placed.json" "$SX" "$SY" "$RADIUS" "$ax0" "$ay0" "$ax1" "$ay1" \
+            --keep adjacent-int-inside --keep adjacent-int-outside >"$OUT/beside-luts.bels"; then
+        report "FAIL only driver beside a rectangle: could not list the LUT bels"
+        return
+    fi
+    local unsafe kept
+    unsafe=$(geom lut-count "$OUT/placed.json" "$SX" "$SY" "$RADIUS" "$ax0" "$ay0" "$ax1" "$ay1" --keep adjacent-int-inside)
+    kept=$(geom lut-count "$OUT/placed.json" "$SX" "$SY" "$RADIUS" "$ax0" "$ay0" "$ax1" "$ay1" \
+        --keep adjacent-int-inside --keep adjacent-int-outside)
+    if [ "${unsafe:-0}" -eq 0 ]; then
+        report "FAIL only driver beside a rectangle: no free LUT bel beside ($ax0,$ay0)-($ax1,$ay1) has its INT inside it, so the arm cannot fail"
+        return
+    fi
+    NEXTPNR_PIP_BLACKLIST_TILE=$OUT/vcc-block.pips NEXTPNR_PARTITION_ROI=$OUT/beside-rect.json \
+        NEXTPNR_BEL_BLACKLIST=$OUT/beside-luts.bels \
+        timeout "$NPNR_TIMEOUT" "$NEXTPNR" --chipdb "$CHIPDB" --log "$log" -q --json "$OUT/placed.json" \
+        --no-pack --no-place --write "$OUT/beside-routed.json" >/dev/null 2>&1
+    local rc=$?
+    if [ "$rc" -eq 0 ]; then
+        report "FAIL only driver beside a rectangle: rc 0 ($(geom holdouts "$OUT/beside-routed.json" | head -1))"
+    elif ! grep -q "no free LUT bel within $RADIUS tiles of $SRL_BEL for a VCC driver outside every partition rectangle" "$log"; then
+        report "FAIL only driver beside a rectangle: rc $rc without the outside-every-rectangle refusal: $(grep -m1 '^ERROR' "$log")"
+    elif ! grep -qF "constant VCC not delivered to $SRL.WE" "$log"; then
+        report "FAIL only driver beside a rectangle: rc $rc but $SRL.WE is not the refused sink"
+    else
+        report "PASS only driver beside a rectangle: refused under ($ax0,$ay0)-($ax1,$ay1) with $kept free LUT bel(s) beside it ($unsafe whose INT is inside, beside $clb), $(wc -l <"$OUT/beside-luts.bels") others withheld"
+    fi
+}
+
+arm_reconfigurable_cells() {
+    local log=$OUT/rm.log
+    if ! "$YOSYS" -q -l "$OUT/yosys-rm.log" \
+            -p "read_verilog \"$HERE/top-rm.v\"; synth_xilinx -flatten -abc9 -arch xc7 -top top; write_json \"$OUT/top-rm.json\"" \
+            >/dev/null 2>&1; then
+        report "FAIL reconfigurable cells: yosys"
+        return
+    fi
+    if ! npnr "$OUT/place-rm.log" --xdc "$HERE/top-rm.xdc" --json "$OUT/top-rm.json" --write "$OUT/placed-rm.json" \
+            --no-route --seed 1; then
+        report "FAIL reconfigurable cells: placement: $(grep -m1 '^ERROR' "$OUT/place-rm.log")"
+        return
+    fi
+    local srl srl_bel clb sx sy
+    if ! read -r srl srl_bel clb sx sy < <(geom srl "$OUT/placed-rm.json"); then
+        report "FAIL reconfigurable cells: no SRL16E cell in the placement"
+        return
+    fi
+    if ! geom vcc-block "$PRJXRAY_DB/artix7" "$clb" >"$OUT/vcc-block-rm.pips"; then
+        report "FAIL reconfigurable cells: could not list the VCC_WIRE pips around $clb"
+        return
+    fi
+    if ! geom unplace "$OUT/placed-rm.json" FDRE "$OUT/rm-input.json" >/dev/null; then
+        report "FAIL reconfigurable cells: no FDRE to leave unplaced"
+        return
+    fi
+    local mx0 mx1
+    if [ $((sx + 16)) -lt "$GRID_W" ]; then
+        mx0=$((sx + 4)) mx1=$((sx + 16))
+    else
+        mx0=$((sx - 16)) mx1=$((sx - 4))
+    fi
+    roi "$OUT/rm-rect.json" "$mx0" $((sy - 4)) "$mx1" $((sy + 4))
+    NEXTPNR_PIP_BLACKLIST_TILE=$OUT/vcc-block-rm.pips NEXTPNR_PARTITION_ROI=$OUT/rm-rect.json NEXTPNR_PARTITION_NETS=warn \
+        NEXTPNR_PARTITION_CLAMP=off \
+        timeout "$NPNR_TIMEOUT" "$NEXTPNR" --chipdb "$CHIPDB" --log "$log" -q --json "$OUT/rm-input.json" \
+        --no-pack --seed 1 --write "$OUT/rm-routed.json" >/dev/null 2>&1
+    local rc=$?
+    local n
+    n=$(sed -n 's/^Info: partition RM set: \([0-9]*\) reconfigurable cell.*/\1/p' "$log" | head -1)
+    if [ "${n:-0}" -eq 0 ]; then
+        report "FAIL reconfigurable cells: the RM set is empty, so the arm tests a static build: $(grep -m1 '^ERROR' "$log")"
+    elif [ "$rc" -eq 0 ]; then
+        report "FAIL reconfigurable cells: rc 0 with $n RM cell(s) ($(geom holdouts "$OUT/rm-routed.json" | head -1))"
+    elif ! grep -q "not delivered to $srl.WE .*constant LUT drivers disabled under NEXTPNR_PARTITION_ROI in a build with reconfigurable cells" "$log"; then
+        report "FAIL reconfigurable cells: rc $rc for another reason: $(grep -m1 "not delivered to $srl.WE" "$log" || grep -m1 '^ERROR' "$log")"
+    else
+        report "PASS reconfigurable cells: $srl.WE refused at rc $rc with $n RM cell(s), no driver added"
+    fi
+}
+
+arm_walk_budget_exhausted() {
+    local log=$OUT/walk.log
+    NEXTPNR_PIP_BLACKLIST_TILE=$OUT/vcc-block.pips NEXTPNR_PARTITION_ROI=$OUT/rect.json NEXTPNR_CONST_FENCE_WALK_BUDGET=0 \
+        timeout "$NPNR_TIMEOUT" "$NEXTPNR" --chipdb "$CHIPDB" --log "$log" -q --json "$OUT/placed.json" \
+        --no-pack --no-place --write "$OUT/walk-routed.json" >/dev/null 2>&1
+    local rc=$?
+    if [ "$rc" -eq 0 ]; then
+        report "FAIL interconnect search out of budget: rc 0 ($(geom holdouts "$OUT/walk-routed.json" | head -1))"
+    elif ! grep -q "not delivered to $SRL.WE .*interconnect search exhausted its budget" "$log"; then
+        report "FAIL interconnect search out of budget: rc $rc for another reason: $(grep -m1 "not delivered to $SRL.WE" "$log" || grep -m1 '^ERROR' "$log")"
+    else
+        report "PASS interconnect search out of budget: $SRL.WE refused as out of budget, not as fenced"
+    fi
+}
+
 arm_no_rect
 arm_rect_clear_of_sink
 arm_only_driver_inside_rect
 arm_sink_inside_rect
+arm_only_driver_beside_rect
+arm_reconfigurable_cells
+arm_walk_budget_exhausted
 
 echo "outputs in $OUT"
 exit "$rc_total"
