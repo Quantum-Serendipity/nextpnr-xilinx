@@ -33,10 +33,13 @@ Four more runs reuse those designs with other XDCs, and `order.v` adds a fifth d
   ahead of its BUFG, with 10 ns on `clk`, 8 ns on `aux_clk` and 8 ns on the `clk_i` pad. Derived from the
   pad, the MMCM gives `pix_clk` 20 ns and `aux_clk` 8 ns, so both agree and `pix_clk_g -> aux_clk` is related
   through `clk_i` with a 4 ns edge separation; the shorter period would be 8 ns. Propagation visits cells in
-  name order, so the MMCM is built as `mmcm` (`order-pad-last`, reached after the pad's IBUF) and as `a_mmcm`
-  (`order-pad-first`, reached first, while its input still holds the 10 ns carried back from `clk`). The
-  25 ns that carried value yields for `pix_clk` disagrees and must not block the agreeing derivation that
-  follows.
+  IdString order, the order their names were first interned while the netlist was read, not
+  alphabetical order. For this netlist yosys writes the cells in an order that puts `a_mmcm` ahead of
+  `ib` and `mmcm` behind it, and the order arm checks the outcome rather than assuming it. The MMCM
+  is built as `mmcm` (`order-pad-last`, reached after the pad's IBUF) and as `a_mmcm`
+  (`order-pad-first`, reached first, while its input still holds the 10 ns carried back from `clk`).
+  The 25 ns that carried value yields for `pix_clk` disagrees and must not block the agreeing
+  derivation that follows.
 - `unrelated-tight.xdc` sets `sclk` to 0.8 ns and runs under `--router router1`, whose post-route report
   turns a failing verdict into an `ERROR:` line. `sclk` has no path of its own, so the only errors are the
   two crossings and nextpnr exits 1. The same run with `--timing-allow-fail` is `unrelated-tight-allow`.
@@ -67,7 +70,7 @@ default).
 | three-mismatch `clk -> pix_clk` | every row has `period_ns` 10, and every max-delay line says no derived relation |
 | three-pad warning | `clk` refuses the 125.0 MHz derived from the 8 ns pad through `gs` |
 | three-pad `clk <-> pix_clk` | every row for each direction has `period_ns` 10, and every max-delay line says no derived relation |
-| order-pad-last / order-pad-first order | the first MMCM input line reads 125.0 MHz for `mmcm` and 100.0 MHz for `a_mmcm`, so each run took the order it names |
+| order-pad-last / order-pad-first order | the first MMCM input line reads 125.0 MHz for `mmcm` and 100.0 MHz for `a_mmcm`, so each run took the order it names; `order-pad-first` carries exactly one warning that the 40.0 MHz derived for `pix_clk` from the carried constraint on `clk_ibuf` is not applied, and `order-pad-last` carries none |
 | order-pad-last / order-pad-first `pix_clk_g -> aux_clk` | every row has `period_ns` 4, and every max-delay line is related through `clk_i` |
 | unrelated-tight | nextpnr exits 1, the `clk -> sclk` line is an `ERROR:` FAIL against 0.80 ns, and no other `ERROR:` line exists |
 | unrelated-tight-allow | with `--timing-allow-fail` nextpnr exits 0, the same FAIL prints as a `Warning:` line, and no `ERROR:` line exists |
