@@ -27,10 +27,7 @@ typedef int delay_t;
 
 struct DelayInfo
 {
-    delay_t delay = 0;    // late / slow / max corner
-    // early / fast / min corner.  0 = "unset" -> falls back to `delay`, so all
-    // existing code that only sets `.delay` keeps min==max and the setup pass is
-    // byte-identical.  Set `min` explicitly (fast corner) to enable hold analysis.
+    delay_t delay = 0;
     delay_t min = 0;
     bool has_min = false;
 
