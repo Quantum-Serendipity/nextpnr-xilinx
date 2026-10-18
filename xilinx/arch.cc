@@ -4180,6 +4180,70 @@ Arch::SyncPinTiming Arch::dsp48e1PinTiming(const CellInfo *cell, IdString port) 
     return t;
 }
 
+bool Arch::isConstantNet(const NetInfo *net) const
+{
+    if (net->driver.cell == nullptr)
+        return net->undef_const != 0;
+    const std::string &type = net->driver.cell->type.str(this);
+    return type == "PSEUDO_GND" || type == "PSEUDO_VCC" || type == "GND" || type == "VCC";
+}
+
+bool Arch::isClockNet(const NetInfo *net) const
+{
+    if (net->clkconstr != nullptr)
+        return true;
+    if (net->driver.cell == nullptr)
+        return false;
+    const std::string &type = net->driver.cell->type.str(this);
+    return type.find("BUF") != std::string::npos || type.find("PLL") != std::string::npos ||
+           type.find("MMCM") != std::string::npos;
+}
+
+std::vector<const NetInfo *> Arch::getClockSources(const NetInfo *net, bool include_generated) const
+{
+    std::vector<const NetInfo *> sources;
+    const CellInfo *drv = net->driver.cell;
+    if (drv == nullptr)
+        return sources;
+    const std::string &type = drv->type.str(this);
+    std::vector<const char *> inputs, alternates;
+    if (type.find("BUF") != std::string::npos) {
+        if (type.find("BUFR") != std::string::npos && !include_generated) {
+            auto div = drv->params.find(id("BUFR_DIVIDE"));
+            if (div != drv->params.end() && div->second.is_string && div->second.as_string() != "BYPASS" &&
+                div->second.as_string() != "1")
+                return sources;
+        }
+        inputs = {"I", "I0", "PAD"};
+        if (type.find("BUFGCTRL") != std::string::npos || type.find("BUFGMUX") != std::string::npos)
+            alternates = {"I1"};
+    } else if (include_generated &&
+               (type.find("PLLE2") != std::string::npos || type.find("MMCME2") != std::string::npos)) {
+        inputs = {"CLKIN1"};
+        alternates = {"CLKIN2"};
+    }
+    const bool mux = !alternates.empty();
+    auto input_net = [&](const char *in) -> const NetInfo * {
+        auto fnd = drv->ports.find(id(in));
+        if (fnd == drv->ports.end() || fnd->second.type != PORT_IN || fnd->second.net == nullptr ||
+            isConstantNet(fnd->second.net))
+            return nullptr;
+        const NetInfo *n = fnd->second.net;
+        if (mux && n->driver.cell == nullptr && n->clkconstr == nullptr)
+            return nullptr;
+        return n;
+    };
+    for (auto in : inputs)
+        if (const NetInfo *n = input_net(in)) {
+            sources.push_back(n);
+            break;
+        }
+    for (auto in : alternates)
+        if (const NetInfo *n = input_net(in))
+            sources.push_back(n);
+    return sources;
+}
+
 TimingPortClass Arch::syncPinClass(const CellInfo *cell, IdString port, const SyncPinTiming &t,
                                    int &clockInfoCount) const
 {
@@ -4188,8 +4252,7 @@ TimingPortClass Arch::syncPinClass(const CellInfo *cell, IdString port, const Sy
     if (t.kind == SYNC_PIN_COMB_INPUT)
         return TMG_COMB_INPUT;
     const NetInfo *clk = get_net_or_empty(cell, t.clock);
-    bool clk_const = clk != nullptr && clk->driver.cell != nullptr &&
-                     (clk->driver.cell->type == id_PSEUDO_VCC || clk->driver.cell->type == id_PSEUDO_GND);
+    bool clk_const = clk != nullptr && clk->driver.cell != nullptr && isConstantNet(clk);
     bool clk_live = clk != nullptr && !clk_const;
     if (clk_live && clk->driver.cell == nullptr && !undriven_clock_logged.count(clk->name) &&
         undriven_clock_logged.insert(clk->name).second)

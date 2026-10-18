@@ -197,27 +197,6 @@ struct Timing
         delay_t max_value = 0;
     };
 
-    static bool glob_match(const std::string &name, const std::string &pat)
-    {
-        size_t n = 0, p = 0, star = std::string::npos, mark = 0;
-        while (n < name.size()) {
-            if (p < pat.size() && (pat[p] == name[n] || pat[p] == '?')) {
-                ++n;
-                ++p;
-            } else if (p < pat.size() && pat[p] == '*') {
-                star = p++;
-                mark = n;
-            } else if (star != std::string::npos) {
-                p = star + 1;
-                n = ++mark;
-            } else
-                return false;
-        }
-        while (p < pat.size() && pat[p] == '*')
-            ++p;
-        return p == pat.size();
-    }
-
     std::vector<int> parse_ids(const std::string &str) const
     {
         std::vector<int> ids;
@@ -301,59 +280,6 @@ struct Timing
             names.push_back(net->clkconstr->name);
     }
 
-    bool constant_net(const NetInfo *net) const
-    {
-        if (net->driver.cell == nullptr)
-            return net->undef_const != 0;
-        const std::string &type = net->driver.cell->type.str(ctx);
-        return type == "PSEUDO_GND" || type == "PSEUDO_VCC" || type == "GND" || type == "VCC";
-    }
-
-    std::vector<const NetInfo *> clock_sources(const NetInfo *net, bool include_generated) const
-    {
-        std::vector<const NetInfo *> sources;
-        const CellInfo *drv = net->driver.cell;
-        if (drv == nullptr)
-            return sources;
-        const std::string &type = drv->type.str(ctx);
-        std::vector<const char *> inputs, alternates;
-        if (type.find("BUF") != std::string::npos) {
-            if (type.find("BUFR") != std::string::npos && !include_generated) {
-                auto div = drv->params.find(ctx->id("BUFR_DIVIDE"));
-                if (div != drv->params.end() && div->second.is_string && div->second.as_string() != "BYPASS" &&
-                    div->second.as_string() != "1")
-                    return sources;
-            }
-            inputs = {"I", "I0", "PAD"};
-            if (type.find("BUFGCTRL") != std::string::npos || type.find("BUFGMUX") != std::string::npos)
-                alternates = {"I1"};
-        } else if (include_generated && (type.find("PLLE2") != std::string::npos ||
-                                         type.find("MMCME2") != std::string::npos)) {
-            inputs = {"CLKIN1"};
-            alternates = {"CLKIN2"};
-        }
-        const bool mux = !alternates.empty();
-        auto input_net = [&](const char *in) -> const NetInfo * {
-            auto fnd = drv->ports.find(ctx->id(in));
-            if (fnd == drv->ports.end() || fnd->second.type != PORT_IN || fnd->second.net == nullptr ||
-                constant_net(fnd->second.net))
-                return nullptr;
-            const NetInfo *n = fnd->second.net;
-            if (mux && n->driver.cell == nullptr && n->clkconstr == nullptr)
-                return nullptr;
-            return n;
-        };
-        for (auto in : inputs)
-            if (const NetInfo *n = input_net(in)) {
-                sources.push_back(n);
-                break;
-            }
-        for (auto in : alternates)
-            if (const NetInfo *n = input_net(in))
-                sources.push_back(n);
-        return sources;
-    }
-
     void collect_identities(const NetInfo *net, bool include_generated, std::vector<std::string> &names, int depth,
                             std::vector<std::vector<std::string>> &out) const
     {
@@ -361,7 +287,7 @@ struct Timing
         add_clock_names(net, names);
         std::vector<const NetInfo *> sources;
         if (depth + 1 < 16)
-            sources = clock_sources(net, include_generated);
+            sources = ctx->getClockSources(net, include_generated);
         if (sources.empty())
             out.push_back(names);
         for (auto src : sources)

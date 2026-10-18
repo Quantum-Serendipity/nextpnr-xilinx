@@ -1972,6 +1972,9 @@ struct Arch : BaseCtx
     Dsp48e1Config dsp48e1Config(const CellInfo *cell) const;
     Dsp48e1Stage dsp48e1InputStage(const Dsp48e1Config &cfg, const std::string &base) const;
     SyncPinTiming dsp48e1PinTiming(const CellInfo *cell, IdString port) const;
+    bool isConstantNet(const NetInfo *net) const;
+    bool isClockNet(const NetInfo *net) const;
+    std::vector<const NetInfo *> getClockSources(const NetInfo *net, bool include_generated) const;
     TimingPortClass syncPinClass(const CellInfo *cell, IdString port, const SyncPinTiming &t,
                                  int &clockInfoCount) const;
     mutable std::unordered_set<IdString> undriven_clock_logged, unclocked_cell_logged, off_slicem_logged;

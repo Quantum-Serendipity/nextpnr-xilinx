@@ -20,6 +20,7 @@
 #include <functional>
 #include "log.h"
 #include "nextpnr.h"
+#include "util.h"
 NEXTPNR_NAMESPACE_BEGIN
 
 void Arch::parseXdc(std::istream &in)
@@ -172,18 +173,6 @@ void Arch::parseXdc(std::istream &in)
         return tgt_nets;
     };
 
-    auto glob_match = [](const std::string &name, const std::string &pat) {
-        size_t n = 0, p = 0, star = std::string::npos, mark = 0;
-        while (n < name.size()) {
-            if (p < pat.size() && (pat[p] == name[n] || pat[p] == '?')) { ++n; ++p; }
-            else if (p < pat.size() && pat[p] == '*') { star = p++; mark = n; }
-            else if (star != std::string::npos) { p = star + 1; n = ++mark; }
-            else return false;
-        }
-        while (p < pat.size() && pat[p] == '*') ++p;
-        return p == pat.size();
-    };
-
     struct Selection
     {
         bool ok = true;
@@ -227,13 +216,7 @@ void Arch::parseXdc(std::istream &in)
     auto clock_known = [&](const std::string &pat) {
         for (auto &n : nets) {
             const NetInfo *ni = n.second.get();
-            bool clocky = ni->clkconstr != nullptr;
-            if (!clocky && ni->driver.cell != nullptr) {
-                const std::string &dt = ni->driver.cell->type.str(this);
-                clocky = dt.find("BUF") != std::string::npos || dt.find("PLL") != std::string::npos ||
-                         dt.find("MMCM") != std::string::npos;
-            }
-            if (!clocky)
+            if (!isClockNet(ni))
                 continue;
             if (glob_match(n.first.str(this), pat))
                 return true;

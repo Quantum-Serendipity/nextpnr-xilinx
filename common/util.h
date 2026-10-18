@@ -130,6 +130,27 @@ inline NetInfo *get_net_or_empty(CellInfo *cell, const IdString port)
         return nullptr;
 }
 
+inline bool glob_match(const std::string &name, const std::string &pat)
+{
+    size_t n = 0, p = 0, star = std::string::npos, mark = 0;
+    while (n < name.size()) {
+        if (p < pat.size() && (pat[p] == name[n] || pat[p] == '?')) {
+            ++n;
+            ++p;
+        } else if (p < pat.size() && pat[p] == '*') {
+            star = p++;
+            mark = n;
+        } else if (star != std::string::npos) {
+            p = star + 1;
+            n = ++mark;
+        } else
+            return false;
+    }
+    while (p < pat.size() && pat[p] == '*')
+        ++p;
+    return p == pat.size();
+}
+
 NEXTPNR_NAMESPACE_END
 
 #endif
