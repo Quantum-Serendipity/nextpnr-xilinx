@@ -160,6 +160,12 @@ int Arch::insertConstDrivers(const std::vector<ConstHoldout> &holdouts, std::vec
         return t == id_CLBLL_L || t == id_CLBLL_R || t == id_CLBLM_L || t == id_CLBLM_R || t == id_CLEL_L ||
                t == id_CLEL_R || t == id_CLEM || t == id_CLEM_R;
     };
+    const bool partition_rect_active = roi_active();
+    auto bel_free = [&](BelId b) {
+        if (!partition_rect_active)
+            return checkBelAvail(b);
+        return !usp_bel_hard_unavail(b) && getBoundBelCell(b) == nullptr;
+    };
     // Ring search outwards from the sink's tile for a free, valid 6LUT+5LUT pair.
     auto place_lut = [&](CellInfo *lut, Loc origin) -> BelId {
         for (int r = 0; r <= max_radius; r++) {
@@ -176,16 +182,22 @@ int Arch::insertConstDrivers(const std::vector<ConstHoldout> &holdouts, std::vec
                     const bool is_logic_tile = tile_is_logic(tile);
                     if (!is_logic_tile)
                         continue;
+                    const bool touches_partition_rect =
+                            partition_rect_active &&
+                            (partition_rect_at(Loc(x - 1, y, 0)) >= 0 || partition_rect_at(Loc(x, y, 0)) >= 0 ||
+                             partition_rect_at(Loc(x + 1, y, 0)) >= 0);
+                    if (touches_partition_rect)
+                        continue;
                     for (BelId bel : getBelsByTile(x, y)) {
                         const bool is_lut_bel = getBelType(bel) == id_SLICE_LUTX;
                         if (!is_lut_bel)
                             continue;
                         Loc l = getBelLocation(bel);
-                        const bool free_6lut = (l.z & 0xF) == BEL_6LUT && checkBelAvail(bel);
+                        const bool free_6lut = (l.z & 0xF) == BEL_6LUT && bel_free(bel);
                         if (!free_6lut)
                             continue;
                         BelId lut5 = getBelByLocation(Loc(l.x, l.y, (l.z & ~0xF) | BEL_5LUT));
-                        const bool free_5lut = lut5 == BelId() || checkBelAvail(lut5);
+                        const bool free_5lut = lut5 == BelId() || bel_free(lut5);
                         if (!free_5lut)
                             continue;
                         bindBel(bel, lut, STRENGTH_STRONG);
@@ -295,8 +307,9 @@ int Arch::insertConstDrivers(const std::vector<ConstHoldout> &holdouts, std::vec
         BelId bel = place_lut(lut_ptr, origin);
         const bool no_free_lut_bel = bel == BelId();
         if (no_free_lut_bel) {
-            log_warning("    no free LUT bel within %d tiles of %s for a %s driver\n", max_radius,
-                        nameOfBel(need_new_holdouts.front().cell->bel), value ? "VCC" : "GND");
+            log_warning("    no free LUT bel within %d tiles of %s for a %s driver%s\n", max_radius,
+                        nameOfBel(need_new_holdouts.front().cell->bel), value ? "VCC" : "GND",
+                        partition_rect_active ? " outside every partition rectangle" : "");
             disconnect_port(ctx, lut_ptr, id_O6);
             cells.erase(cname);
             nets.erase(nname);
@@ -322,7 +335,8 @@ void Arch::routeConstants(std::function<void()> reroute)
         max_passes = atoi(passes_env);
     const bool allow = getenv("NEXTPNR_ALLOW_CONST_HOLDOUTS") != nullptr || allow_const_holdouts;
     const bool partition_rect_active = roi_active();
-    const bool no_drivers = getenv("NEXTPNR_NO_CONST_LUT_DRIVERS") != nullptr || partition_rect_active;
+    const bool rm_build = partition_rect_active && !rm_cells.empty();
+    const bool no_drivers = getenv("NEXTPNR_NO_CONST_LUT_DRIVERS") != nullptr || rm_build;
 
     // Fatal by default: an unrouted constant sink reads as 1 in silicon.
     auto report = [&](const std::vector<std::pair<ConstHoldout, const char *>> &left) {
@@ -355,9 +369,40 @@ void Arch::routeConstants(std::function<void()> reroute)
 
     std::set<std::pair<IdString, IdString>> given_up; // (cell, port) already reported
     std::vector<std::pair<ConstHoldout, const char *>> given_up_list;
-    const char *why_unplaced = partition_rect_active
-                                       ? "constant LUT drivers disabled under NEXTPNR_PARTITION_ROI"
-                                       : (no_drivers ? "constant LUT drivers disabled" : "no route or no free LUT bel");
+    const char *why_unplaced =
+            rm_build ? "constant LUT drivers disabled under NEXTPNR_PARTITION_ROI in a build with reconfigurable cells"
+            : no_drivers ? "constant LUT drivers disabled"
+            : partition_rect_active
+                    ? "no route, or no free LUT bel outside every partition rectangle under NEXTPNR_PARTITION_ROI"
+                    : "no route or no free LUT bel";
+    const char *why_in_rect = "constant LUT drivers disabled for a sink inside a partition rectangle under "
+                              "NEXTPNR_PARTITION_ROI";
+    const char *why_fenced = "constant LUT drivers disabled for a sink whose interconnect lies only inside a "
+                             "partition rectangle under NEXTPNR_PARTITION_ROI";
+    auto interconnect_outside_rects = [&](WireId sink) {
+        std::vector<WireId> todo{sink};
+        std::set<WireId> seen{sink};
+        int budget = 512;
+        while (!todo.empty() && budget-- > 0) {
+            WireId w = todo.back();
+            todo.pop_back();
+            for (PipId p : getPipsUphill(w)) {
+                Loc l = getPipLocation(p);
+                const bool pip_in_rect = partition_rect_at(l) >= 0;
+                if (pip_in_rect)
+                    continue;
+                int tile = l.y * getGridDimX() + l.x;
+                std::string type = IdString(chip_info->tile_types[chip_info->tile_insts[tile].type].type).str(this);
+                const bool interconnect_pip = type.compare(0, 3, "INT") == 0;
+                if (interconnect_pip)
+                    return true;
+                WireId s = getPipSrcWire(p);
+                if (seen.insert(s).second)
+                    todo.push_back(s);
+            }
+        }
+        return false;
+    };
     auto give_up = [&](const ConstHoldout &h, const char *why) {
         given_up.insert(std::make_pair(h.cell->name, h.port));
         given_up_list.push_back(std::make_pair(h, why));
@@ -396,6 +441,16 @@ void Arch::routeConstants(std::function<void()> reroute)
             const bool sink_has_uphill_pip = uphill.begin() != uphill.end();
             if (!sink_has_uphill_pip) {
                 give_up(h, "no pip drives the sink wire");
+                continue;
+            }
+            const bool sink_in_partition_rect = partition_rect_at(getBelLocation(h.cell->bel)) >= 0;
+            if (sink_in_partition_rect) {
+                give_up(h, why_in_rect);
+                continue;
+            }
+            const bool sink_fenced_by_rect = partition_rect_active && !interconnect_outside_rects(sink);
+            if (sink_fenced_by_rect) {
+                give_up(h, why_fenced);
                 continue;
             }
             real.push_back(h);
