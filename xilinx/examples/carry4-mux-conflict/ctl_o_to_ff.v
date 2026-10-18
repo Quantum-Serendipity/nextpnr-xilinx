@@ -1,8 +1,3 @@
-// Control: CO[1] still exports, but lane 1's sum now has a single sink that
-// pack_carries_atomic() co-locates into the same lane's main FF.  O[1] then
-// reaches that FF through xFFMUX.XOR and never touches the output mux, so
-// CO[1] has it to itself.  This is the arm that shows the predicate is about
-// mux CONTENTION and not about CO fanout on its own.
 module top (
     input  wire       clk_i,
     input  wire [3:0] s_i,

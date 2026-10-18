@@ -1,18 +1,3 @@
-// Control for the direction the other four arms cannot test: the predicate
-// must DECLINE.  A two-cell chain whose sums reach the fabric and whose
-// carries never do -- co1_o is driven by a SUM, and the only carry that leaves
-// c4a is CO[3], which rides the dedicated COUT->CIN spine into c4b.  Every lane
-// claims its output mux at most once, so relocate_carry_o_fabric() must
-// relocate nothing.
-//
-// Without this arm a predicate that over-fires would be green everywhere here,
-// because all three unpinned arms already relocate and ctl_pinned is skipped.
-// It is two cells rather than one deliberately: c4b has a real CIN net, so the
-// bit-0 relocation path is reachable and an over-fire there is observable.  A
-// one-cell version was immune -- its root has no CIN and its unused CO nets do
-// not exist, so the machinery declines for reasons unrelated to the predicate.
-//
-// Expected: 0 sums duplicated, 0 splits, 1 chain, 0 BEL-pinned.
 module top (
     input  wire       clk_i,
     input  wire [3:0] s_i,

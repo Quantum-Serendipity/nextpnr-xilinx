@@ -1257,7 +1257,6 @@ class HeAPPlacer
                                 if (target == BelId() || ctx->getBelType(target) != vc->type)
                                     goto fail;
                                 bound = ctx->getBoundBelCell(target);
-                                // Chains cannot overlap
                                 if (bound != nullptr)
                                     if (bound->constr_z != bound->UNCONSTR || bound->constr_parent != nullptr ||
                                         !bound->constr_children.empty() || bound->belStrength > STRENGTH_WEAK)

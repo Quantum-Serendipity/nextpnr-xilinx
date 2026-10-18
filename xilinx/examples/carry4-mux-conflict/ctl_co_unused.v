@@ -1,6 +1,3 @@
-// Control: same cell, but only ONE of lane 1's outputs reaches the fabric.
-// CO[1] is unused and the exported carry is CO[3], whose lane's sum O[3] goes
-// to a co-locatable FF.  Every lane claims the output mux at most once.
 module top (
     input  wire       clk_i,
     input  wire [3:0] s_i,

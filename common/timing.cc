@@ -134,7 +134,7 @@ struct CriticalPath
     PortRefVector ports;
     delay_t path_delay;
     delay_t path_period;
-    double mcp = 1.0; // set_multicycle_path setup factor on the capture register (1 = single-cycle)
+    double mcp = 1.0;
     bool by_exception = false;
 };
 
@@ -1779,13 +1779,6 @@ void timing_analysis(Context *ctx, bool print_histogram, bool print_fmax, bool p
                 log_nonfatal_error("Max frequency for clock %*s'%s': %.02f MHz (%s at %.02f MHz)\n", width, "",
                                    clock_name.c_str(), clock_fmax[clock.first], passed ? "PASS" : "FAIL", target);
         }
-        // A domain is graded only if some path both launches and captures in it,
-        // and Arch::getPortTimingClass returns a register class for SLICE_FFX and
-        // nothing else -- so a clock whose sinks are all hard-block clock pins
-        // (OSERDESE2, ISERDESE2, RAMB*, IDELAYCTRL, ...) yields no ClockPair and
-        // used to leave the report silent.  An absent line is indistinguishable
-        // from a domain that passed, so every constrained clock is accounted for
-        // here under its own token.
         std::set<IdString> ungraded;
         for (auto &eclock : empty_clocks)
             if (eclock != ctx->id("$async$"))

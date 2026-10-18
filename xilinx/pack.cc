@@ -952,12 +952,6 @@ void XilinxPacker::pack_constants()
     if (invertible_pins.empty())
         get_invertible_pins(ctx, invertible_pins);
     if (!ctx->cells.count(ctx->id("$PACKER_GND_DRV"))) {
-        // "ctx->nets[name] = std::move(...)" below overwrites an existing
-        // entry rather than asserting, so a design that already carries a net
-        // with one of these names would have that NetInfo freed while its
-        // users still point at it. Move any such net aside; its driver is a
-        // GND/VCC cell, so the loop further down reties its users to the
-        // packer's own constants and erases it.
         for (const char *cn : {"$PACKER_GND_NET", "$PACKER_VCC_NET"}) {
             IdString id = ctx->id_if_interned(cn);
             if (id != IdString() && ctx->nets.count(id)) {
@@ -1558,9 +1552,6 @@ void XilinxPacker::pack_inverters()
 
 bool Arch::pack()
 {
-    // Recorded, not inferred. ctx->attrs["step"] would be ambiguous here: a
-    // round-tripped netlist carries step=pack from the run that produced it, so
-    // reading it back cannot distinguish "packed earlier" from "packing now".
     packed_since_rm_snapshot = true;
     if (xc7) {
         XC7Packer packer;
@@ -1642,28 +1633,6 @@ bool Arch::pack()
         packer.finalise_muxfs();
         packer.pack_lutffs();
     }
-
-    // NEXTPNR_FRESH_REGION_MARGIN was here, and is RETIRED -- its job now runs
-    // unconditionally at the head of Arch::place(), off the partition rectangle
-    // and the RM snapshot.
-    //
-    // The idea was right and the placement was fatal.  Confining fresh logic to
-    // a compact region genuinely matters: without it the placer scatters sparse
-    // fresh cells across the whole die (a 6-bit reset counter split
-    // X8..X210 / Y132..Y327), combinational paths span the chip, and the design
-    // never leaves reset.  But this block sat at the tail of Arch::pack() and
-    // derived its bbox from attrs["BEL"], so on the DPR flow it was dead TWICE:
-    // --no-pack skips pack() entirely (common/command.cc computes do_pack from
-    // it), and archInfoToAttributes() erases BEL in favour of NEXTPNR_BEL, so a
-    // round-tripped netlist -- which a DPR static import IS -- carries no BEL
-    // for the derivation to find.  Correction 139.  Repairing the predicate in
-    // place would have changed nothing, because the enclosing function is not
-    // called.
-    //
-    // It could not stay here for a second reason: Arch::pack() sets
-    // packed_since_rm_snapshot, and check_partition_nets() refuses to run under
-    // a stale RM set.  Any flow that reached this code would have invalidated
-    // the snapshot the rectangle depends on.
 
     assignArchInfo();
     attrs[id("step")] = std::string("pack");

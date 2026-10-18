@@ -1061,9 +1061,6 @@ void XC7Packer::relocate_carry_o_fabric()
         ctx->id("FDRE"), ctx->id("FDSE"), ctx->id("FDCE"), ctx->id("FDPE"),
         ctx->id("FDRSE")};
     int relocated = 0, split_carries = 0;
-    // Local addition on top of upstream c2c05095a's series: the DFX branch has
-    // to be countable.  A BEL-pinned chain is skipped, and "skipped" is the
-    // same observable as "the pass was removed" unless the skip is counted.
     int chains_pinned = 0, cells_pinned = 0;
 
     // bit = GLOBAL bit index within the original 4-bit CARRY4.  Every cell
@@ -1225,39 +1222,6 @@ void XC7Packer::relocate_carry_o_fabric()
         // CO3; nb's empty tail 0..i-1 carries its CIN up to bit i.  Realise
         // each S=1 with a local 6LUT, just like pack_carries_atomic() does
         // for constant S inputs before relocation.
-        //
-        // DI is left UNCONNECTED on a pass-through lane, where upstream
-        // c2c05095a's series ties it to $PACKER_GND_NET.  Tying it adds a
-        // constant sink that routeVcc() often cannot bridge in an already
-        // dense slice, and this fork's routeVcc refuses to write undriven
-        // constant inputs rather than emitting them silently as upstream
-        // does.  That refusal is what failed UberDDR3 x8/x16 and the
-        // nexys_video demo -- 3, 6 and 6 unbridged sinks, every one of them a
-        // pass-through DI.
-        //
-        // This does NOT weaken the DI-delivery invariant above (an unrouted
-        // carry-DI bypass reads VCC, not 0, so omitting a GND DI silently
-        // delivers 1).  That invariant governs a lane whose S is a real
-        // signal.  Here S is hardwired to 1 through the feed-through LUT just
-        // created, and the MUXCY computes CO = S ? CIN : DI, so DI cannot
-        // reach CO at all; the lane's O is disconnected too, its net having
-        // moved to the other cell.  A DI that reads 1 is unobservable.
-        // Measured on conflict.v.  The CARRY4 CONFIGURATION FASM is identical
-        // with and without the tie: the PRECYINIT|CARRY4|CY0 subset is 6 lines
-        // either way and diffs empty.  That is the claim this argument needs,
-        // and it holds.
-        //
-        // The WHOLE FASM is not identical, and an earlier revision of this
-        // comment said it was.  Over all features: 385 without the tie against
-        // 369 with it, 32 disappearing and 16 appearing.  Only 16 of the 32 are
-        // the GFAN/BYP GND routes; the rest are 4 *LUT.INIT values, 4 CLBLL
-        // site IMUX pin selections and 8 INT routing pips.  The four INIT pairs
-        // have EQUAL POPCOUNT (32 ones each), which is LUT input permutation
-        // rather than a changed function -- the router had one fewer sink to
-        // place and picked different inputs.  Two nouns: what the safety
-        // argument needs is *the carry chain's configuration unchanged*; what
-        // the original sentence asserted was *no FASM feature changed at all*,
-        // which was measured over the GND-route features only.
         for (int b = i; b < 4; b++) {
             connect_port(ctx, vcc, c4, pname("S", b));
             PortRef pr{c4, pname("S", b)};
@@ -1336,7 +1300,7 @@ void XC7Packer::relocate_carry_o_fabric()
 
     for (auto *root : roots) {
         if (root->attrs.count(ctx->id("BEL"))) {
-            ++chains_pinned; // imported (Vivado-proven) placement: leave alone
+            ++chains_pinned;
             continue;
         }
         // NOTE: roots deliberately keep constr_x/y UNCONSTR.  An earlier
@@ -1460,11 +1424,6 @@ void XC7Packer::relocate_carry_o_fabric()
         }
     }
 
-    // Unconditional whenever the design has a CARRY4 chain at all.  Upstream
-    // emits this only when the pass acted, which makes "nothing needed
-    // relocating" and "the pass no longer runs" the same observation; a
-    // regression harness cannot tell them apart.  The chain total is the
-    // denominator the other three numbers are shares of.
     if (!roots.empty())
         log_info("   Carry-O relocation: %d sum(s) duplicated, %d CARRY4 split(s) over %d chain(s); "
                  "%d BEL-pinned chain(s), %d BEL-pinned cell(s) left alone\n",

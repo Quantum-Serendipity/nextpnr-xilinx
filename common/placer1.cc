@@ -570,17 +570,6 @@ class SAPlacer
                     } else {
                         uint64_t score = ctx->rng64();
                         CellInfo *bound_cell = ctx->getBoundBelCell(bel);
-                        // The partition rectangle introduces a case upstream
-                        // could not produce: checkBelAvail() false for a bel
-                        // that is EMPTY (outside the rectangle).  Before it,
-                        // false here meant "occupied" and bound_cell was
-                        // necessarily non-null, so this dereference was safe.
-                        // Skip rather than crash.  Not reachable on the DPR
-                        // flow -- place_initial only ever sees unbound cells,
-                        // which on --no-pack are exactly the RM set, and
-                        // enforcement point 2 has already vetoed the bel above
-                        // -- but reachable for any cell created after the RM
-                        // snapshot, i.e. on any packed flow.
                         if (bound_cell == nullptr)
                             return;
                         if (score <= best_ripup_score && bound_cell->belStrength < STRENGTH_STRONG) {
@@ -660,11 +649,6 @@ class SAPlacer
         }
 
         if (!ctx->isBelLocationValid(newBel) || ((other_cell != nullptr && !ctx->isBelLocationValid(oldBel)))) {
-            // Attribute the rejection to the partition rectangle when it
-            // reproduces point 3's predicate exactly (xilinx/arch_place.cc).
-            // The condition above is left byte-identical -- the counter is
-            // computed after the fact rather than by splitting the short-circuit
-            // -- so this cannot perturb placement.
             if (ctx->roi_active() &&
                 ((ctx->bel_outside_roi(newBel) && ctx->is_rm_cell(cell)) ||
                  (other_cell != nullptr && ctx->bel_outside_roi(oldBel) && ctx->is_rm_cell(other_cell))))
@@ -850,15 +834,6 @@ class SAPlacer
     // out of the bounding box of pre-placed (BEL-attr) fabric cells -- i.e.
     // the frozen macro's region, whose routing is LOCKED so densely that
     // arcs into it are unroutable for foreign logic.
-    //
-    // NOT a partition-containment mechanism, and must not be pressed into
-    // service as one.  The xilinx twin of this code was retired in favour of
-    // the partition rectangle (xilinx/arch_place.cc, Unit 7.6 step 3); this
-    // copy is left alone because it is arch-shared, but on the xilinx DPR flow
-    // it is inert twice over -- the env var is unset, and setup_exclusion_bbox()
-    // is only called from the `if (!refine)` arm, which HeAP's placer1_refine
-    // entry never enters.  Containment there is bel_outside_roi() at
-    // checkBelAvail / isValidBelForCell / isBelLocationValid.
     int excl_x0 = -1, excl_y0 = -1, excl_x1 = -1, excl_y1 = -1;
     void setup_exclusion_bbox()
     {
@@ -1401,13 +1376,6 @@ class SAPlacer
     float lambda = 0.5;
     bool improved = false;
     int n_move, n_accept;
-    // Run total, deliberately NOT reset per iteration the way n_move/n_accept
-    // are at the top of the annealing loop.  This is the witness that the SA
-    // move path actually attempted to leave the partition rectangle: without
-    // it, "no RM cell outside the rectangle" is equally consistent with a
-    // rectangle that refused every attempt and one that was never tested,
-    // because refinement's diameter is 3 and a design placed away from the
-    // boundary would never propose an outside bel at all.
     int64_t n_roi_reject = 0;
     int diameter = 35, max_x = 1, max_y = 1;
     std::unordered_map<IdString, std::tuple<int, int>> bel_types;
