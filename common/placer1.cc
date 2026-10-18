@@ -300,17 +300,23 @@ class SAPlacer
                      std::chrono::duration<float>(iplace_end - iplace_start).count());
             log_info("Running simulated annealing placer.\n");
         } else {
+            int roi_static_held = 0;
             for (auto &cell : ctx->cells) {
                 CellInfo *ci = cell.second.get();
                 if (ci->belStrength > STRENGTH_STRONG)
                     continue;
                 else if (ci->constr_parent != nullptr)
                     continue;
+                else if (roi_static_frozen(ci))
+                    ++roi_static_held;
                 else if (!ci->constr_children.empty() || ci->constr_z != ci->UNCONSTR)
                     chain_basis.push_back(ci);
                 else
                     autoplaced.push_back(ci);
             }
+            if (ctx->roi_active())
+                log_info("SA refinement: %d placed static cell(s) held at their bels under the partition rectangle\n",
+                         roi_static_held);
             require_legal = false;
             diameter = 3;
             log_info("Running simulated annealing placer for refinement.\n");
@@ -435,6 +441,8 @@ class SAPlacer
                     autoplaced.clear();
                     chain_basis.clear();
                     for (auto cell : sorted(ctx->cells)) {
+                        if (roi_static_frozen(cell.second))
+                            continue;
                         if (cell.second->belStrength <= STRENGTH_STRONG && cell.second->constr_parent == nullptr &&
                             !cell.second->constr_children.empty())
                             chain_basis.push_back(cell.second);
@@ -543,6 +551,11 @@ class SAPlacer
     }
 
   private:
+    bool roi_static_frozen(const CellInfo *ci) const
+    {
+        return ctx->roi_active() && ci->bel != BelId() && !ctx->is_rm_cell(ci);
+    }
+
     // Initial random placement
     void place_initial(CellInfo *cell)
     {
