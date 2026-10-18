@@ -2077,12 +2077,13 @@ void Arch::applyFixedRoutes(const std::string &filename, std::function<void()> r
         if (roi_active())
             log_error("fixed-routes: %d locked net(s) do not contain their own driver (%s); the locked fragment "
                       "omits the net's driver wire, so router2 silently truncates the net to the fragment "
-                      "(common/router2.cc:1091-1093) and the driver's output mux is lost from the FASM\n",
+                      "(Router2::route_net, strongly pre-routed sink branch) and the driver's output mux is lost "
+                      "from the FASM\n",
                       driverless, names.c_str());
         else
             log_warning("fixed-routes: %d locked net(s) do not contain their own driver (%s); the locked fragment "
                         "omits the net's driver wire, so router2 will silently truncate the net to the fragment "
-                        "(common/router2.cc:1091-1093)\n",
+                        "(Router2::route_net, strongly pre-routed sink branch)\n",
                         driverless, names.c_str());
     }
 
