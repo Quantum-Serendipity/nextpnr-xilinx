@@ -138,17 +138,16 @@ void XilinxPacker::generic_xform(const std::unordered_map<IdString, XFormRule> &
 std::unique_ptr<CellInfo> XilinxPacker::feed_through_lut(NetInfo *net, const std::vector<PortRef> &feed_users)
 {
     std::unique_ptr<NetInfo> feedthru_net{new NetInfo};
-    feedthru_net->name = ctx->id(net->name.str(ctx) + "$legal$" + std::to_string(++autoidx));
-    std::unique_ptr<CellInfo> lut = create_lut(ctx, net->name.str(ctx) + "$LUT$" + std::to_string(++autoidx), {net},
-                                               feedthru_net.get(), Property(2));
+    feedthru_net->name = ctx->id(fresh_name(net->name.str(ctx), "$legal$"));
+    std::unique_ptr<CellInfo> lut =
+            create_lut(ctx, fresh_name(net->name.str(ctx), "$LUT$"), {net}, feedthru_net.get(), Property(2));
 
     for (auto &usr : feed_users) {
         disconnect_port(ctx, usr.cell, usr.port);
         connect_port(ctx, feedthru_net.get(), usr.cell, usr.port);
     }
 
-    IdString netname = feedthru_net->name;
-    ctx->nets[netname] = std::move(feedthru_net);
+    add_net(std::move(feedthru_net));
     return lut;
 }
 
@@ -156,9 +155,8 @@ std::unique_ptr<CellInfo> XilinxPacker::feed_through_muxf(NetInfo *net, IdString
                                                           const std::vector<PortRef> &feed_users)
 {
     std::unique_ptr<NetInfo> feedthru_net{new NetInfo};
-    feedthru_net->name = ctx->id(net->name.str(ctx) + "$legal$" + std::to_string(++autoidx));
-    std::unique_ptr<CellInfo> mux =
-            create_cell(ctx, type, ctx->id(net->name.str(ctx) + "$MUX$" + std::to_string(++autoidx)));
+    feedthru_net->name = ctx->id(fresh_name(net->name.str(ctx), "$legal$"));
+    std::unique_ptr<CellInfo> mux = create_cell(ctx, type, ctx->id(fresh_name(net->name.str(ctx), "$MUX$")));
     connect_port(ctx, net, mux.get(), ctx->id("I0"));
     connect_port(ctx, feedthru_net.get(), mux.get(), ctx->id("O"));
     connect_port(ctx, ctx->nets[ctx->id("$PACKER_GND_NET")].get(), mux.get(), ctx->id("S"));
@@ -168,9 +166,27 @@ std::unique_ptr<CellInfo> XilinxPacker::feed_through_muxf(NetInfo *net, IdString
         connect_port(ctx, feedthru_net.get(), usr.cell, usr.port);
     }
 
-    IdString netname = feedthru_net->name;
-    ctx->nets[netname] = std::move(feedthru_net);
+    add_net(std::move(feedthru_net));
     return mux;
+}
+
+std::string XilinxPacker::fresh_name(const std::string &base, const std::string &tag)
+{
+    while (true) {
+        std::string name = base + tag + std::to_string(++autoidx);
+        IdString id = ctx->id_if_interned(name);
+        if (id == IdString() || (!ctx->nets.count(id) && !ctx->cells.count(id)))
+            return name;
+    }
+}
+
+NetInfo *XilinxPacker::add_net(std::unique_ptr<NetInfo> net)
+{
+    IdString name = net->name;
+    NPNR_ASSERT_MSG(!ctx->nets.count(name), ("net " + name.str(ctx) + " already exists").c_str());
+    NetInfo *ptr = net.get();
+    ctx->nets[name] = std::move(net);
+    return ptr;
 }
 
 IdString XilinxPacker::int_name(IdString base, const std::string &postfix, bool is_hierarchy)

@@ -1115,10 +1115,9 @@ void XC7Packer::relocate_carry_o_fabric()
         if (s == nullptr || cin_net == nullptr || o == nullptr)
             return;
         std::unique_ptr<NetInfo> sum_copy{new NetInfo};
-        sum_copy->name = ctx->id(o->name.str(ctx) + "$sum$" + std::to_string(++autoidx));
-        std::unique_ptr<CellInfo> lut =
-                create_lut(ctx, o->name.str(ctx) + "$sumLUT$" + std::to_string(++autoidx),
-                           {s, cin_net}, sum_copy.get(), Property(6));
+        sum_copy->name = ctx->id(fresh_name(o->name.str(ctx), "$sum$"));
+        std::unique_ptr<CellInfo> lut = create_lut(ctx, fresh_name(o->name.str(ctx), "$sumLUT$"), {s, cin_net},
+                                                   sum_copy.get(), Property(6));
         // Re-point EVERY user (including any sum-FF: xc7_logic_tile_valid
         // re-evaluates the carry bits against both slice halves (eighths
         // 0..3 and 4..7), and a lone FF on the O net claims the output mux
@@ -1158,8 +1157,7 @@ void XC7Packer::relocate_carry_o_fabric()
         // slice with a free output mux (the validity check rejects carry
         // tiles), while a fixed relative row can collide with another chain's
         // absolute position and displace one of its LUTs.
-        IdString nname = sum_copy->name;
-        ctx->nets[nname] = std::move(sum_copy);
+        add_net(std::move(sum_copy));
         new_cells.push_back(std::move(lut));
         relocated++;
         if (getenv("DBG_CARRYO"))
@@ -1186,7 +1184,7 @@ void XC7Packer::relocate_carry_o_fabric()
     // assigned by the chain renumber).
     auto split_at = [&](CellInfo *c4, int i, CellInfo *root) -> CellInfo * {
         std::unique_ptr<CellInfo> nb{new CellInfo};
-        nb->name = ctx->id(c4->name.str(ctx) + "$split$" + std::to_string(++autoidx));
+        nb->name = ctx->id(fresh_name(c4->name.str(ctx), "$split$"));
         nb->type = ctx->id("CARRY4");
         auto declare = [&](IdString name, PortType t) {
             nb->ports[name].name = name;
@@ -1219,11 +1217,10 @@ void XC7Packer::relocate_carry_o_fabric()
         // Dedicated COUT->CIN spine link: the model has no fabric pips into
         // CIN, so a link via the old CO[i-1] fabric net is unroutable.
         std::unique_ptr<NetInfo> link{new NetInfo};
-        link->name = ctx->id(c4->name.str(ctx) + "$carry$" + std::to_string(++autoidx));
+        link->name = ctx->id(fresh_name(c4->name.str(ctx), "$carry$"));
         connect_port(ctx, link.get(), c4, ctx->id("CO3"));
         connect_port(ctx, link.get(), nb.get(), ctx->id("CIN"));
-        IdString lname = link->name;
-        ctx->nets[lname] = std::move(link);
+        add_net(std::move(link));
         // Pass-through fills: c4's freed head i..3 carries CO[i-1] up to its
         // CO3; nb's empty tail 0..i-1 carries its CIN up to bit i.  Realise
         // each S=1 with a local 6LUT, just like pack_carries_atomic() does
