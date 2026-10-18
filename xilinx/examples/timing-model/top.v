@@ -69,6 +69,13 @@ module top (
     always @(posedge clk)
         s_q <= srl_o;
 
+    wire [4:0] k_q;
+    (* BEL = "SLICE_X44Y2/AFF" *) FDRE k0 (.C(clk), .CE(1'b1), .R(1'b0), .D(k_q[3] ^ btn), .Q(k_q[0]));
+    (* BEL = "SLICE_X44Y197/AFF" *) FDRE k1 (.C(clk), .CE(1'b1), .R(1'b0), .D(k_q[0]), .Q(k_q[1]));
+    (* BEL = "SLICE_X2Y100/AFF" *) FDRE k2 (.C(clk), .CE(1'b1), .R(1'b0), .D(k_q[1]), .Q(k_q[2]));
+    (* BEL = "SLICE_X44Y100/AFF" *) FDRE k3 (.C(clk), .CE(1'b1), .R(1'b0), .D(k_q[2]), .Q(k_q[3]));
+    (* BEL = "SLICE_X44Y197/BFF" *) FDRE k4 (.C(clk), .CE(1'b1), .R(1'b0), .D(k_q[3]), .Q(k_q[4]));
+
     (* keep *) reg [3:0] p0_q = 0;
     (* keep *) reg [3:0] p1_q = 0;
     always @(posedge ck0)
@@ -76,5 +83,5 @@ module top (
     always @(negedge ck0)
         p1_q <= p0_q ^ {p0_q[2:0], p0_q[3]};
 
-    assign led = b_q ^ d_q ^ n_q ^ {7'b0, m_q} ^ {5'b0, l_q, s_q, 1'b0} ^ {p1_q, p0_q};
+    assign led = b_q ^ d_q ^ n_q ^ {7'b0, m_q} ^ {5'b0, l_q, s_q, 1'b0} ^ {p1_q, p0_q} ^ {3'b0, k_q};
 endmodule

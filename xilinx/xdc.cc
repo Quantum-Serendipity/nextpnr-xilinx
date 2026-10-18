@@ -753,6 +753,17 @@ void Arch::parseXdc(std::istream &in)
                         log_warning("create_clock: %s; the clock is timed at a 50%% duty cycle (on line %d)\n",
                                     why.c_str(), lineno);
                 } else {
+                    if (edges.at(0) != 0) {
+                        if (xdc_strict)
+                            xdc_dropped.push_back(stringf("%s line %d: create_clock: -waveform '%s' puts the rising "
+                                                          "edge at %g ns, and a rising-edge offset is not read (not "
+                                                          "applied)",
+                                                          xdc_file.c_str(), lineno, waveform.c_str(), edges.at(0)));
+                        else
+                            log_warning("create_clock: -waveform '%s' puts the rising edge at %g ns; the offset is "
+                                        "not read and the clock rises at 0 with its high time kept (on line %d)\n",
+                                        waveform.c_str(), edges.at(0), lineno);
+                    }
                     high_ps = getDelayFromNS(edges.at(1) - edges.at(0)).maxDelay();
                     int64_t g = std::gcd(int64_t(high_ps), int64_t(period_ps));
                     if (high_ps > 0 && period_ps > 0 && g > 0) {

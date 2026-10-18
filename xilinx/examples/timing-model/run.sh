@@ -50,7 +50,7 @@ if ! synth top || ! synth duty; then
 fi
 
 if ! NEXTPNR_SETUP_EXPORT="$OUT/full.tsv" NEXTPNR_HOLD_EXPORT="$OUT/full.hold.tsv" NEXTPNR_ARC_EXPORT="$OUT/arcs.tsv" \
-        "$NEXTPNR" --chipdb "$CHIPDB" --xdc "$HERE/base.xdc" --json "$OUT/top.json" --write "$OUT/routed.json" \
+        "$NEXTPNR" --chipdb "$CHIPDB" --xdc "$HERE/base.xdc" --json "$OUT/top.json" --write "$OUT/routed.json" --sdf "$OUT/full.sdf" \
         --log "$OUT/full.log" -q --seed 1 >/dev/null 2>&1; then
     echo "FAIL nextpnr place and route: $(grep -m1 '^ERROR' "$OUT/full.log")"
     exit 1
@@ -59,7 +59,7 @@ R=$OUT/routed.json
 
 grade arcs "$R" "$OUT/arcs.tsv" "$TIMINGS" "$TILEGRID" arcs
 grade hold "$OUT/full.hold.tsv" hold_export
-grade skew "$R" "$OUT/full.tsv" "$OUT/full.hold.tsv" "$TIMINGS" "$TILEGRID" lfsr skew
+grade skew "$R" "$OUT/full.tsv" "$OUT/full.hold.tsv" "$OUT/full.sdf" "$TIMINGS" "$TILEGRID" lfsr,k_q skew
 grade period "$R" "$OUT/full.tsv" p1_q ck0 ck0 period_ns 5 duty_mmcm
 
 if NEXTPNR_SETUP_EXPORT="$OUT/duty.tsv" "$NEXTPNR" --chipdb "$CHIPDB" --xdc "$HERE/base.xdc" --json "$OUT/duty.json" \
@@ -126,9 +126,10 @@ lenient_arm() {
     local name=$1 xdc=$2
     if replay "$name" --xdc "$HERE/xdc/$xdc.xdc"; then
         report "PASS $name: accepted without --xdc-strict"
-    else
-        report "FAIL $name: refused without --xdc-strict: $(grep -m1 '^ERROR' "$OUT/$name.log")"
+        return 0
     fi
+    report "FAIL $name: refused without --xdc-strict: $(grep -m1 '^ERROR' "$OUT/$name.log")"
+    return 1
 }
 strict_arm strict_unsupported unsupported "unsupported XDC command 'set_input_delay'"
 lenient_arm lenient_unsupported unsupported
@@ -137,6 +138,22 @@ strict_arm strict_waveform waveform_bad "-waveform '{0}' is not two edge times"
 lenient_arm lenient_waveform waveform_bad
 strict_arm strict_mcp_nomult mcp_nomult "no path multiplier"
 strict_arm strict_mcp_setup_hold mcp_setup_hold "-setup and -hold together"
+strict_arm strict_waveform_offset waveform_offset "puts the rising edge at 2 ns"
+
+if lenient_arm lenient_waveform_offset waveform_offset; then
+    if grep -qF "the offset is not read" "$OUT/lenient_waveform_offset.log"; then
+        grade period "$R" "$OUT/lenient_waveform_offset.tsv" n_q clk clk period_ns 3 lenient_waveform_offset_high
+    else
+        report "FAIL lenient_waveform_offset_high: no warning that the rising-edge offset is not read"
+    fi
+fi
+if lenient_arm lenient_mcp_setup_hold mcp_setup_hold; then
+    if grep -qF "constraint not applied" "$OUT/lenient_mcp_setup_hold.log"; then
+        grade period "$R" "$OUT/lenient_mcp_setup_hold.tsv" d_q clk clk period_ns 10 lenient_mcp_setup_hold_dropped
+    else
+        report "FAIL lenient_mcp_setup_hold_dropped: no warning that the constraint is not applied"
+    fi
+fi
 
 "$PYTHON" "$HERE/mutate_chipdb.py" "$CHIPDB" "$OUT/nochecks.bin" > "$OUT/nochecks.txt" 2>&1
 if [ ! -s "$OUT/nochecks.bin" ]; then
@@ -150,6 +167,17 @@ else
     report "FAIL zero_checks: refused, but not for its timing checks: $(grep -m1 '^ERROR' "$OUT/zero_checks.log")"
 fi
 rm -f "$OUT/nochecks.bin"
+
+"$PYTHON" "$HERE/mutate_chipdb.py" "$CHIPDB" "$OUT/zeromin.bin" min > "$OUT/zeromin.txt" 2>&1
+if [ ! -s "$OUT/zeromin.bin" ]; then
+    report "FAIL zero_min: $(cat "$OUT/zeromin.txt")"
+elif NEXTPNR_ARC_EXPORT="$OUT/zeromin.arcs.tsv" "$NEXTPNR" --chipdb "$OUT/zeromin.bin" --xdc "$HERE/base.xdc" \
+        --json "$OUT/top.json" --no-route --log "$OUT/zero_min.log" -q --seed 1 >/dev/null 2>&1; then
+    grade zero_min "$OUT/zeromin.arcs.tsv" zero_min
+else
+    report "FAIL zero_min: nextpnr: $(grep -m1 '^ERROR' "$OUT/zero_min.log")"
+fi
+rm -f "$OUT/zeromin.bin"
 
 echo "artefacts kept in $OUT"
 exit "$rc_total"

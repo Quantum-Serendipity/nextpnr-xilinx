@@ -150,6 +150,28 @@ def grade_arcs(argv):
            "min and slow-corner max, and every used LUT input has an arc to every used output" % (name, checked)
 
 
+def grade_zero_min(argv):
+    arcs_tsv, name = argv
+    cols, rows = read_tsv(arcs_tsv)
+    if cols is None:
+        return "FAIL %s: no NEXTPNR_ARC_EXPORT file was written" % name
+    kinds, n = set(), 0
+    for r in rows:
+        if r["type"] not in ("SLICE_LUTX", "CARRY4", "SELMUX2_1"):
+            continue
+        if float(r["max_ns"]) <= 0:
+            return "FAIL %s: %s %s->%s has a max of %s ns" % (name, r["cell"], r["from"], r["to"], r["max_ns"])
+        if abs(float(r["min_ns"])) > TOL:
+            return "FAIL %s: %s %s->%s reads min %s ns where the chipdb gives 0 (max %s)" % (
+                name, r["cell"], r["from"], r["to"], r["min_ns"], r["max_ns"])
+        kinds.add(r["type"])
+        n += 1
+    missing = {"SLICE_LUTX", "CARRY4", "SELMUX2_1"} - kinds
+    if missing:
+        return "FAIL %s: no arc of type %s" % (name, ", ".join(sorted(missing)))
+    return "PASS %s: %d LUT/CARRY4/SELMUX2_1 arc(s) keep a zero fast-corner minimum" % (name, n)
+
+
 def hold_rows(path):
     cols, rows = read_tsv(path)
     return cols, rows
@@ -175,44 +197,81 @@ def grade_hold(argv):
         name, len(rows))
 
 
+def sdf_clock_pins(path):
+    if not os.path.exists(path):
+        return None
+    unesc = lambda t: re.sub(r"\\(.)", r"\1", t)
+    out = {}
+    for m in re.finditer(r"\(INTERCONNECT (\S+) (\S+) \((\d+):(\d+):(\d+)\)", open(path).read()):
+        cell, _, port = unesc(m.group(2)).rpartition("/")
+        if port in ("CK", "C", "CLK"):
+            out[cell] = int(m.group(5)) / 1000.0
+    return out
+
+
 def grade_skew(argv):
-    routed, setup_tsv, hold_tsv, timings, tilegrid, prefix, name = argv
+    routed, setup_tsv, hold_tsv, sdf_path, timings, tilegrid, prefixes, name = argv
     group, q_of, bel = netlist(routed)
     _, srows = read_tsv(setup_tsv)
     hcols, hrows = read_tsv(hold_tsv)
     if hcols is None:
         return "FAIL %s: no NEXTPNR_HOLD_EXPORT file was written" % name
-    cap = {(r["cell"], r["port"]): float(r["capture_clk_delay_ns"]) for r in hrows}
+    clk = sdf_clock_pins(sdf_path)
+    if not clk:
+        return "FAIL %s: no clock-pin INTERCONNECT in %s" % (name, os.path.basename(sdf_path))
+    hold = {(r["cell"], r["port"]): r for r in hrows}
     sdf = Sdf(timings, tilegrid)
-    checked = 0
+    net_re = re.compile("(%s)\\[\\d+\\]" % "|".join(re.escape(p) for p in prefixes.split(",")))
+    checked, early, late = 0, 0, 0
     for r in srows:
-        if not re.fullmatch(re.escape(prefix) + r"\[\d+\]", r["net"]):
+        if not net_re.fullmatch(r["net"]):
             continue
         drv = q_of.get(r["net"])
-        if drv is None or (drv, "D") not in cap or (r["cell"], r["port"]) not in cap:
-            return "FAIL %s: no hold row for the driver or the capture flop of net %s" % (name, r["net"])
-        launch = cap[(drv, "D")]
-        capture = cap[(r["cell"], r["port"])]
+        if drv is None or drv not in clk or r["cell"] not in clk:
+            return "FAIL %s: the SDF gives no clock-pin delay for the driver or the capture flop of net %s" % (
+                name, r["net"])
+        launch, capture = clk[drv], clk[r["cell"]]
         if launch < 0.1 or capture < 0.1:
             return "FAIL %s: net %s has a clock-pin delay of %.3f/%.3f ns, so its clock is not routed" % (
                 name, r["net"], launch, capture)
         tiletype, sitetype, _ = sdf.locate(bel.get(drv, ""))
-        ctq = [arcs[("CLK", "Q")][1] for (inst, ct), arcs in sdf.cells(tiletype or "").items()
+        ctq = [arcs[("CLK", "Q")] for (inst, ct), arcs in sdf.cells(tiletype or "").items()
                if inst == sitetype and ("CLK", "Q") in arcs]
         arrival = float(r["driver_arrival_ns"])
-        if not any(abs(arrival - launch - c) <= TOL for c in ctq):
-            return "FAIL %s: %s drives %s at %.3f ns; less its %.3f ns clock-pin delay that is %.3f, no SDF clk->Q " \
-                   "max of %s %s (%s)" % (name, drv, r["net"], arrival, launch, arrival - launch, tiletype, sitetype,
-                                         ", ".join("%.3f" % c for c in sorted(ctq)))
+        if not any(abs(arrival - launch - c[1]) <= TOL for c in ctq):
+            return "FAIL %s: %s drives %s at %.3f ns; less its %.3f ns SDF clock-pin delay that is %.3f, no SDF " \
+                   "clk->Q max of %s %s (%s)" % (name, drv, r["net"], arrival, launch, arrival - launch, tiletype,
+                                                sitetype, ", ".join("%.3f" % c[1] for c in sorted(ctq)))
         slack = float(r["period_ns"]) - (arrival + float(r["net_delay_ns"]) + float(r["setup_ns"]) - capture)
         if abs(slack - float(r["slack_ns"])) > TOL:
-            return "FAIL %s: %s.%s setup slack %s where period, arrival, setup and the %.3f ns capture clock give " \
-                   "%.3f" % (name, r["cell"], r["port"], r["slack_ns"], capture, slack)
+            return "FAIL %s: %s.%s setup slack %s where period, arrival, setup and the %.3f ns SDF capture clock " \
+                   "give %.3f" % (name, r["cell"], r["port"], r["slack_ns"], capture, slack)
+        h = hold.get((r["cell"], r["port"]))
+        if h is None:
+            return "FAIL %s: no hold row for %s.%s" % (name, r["cell"], r["port"])
+        if abs(float(h["capture_clk_delay_ns"]) - capture) > TOL:
+            return "FAIL %s: %s.%s hold row takes a %s ns capture clock where the SDF gives %.3f" % (
+                name, r["cell"], r["port"], h["capture_clk_delay_ns"], capture)
+        min_arr = float(h["driver_min_arrival_ns"])
+        if not any(abs(min_arr - launch - c[0]) <= TOL for c in ctq):
+            return "FAIL %s: %s.%s hold arrival %.3f ns; less the %.3f ns SDF launch clock that is %.3f, no SDF " \
+                   "clk->Q min (%s)" % (name, r["cell"], r["port"], min_arr, launch, min_arr - launch,
+                                       ", ".join("%.3f" % c[0] for c in sorted(ctq)))
+        hslack = min_arr + float(h["net_delay_min_ns"]) - float(h["hold_ns"]) - float(h["hold_req_ns"]) - capture
+        if abs(hslack - float(h["hold_slack_ns"])) > TOL:
+            return "FAIL %s: %s.%s hold slack %s where its arrival, hold and the %.3f ns SDF capture clock give " \
+                   "%.3f" % (name, r["cell"], r["port"], h["hold_slack_ns"], capture, hslack)
         checked += 1
+        early += capture - launch > 0.03
+        late += capture - launch < -0.03
     if checked == 0:
-        return "FAIL %s: no flop-to-flop row on a %s net" % (name, prefix)
-    return "PASS %s: %d flop-to-flop row(s) add the launch clock-pin delay to the arrival and the capture " \
-           "clock-pin delay to the requirement" % (name, checked)
+        return "FAIL %s: no flop-to-flop row on a %s net" % (name, prefixes)
+    if early == 0 or late == 0:
+        return "FAIL %s: of %d flop-to-flop row(s), %d capture later and %d earlier than launch by 30 ps; the arm " \
+               "needs both" % (name, checked, early, late)
+    return "PASS %s: %d flop-to-flop row(s), %d with the capture clock later and %d earlier than the launch " \
+           "clock, take the SDF launch clock-pin delay into the setup and hold arrival and the SDF capture " \
+           "clock-pin delay into both requirements" % (name, checked, early, late)
 
 
 def grade_period(argv):
@@ -248,7 +307,7 @@ def grade_norow(argv):
 def main():
     cmd, argv = sys.argv[1], sys.argv[2:]
     print({"arcs": grade_arcs, "hold": grade_hold, "skew": grade_skew, "period": grade_period,
-           "norow": grade_norow}[cmd](argv))
+           "norow": grade_norow, "zero_min": grade_zero_min}[cmd](argv))
 
 
 main()

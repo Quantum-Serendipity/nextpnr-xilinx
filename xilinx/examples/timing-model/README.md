@@ -22,7 +22,7 @@ row per hold check: `cell`, `port`, `hold_slack_ns`, `net`, `net_delay_min_ns`,
 |---|---|---|
 | `arcs` | `top.v` routed | every LUT5, LUT6, CARRY4 and SELMUX2_1 arc has the SDF fast-corner minimum and slow-corner maximum of its site and variant, a SLICEM LUT is among them, and every used LUT input has an arc to every used output |
 | `hold_export` | `top.v` routed | every hold row's slack is its minimum arrival plus net delay, less hold, hold requirement and capture clock-pin delay |
-| `skew` | `top.v` routed | a flop-to-flop row's arrival is an SDF clk->Q maximum plus the launch flop's clock-pin delay, and its setup slack adds the capture flop's clock-pin delay to the requirement |
+| `skew` | `top.v` routed | on every `lfsr` and `k_q` flop-to-flop row, the setup arrival is an SDF clk->Q maximum plus the launch flop's clock-pin delay, the hold arrival an SDF clk->Q minimum plus the same, and both slacks take the capture flop's clock-pin delay, each pin's delay read from the `INTERCONNECT` entries of the `--sdf` file; the `k` flops are placed so that at least one row's capture clock is later than its launch clock and at least one earlier |
 | `duty_mmcm` | `top.v` routed | `CLKOUT0_DUTY_CYCLE=0.25` on a 20 ns output gives a 5 ns posedge-to-negedge requirement |
 | `duty_mmcm_b` | `duty.v` placed | a `CLKOUT0` to `CLKOUT0B` path is required in 5 ns, the inverted output rising where `CLKOUT0` falls |
 | `replay_base`, `srl_base` | replay | the replay grades `b_q` at 10 ns and grades the SRL |
@@ -32,6 +32,7 @@ row per hold check: `cell`, `port`, `hold_slack_ns`, `net`, `net_delay_min_ns`,
 | `mcp_noname` | `-to [get_cells d_q*]` with no `-filter` | `d_q` is required in 20 ns |
 | `mcp_hold` | `mcp_from_to` plus `set_multicycle_path 1 -hold` | the `b_q` hold requirement is back at 0 |
 | `srl_fp` | `set_false_path -to [get_cells sreg]` | the replay grades no SRL row |
-| `strict_*` | `--xdc-strict` | an unsupported command, a virtual clock, an unreadable `-waveform`, a multicycle path with no multiplier and one with `-setup -hold` are each refused, naming why |
-| `lenient_*` | no `--xdc-strict` | the unsupported command and the unreadable `-waveform` are accepted |
+| `strict_*` | `--xdc-strict` | an unsupported command, a virtual clock, an unreadable `-waveform`, a `-waveform` whose rising edge is not at 0, a multicycle path with no multiplier and one with `-setup -hold` are each refused, naming why |
+| `lenient_*` | no `--xdc-strict` | the unsupported command, the unreadable `-waveform`, the `-waveform {2 5}` and the `-setup -hold` multicycle are accepted; `{2 5}` warns that the offset is not read and keeps its 3 ns high time, and the `-setup -hold` multicycle warns and is dropped, leaving `d_q` at 10 ns |
 | `zero_checks` | `mutate_chipdb.py` clears every timing check in a copy of the chipdb | nextpnr refuses the copy |
+| `zero_min` | `mutate_chipdb.py ... min` zeroes every propagation delay's minimum in a copy | every LUT, CARRY4 and SELMUX2_1 arc of `top.v` placed on the copy exports a zero minimum, not its maximum |
