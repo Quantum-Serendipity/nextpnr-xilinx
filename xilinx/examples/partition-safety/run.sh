@@ -584,40 +584,50 @@ arm_partition_modes_recorded() {
 
 perm_drop_hook() {
     cat >"$1" <<'EOF'
-done = False
-for name in sorted(n for n, ci in ctx.cells if ci.type == "SLICE_LUTX"):
-    ci = ctx.cells[name]
-    nets = {p: ci.ports[p].net for p in ("A2", "A3") if p in ci.ports}
-    if nets.get("A2") is None or nets.get("A3") is not None:
-        continue
-    for pip in ctx.getPipsUphill(ctx.getBelPinWire(ci.bel, "A3")):
-        if str(ctx.getPipSrcWire(pip)).endswith("_A5"):
-            ctx.bindPip(pip, nets["A2"], STRENGTH_LOCKED)
-            done = True
-            break
-    if done:
+ci = ctx.cells["u_x"]
+a2 = ci.ports["A2"].net if "A2" in ci.ports else None
+a3 = ci.ports["A3"].net if "A3" in ci.ports else None
+if a2 is None or a3 is not None:
+    raise Exception("u_x does not have A2 connected and A3 free")
+bound = None
+for pip in ctx.getPipsUphill(ctx.getBelPinWire(ci.bel, "A3")):
+    if str(ctx.getPipSrcWire(pip)).endswith("_A5"):
+        ctx.bindPip(pip, a2, STRENGTH_LOCKED)
+        bound = pip
         break
-if not done:
-    raise SystemExit("no LUT with A2 connected and A3 free")
+if bound is None:
+    raise Exception("no _A5 permutation pip into u_x.A3")
+print("lpd.py: bound %s for u_x on %s" % (bound, a2.name))
 EOF
 }
 
 arm_lut_perm_drop_mode() {
+    if ! "$YOSYS" -q -l "$OUT/lpd-yosys.log" \
+            -p "read_verilog \"$HERE/lpd.v\"; synth_xilinx -flatten -abc9 -arch xc7 -top top; write_json \"$OUT/lpd.json\"" \
+            >/dev/null 2>&1; then
+        report "FAIL NEXTPNR_LUT_PERM_DROP: yosys on lpd.v"
+        return
+    fi
+    if ! npnr "$OUT/lpd-place.log" --xdc "$HERE/top.xdc" --json "$OUT/lpd.json" --write "$OUT/lpd-placed.json" --no-route \
+            --seed 1; then
+        report "FAIL NEXTPNR_LUT_PERM_DROP: placing lpd.v: $(grep -m1 '^ERROR' "$OUT/lpd-place.log")"
+        return
+    fi
     perm_drop_hook "$OUT/lpd.py"
-    npnr "$OUT/lpd-warn.log" --json "$OUT/placed.json" --no-pack --no-place --pre-route "$OUT/lpd.py"
+    npnr "$OUT/lpd-warn.log" --json "$OUT/lpd-placed.json" --no-pack --no-place --pre-route "$OUT/lpd.py"
     local rc0=$?
     local drops
     drops=$(grep -o 'rewrite DROPPED [0-9]*' "$OUT/lpd-warn.log" | grep -o '[0-9]*$')
     if [ "$rc0" -ne 0 ] || [ -z "$drops" ]; then
-        report "FAIL NEXTPNR_LUT_PERM_DROP: the hook that binds a stray permutation pip drops nothing (rc $rc0): $(grep -m1 '^ERROR' "$OUT/lpd-warn.log")"
+        report "FAIL NEXTPNR_LUT_PERM_DROP: the hook that binds a stray permutation pip into lpd.v's u_x drops nothing (rc $rc0): $(grep -m1 '^ERROR' "$OUT/lpd-warn.log")"
         return
     fi
-    NEXTPNR_LUT_PERM_DROP=fatal npnr "$OUT/lpd-fatal.log" --json "$OUT/placed.json" --no-pack --no-place \
+    NEXTPNR_LUT_PERM_DROP=fatal npnr "$OUT/lpd-fatal.log" --json "$OUT/lpd-placed.json" --no-pack --no-place \
         --pre-route "$OUT/lpd.py" --write "$OUT/lpd-fatal.json"
     local rc1=$?
-    NEXTPNR_LUT_PERM_DROP=fatal npnr "$OUT/lpd-clean.log" --json "$OUT/placed.json" --no-pack --no-place
+    NEXTPNR_LUT_PERM_DROP=fatal npnr "$OUT/lpd-clean.log" --json "$OUT/lpd-placed.json" --no-pack --no-place
     local rc2=$?
-    NEXTPNR_LUT_PERM_DROP=FATAL npnr "$OUT/lpd-bad.log" --json "$OUT/placed.json" --no-pack --no-place
+    NEXTPNR_LUT_PERM_DROP=FATAL npnr "$OUT/lpd-bad.log" --json "$OUT/lpd-placed.json" --no-pack --no-place
     local rc3=$?
     if [ "$rc1" -ne 0 ] && grep -q '^ERROR: LUT permutation rewrite DROPPED' "$OUT/lpd-fatal.log" && [ ! -e "$OUT/lpd-fatal.json" ]; then
         report "PASS NEXTPNR_LUT_PERM_DROP=fatal with $drops dropped LUT input(s): refused at rc $rc1, no netlist written; unset it warns at rc $rc0"
