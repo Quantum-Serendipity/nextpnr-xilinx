@@ -627,6 +627,8 @@ class SAPlacer
             return false;
         BelId oldBel = cell->bel;
         CellInfo *other_cell = ctx->getBoundBelCell(newBel);
+        if (other_cell != nullptr && roi_static_frozen(other_cell))
+            return false;
         if (!require_legal && other_cell != nullptr &&
             (is_constrained(other_cell) || other_cell->belStrength > STRENGTH_WEAK)) {
             return false;
@@ -781,7 +783,7 @@ class SAPlacer
             // We don't consider swapping chains with other chains, at least for the time being - unless it is
             // part of this chain
             if (bound != nullptr && !cells.count(bound->name) &&
-                (bound->belStrength >= STRENGTH_STRONG || is_constrained(bound)))
+                (bound->belStrength >= STRENGTH_STRONG || is_constrained(bound) || roi_static_frozen(bound)))
                 return false;
             dest_bels.emplace_back(std::make_pair(cr.first, targetBel));
         }

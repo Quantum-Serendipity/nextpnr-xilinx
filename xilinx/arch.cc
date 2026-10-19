@@ -1079,6 +1079,14 @@ bool Arch::place()
         log_info("partition region: %d of them keep a region set before placement, inside the rectangle\n", kept);
     }
 
+    std::vector<std::pair<CellInfo *, BelId>> static_bels;
+    if (roi_active())
+        for (auto &cell : cells) {
+            CellInfo *ci = cell.second.get();
+            if (ci->bel != BelId() && !is_rm_cell(ci))
+                static_bels.emplace_back(ci, ci->bel);
+        }
+
     std::string placer = str_or_default(settings, id("placer"), defaultPlacer);
 
     if (placer == "heap") {
@@ -1131,6 +1139,22 @@ bool Arch::place()
         log_error("US+ architecture does not support placer '%s'\n", placer.c_str());
     }
     fixupPlacement();
+    if (roi_active()) {
+        int moved = 0;
+        std::string first;
+        for (auto &sb : static_bels)
+            if (sb.first->bel != sb.second) {
+                if (moved++ == 0)
+                    first = std::string(nameOf(sb.first)) + " from " + nameOfBel(sb.second) + " to " +
+                            (sb.first->bel == BelId() ? std::string("no bel") : std::string(nameOfBel(sb.first->bel)));
+            }
+        log_info("partition placement: %d of %d placed static cell(s) at their imported bel after placement\n",
+                 int(static_bels.size()) - moved, int(static_bels.size()));
+        if (moved > 0)
+            log_error("partition placement: %d static cell(s) placed before placement were moved by it (first: %s); a "
+                      "static cell under a partition rectangle keeps the bel it was imported at\n",
+                      moved, first.c_str());
+    }
     {
         int lut_sites = 0, lut_sites_used = 0;
         for (BelId bel : getBels()) {

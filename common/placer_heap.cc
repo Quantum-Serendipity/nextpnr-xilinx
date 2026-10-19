@@ -1144,16 +1144,21 @@ class HeAPPlacer
                     // only; abundant types keep the greedy commit.
                     BelId target = (scarce_type && bestFreeBel != BelId()) ? bestFreeBel : bestBel;
                     CellInfo *bound = ctx->getBoundBelCell(target);
-                    if (bound != nullptr) {
-                        ctx->unbindBel(bound->bel);
-                        remaining.emplace(chain_size[bound->name], bound->name);
+                    if (bound != nullptr && roi_static(bound)) {
+                        bestBel = BelId();
+                        best_inp_len = std::numeric_limits<int>::max();
+                    } else {
+                        if (bound != nullptr) {
+                            ctx->unbindBel(bound->bel);
+                            remaining.emplace(chain_size[bound->name], bound->name);
+                        }
+                        ctx->bindBel(target, ci, STRENGTH_WEAK);
+                        placed = true;
+                        Loc loc = ctx->getBelLocation(target);
+                        cell_locs[ci->name].x = loc.x;
+                        cell_locs[ci->name].y = loc.y;
+                        break;
                     }
-                    ctx->bindBel(target, ci, STRENGTH_WEAK);
-                    placed = true;
-                    Loc loc = ctx->getBelLocation(target);
-                    cell_locs[ci->name].x = loc.x;
-                    cell_locs[ci->name].y = loc.y;
-                    break;
                 }
 
                 if (ci->constr_children.empty() && !ci->constr_abs_z) {
@@ -1162,9 +1167,10 @@ class HeAPPlacer
                             continue;
                         if (ctx->checkBelAvail(sz) || (radius > ripup_radius || ctx->rng(20000) < 10)) {
                             CellInfo *bound = ctx->getBoundBelCell(sz);
+                            PlaceStrength bound_strength = bound != nullptr ? bound->belStrength : STRENGTH_NONE;
                             if (bound != nullptr) {
                                 if (bound->constr_parent != nullptr || !bound->constr_children.empty() ||
-                                    bound->constr_abs_z || bound->belStrength > STRENGTH_STRONG)
+                                    bound->constr_abs_z || bound->belStrength > STRENGTH_STRONG || roi_static(bound))
                                     continue;
                                 ctx->unbindBel(bound->bel);
                             }
@@ -1172,11 +1178,11 @@ class HeAPPlacer
                             if (require_validity && !ctx->isBelLocationValid(sz)) {
                                 ctx->unbindBel(sz);
                                 if (bound != nullptr)
-                                    ctx->bindBel(sz, bound, STRENGTH_WEAK);
+                                    ctx->bindBel(sz, bound, bound_strength);
                             } else if (iter_at_radius < need_to_explore) {
                                 ctx->unbindBel(sz);
                                 if (bound != nullptr)
-                                    ctx->bindBel(sz, bound, STRENGTH_WEAK);
+                                    ctx->bindBel(sz, bound, bound_strength);
                                 int input_len = 0;
                                 for (auto &port : ci->ports) {
                                     auto &p = port.second;
@@ -1206,7 +1212,7 @@ class HeAPPlacer
                                 // types only).
                                 if (scarce_type && bound != nullptr && bestFreeBel != BelId()) {
                                     ctx->unbindBel(sz);
-                                    ctx->bindBel(sz, bound, STRENGTH_WEAK);
+                                    ctx->bindBel(sz, bound, bound_strength);
                                     ctx->bindBel(bestFreeBel, ci, STRENGTH_WEAK);
                                     Loc floc = ctx->getBelLocation(bestFreeBel);
                                     cell_locs[ci->name].x = floc.x;
@@ -1266,7 +1272,8 @@ class HeAPPlacer
                                 bound = ctx->getBoundBelCell(target);
                                 if (bound != nullptr)
                                     if (bound->constr_z != bound->UNCONSTR || bound->constr_parent != nullptr ||
-                                        !bound->constr_children.empty() || bound->belStrength > STRENGTH_WEAK)
+                                        !bound->constr_children.empty() || bound->belStrength > STRENGTH_WEAK ||
+                                        roi_static(bound))
                                         goto fail;
                                 targets.emplace_back(vc, target);
                             }
@@ -2027,6 +2034,8 @@ class HeAPPlacer
     };
     typedef decltype(CellInfo::udata) cell_udata_t;
     cell_udata_t dont_solve = std::numeric_limits<cell_udata_t>::max();
+
+    bool roi_static(const CellInfo *ci) const { return ctx->roi_active() && !ctx->is_rm_cell(ci); }
 };
 int HeAPPlacer::CutSpreader::seq = 0;
 

@@ -251,6 +251,61 @@ arm_const_containment() {
     fi
 }
 
+arm_weak_static_cell_not_moved() {
+    local name="weak static cell beside an RM cell under a rectangle"
+    if ! "$YOSYS" -q -l "$OUT/m8w-yosys.log" \
+            -p "read_verilog \"$HERE/m8w.v\"; synth_xilinx -flatten -abc9 -arch xc7 -top top; write_json \"$OUT/m8w.json\"" \
+            >/dev/null 2>&1; then
+        report "FAIL $name: yosys on m8w.v"
+        return
+    fi
+    if ! npnr "$OUT/m8w-place.log" --xdc "$HERE/top.xdc" --json "$OUT/m8w.json" --write "$OUT/m8w-placed.json" \
+            --no-route --seed 1; then
+        report "FAIL $name: placing m8w.v: $(grep -m1 '^ERROR' "$OUT/m8w-place.log")"
+        return
+    fi
+    local sbel tx ty
+    if ! read -r sbel tx ty < <("$PYTHON" - "$OUT/m8w-placed.json" "$OUT/m8w-in.json" <<'EOF'
+import json, sys
+d = json.load(open(sys.argv[1]))
+c = d["modules"]["top"]["cells"]
+s = c["u_s"]["attributes"]
+s.pop("BEL", None)
+s["BEL_STRENGTH"] = format(1, "032b")
+r = c["u_r"]["attributes"]
+for k in ("BEL", "NEXTPNR_BEL", "BEL_STRENGTH"):
+    r.pop(k, None)
+json.dump(d, open(sys.argv[2], "w"))
+print(s["NEXTPNR_BEL"])
+EOF
+    ) || [ -z "$sbel" ]; then
+        report "FAIL $name: could not mark u_s weak and unplace u_r"
+        return
+    fi
+    read -r _ tx ty < <(geom cell-tiles "$OUT/m8w-placed.json" SLICE_LUTX | awk -v b="$sbel" '$1 == b')
+    roi "$OUT/m8w.roi.json" "$tx" "$ty" "$tx" "$ty"
+    local pl sd rc now bad="" runs=0
+    for pl in heap sa; do
+        for sd in 1 2 3 4; do
+            rm -f "$OUT/m8w-$pl-$sd.json"
+            NEXTPNR_PARTITION_NETS=warn NEXTPNR_PARTITION_ROI=$OUT/m8w.roi.json npnr "$OUT/m8w-$pl-$sd.log" \
+                --json "$OUT/m8w-in.json" --no-pack --no-route --placer "$pl" --seed "$sd" --write "$OUT/m8w-$pl-$sd.json"
+            rc=$?
+            runs=$((runs + 1))
+            now=$("$PYTHON" -c 'import json,sys; print(json.load(open(sys.argv[1]))["modules"]["top"]["cells"]["u_s"]["attributes"].get("NEXTPNR_BEL","-"))' \
+                "$OUT/m8w-$pl-$sd.json" 2>/dev/null)
+            if [ "$rc" -ne 0 ] || [ "$now" != "$sbel" ]; then
+                [ -n "$bad" ] || bad="--placer $pl --seed $sd: rc $rc, u_s at ${now:--} where it was imported at $sbel: $(grep -m1 '^ERROR' "$OUT/m8w-$pl-$sd.log")"
+            fi
+        done
+    done
+    if [ -n "$bad" ]; then
+        report "FAIL $name: $bad"
+    else
+        report "PASS $name: u_s (weak, placed) stays at $sbel in tile ($tx,$ty) over $runs heap and sa placements of the RM LUT u_r inside that one tile"
+    fi
+}
+
 arm_frozen_cell_not_moved() {
     local bel
     bel=$(geom cell-tiles "$OUT/placed.json" SLICE_LUTX | awk 'NR == 1 { print $1 }')
@@ -646,6 +701,68 @@ arm_lut_perm_drop_mode() {
     fi
 }
 
+first_lut_hook() {
+    cat >"$1" <<'EOF'
+done = False
+for name in sorted(n for n, ci in ctx.cells if ci.type == "SLICE_LUTX"):
+    ci = ctx.cells[name]
+    nets = {p: ci.ports[p].net for p in ("A2", "A3") if p in ci.ports}
+    if nets.get("A2") is None or nets.get("A3") is not None:
+        continue
+    for pip in ctx.getPipsUphill(ctx.getBelPinWire(ci.bel, "A3")):
+        if str(ctx.getPipSrcWire(pip)).endswith("_A5"):
+            ctx.bindPip(pip, nets["A2"], STRENGTH_LOCKED)
+            print("lpf.py: bound %s for %s" % (pip, name))
+            done = True
+            break
+    if done:
+        break
+if not done:
+    raise Exception("no LUT with A2 connected, A3 free and an _A5 permutation pip into A3")
+EOF
+}
+
+arm_lut_perm_function() {
+    local out rc drops
+    out=$(geom lut-functions "$OUT/placed.json" "$OUT/routed.json")
+    rc=$?
+    if [ "$rc" -ne 0 ]; then
+        report "FAIL LUT permutation rewrite keeps each LUT's function: the plain route of top.v changes one ($out)"
+        return
+    fi
+    if [ ! -s "$OUT/lpd-placed.json" ] || [ ! -s "$OUT/lpd.py" ]; then
+        report "FAIL LUT permutation rewrite keeps each LUT's function: the NEXTPNR_LUT_PERM_DROP arm left no lpd.v placement or hook"
+        return
+    fi
+    npnr "$OUT/lpf-lpd.log" --json "$OUT/lpd-placed.json" --no-pack --no-place --pre-route "$OUT/lpd.py" \
+        --write "$OUT/lpf-lpd.json"
+    drops=$(grep -o 'rewrite DROPPED [0-9]*' "$OUT/lpf-lpd.log" | grep -o '[0-9]*$')
+    if geom lut-functions "$OUT/lpd-placed.json" "$OUT/lpf-lpd.json" >/dev/null || [ -z "$drops" ]; then
+        report "FAIL LUT permutation rewrite keeps each LUT's function: on lpd.v's hooked route the comparison and the drop counter disagree (drops ${drops:-none}): $(geom lut-functions "$OUT/lpd-placed.json" "$OUT/lpf-lpd.json")"
+        return
+    fi
+    first_lut_hook "$OUT/lpf.py"
+    npnr "$OUT/lpf-top.log" --json "$OUT/placed.json" --no-pack --no-place --pre-route "$OUT/lpf.py" \
+        --write "$OUT/lpf-top.json"
+    rc=$?
+    if [ "$rc" -ne 0 ] || [ ! -s "$OUT/lpf-top.json" ]; then
+        report "FAIL LUT permutation rewrite keeps each LUT's function: the hooked route of top.v did not complete (rc $rc): $(grep -m1 '^ERROR' "$OUT/lpf-top.log")"
+        return
+    fi
+    drops=$(grep -o 'rewrite DROPPED [0-9]*' "$OUT/lpf-top.log" | grep -o '[0-9]*$')
+    out=$(geom lut-functions "$OUT/placed.json" "$OUT/lpf-top.json")
+    rc=$?
+    if [ "$rc" -eq 1 ] && [ -z "$drops" ]; then
+        report "FAIL LUT permutation rewrite keeps each LUT's function: the hooked route of top.v changes a LUT's function and the drop counter reports nothing ($out)"
+    elif [ "$rc" -eq 2 ]; then
+        report "FAIL LUT permutation rewrite keeps each LUT's function: no verdict on the hooked route of top.v ($out)"
+    else
+        local what="changes no LUT function"
+        [ -n "$drops" ] && what="drops $drops input(s) and the counter reports them"
+        report "PASS LUT permutation rewrite keeps each LUT's function: the plain route keeps every one, lpd.v's dropped input is seen by both the comparison and the counter, and top.v's hooked route $what ($out)"
+    fi
+}
+
 arm_fixed_routes_chipdb_identity() {
     local idl
     idl=$(grep -m1 '^# nextpnr-xilinx chipdb: ' "$OUT/all.routes")
@@ -706,6 +823,7 @@ arm_router1_refused_under_a_rectangle
 arm_static_keepout
 arm_const_containment
 arm_frozen_cell_not_moved
+arm_weak_static_cell_not_moved
 arm_pinned_cell_not_moved_without_a_rectangle
 arm_pre_place_region_kept
 arm_region_only_placed_input_refused
@@ -714,6 +832,7 @@ arm_bel_blacklist_fails_closed
 arm_skip_failed_arcs_under_a_rectangle
 arm_partition_modes_recorded
 arm_lut_perm_drop_mode
+arm_lut_perm_function
 arm_fixed_routes_chipdb_identity
 
 echo "artefacts kept in $OUT"
