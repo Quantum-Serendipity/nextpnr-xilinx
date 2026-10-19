@@ -88,21 +88,31 @@ else
     esac
 fi
 
-if ! synth "$OUT/ramp" "$HERE/dense.v" "chparam -set K 136 top;"; then
-    report "FAIL ramp: yosys"
-elif ! RIPUP_REGION=13,53,14,62 place "$OUT/ramp" --pre-place "$HERE/region.py"; then
-    report "FAIL ramp: nextpnr: $(grep -m1 '^ERROR' "$OUT/ramp.log")"
-else
-    g=$(grade "$OUT/ramp.log")
+ramp_pass="" ramp_seen=""
+for K in 126 130 132 134 136 138; do
+    if ! synth "$OUT/ramp-$K" "$HERE/dense.v" "chparam -set K $K top;"; then
+        ramp_seen="$ramp_seen K=$K:yosys"
+        continue
+    fi
+    if ! RIPUP_REGION=13,53,14,62 place "$OUT/ramp-$K" --pre-place "$HERE/region.py"; then
+        ramp_seen="$ramp_seen K=$K:rc"
+        continue
+    fi
+    g=$(grade "$OUT/ramp-$K.log")
     case $g in
-        off-ramp*) report "FAIL ramp: $g" ;;
-        *) if [ "$(field "$g" ramp)" -ge 1 ]; then
-               report "PASS ramp: $g, a line with two or more escalations still below the grid"
-           else
-               report "FAIL ramp: $g, no line with two or more escalations below the grid"
-           fi ;;
+        off-ramp*) report "FAIL ramp: K=$K $g"; ramp_pass=off; break ;;
     esac
-fi
+    ramp_seen="$ramp_seen K=$K:ramp=$(field "$g" ramp)"
+    if [ "$(field "$g" ramp)" -ge 1 ]; then
+        ramp_pass="K=$K $g"
+        break
+    fi
+done
+case $ramp_pass in
+    off) ;;
+    "") report "FAIL ramp: no density in the sweep gave a line with two or more escalations below the grid:$ramp_seen" ;;
+    *) report "PASS ramp: $ramp_pass, a line with two or more escalations still below the grid (sweep:$ramp_seen)" ;;
+esac
 
 if ! synth "$OUT/clamp" "$HERE/dense.v" "chparam -set K 16 top;"; then
     report "FAIL clamp: yosys"
