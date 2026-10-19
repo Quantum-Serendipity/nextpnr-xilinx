@@ -167,6 +167,76 @@ def pin(placed, out, bel, strength):
         json.dump(d, f)
 
 
+def lut_table(path):
+    with open(path) as f:
+        top = json.load(f)["modules"]["top"]
+    names = {}
+    for name, nn in top["netnames"].items():
+        for b in nn["bits"]:
+            if isinstance(b, int) and (b not in names or name < names[b]):
+                names[b] = name
+    out = {}
+    for cname, c in top["cells"].items():
+        if c["type"] != "SLICE_LUTX":
+            continue
+        init = c["parameters"].get("INIT", "")
+        k = (len(init) - 1).bit_length()
+        logical = {}
+        for port, bits in c["connections"].items():
+            orig = c["attributes"].get("X_ORIG_PORT_" + port, "")
+            if not port.startswith("A") or not bits or not orig:
+                continue
+            b = bits[0]
+            net = names.get(b, "const:%s" % b) if isinstance(b, int) else "const:%s" % b
+            for lp in orig.split():
+                logical.setdefault(lp, set()).add(net)
+        out[cname] = (init, k, logical)
+    return out
+
+
+def lut_function(init, k, logical, nets):
+    rows = []
+    for assign in range(1 << len(nets)):
+        val = {n: (assign >> i) & 1 for i, n in enumerate(nets)}
+        for n in nets:
+            if n.startswith("const:"):
+                val[n] = int(n[6:]) if n[6:] in ("0", "1") else None
+        idx = 0
+        for i in range(k):
+            src = logical.get("I%d" % i)
+            if not src or len(src) != 1:
+                rows.append(None)
+                break
+            v = val[next(iter(src))]
+            if v is None:
+                rows.append(None)
+                break
+            idx |= v << i
+        else:
+            rows.append(init[len(init) - 1 - idx] if idx < len(init) else None)
+    return rows
+
+
+def lut_functions(before, after):
+    a, b = lut_table(before), lut_table(after)
+    diffs, n = [], 0
+    for cname in sorted(set(a) & set(b)):
+        nets = sorted(set().union(*a[cname][2].values(), *b[cname][2].values()))
+        if len(nets) > 12:
+            print("lut-functions: %s reads %d nets, too many to tabulate" % (cname, len(nets)))
+            sys.exit(2)
+        n += 1
+        if lut_function(*a[cname], nets) != lut_function(*b[cname], nets):
+            diffs.append("%s: INIT %s %s before, INIT %s %s after" % (
+                cname, a[cname][0], sorted((p, sorted(v)) for p, v in a[cname][2].items()), b[cname][0],
+                sorted((p, sorted(v)) for p, v in b[cname][2].items())))
+    print("lut-functions: %d LUT(s) in both netlists, %d with a different logical function%s" % (
+        n, len(diffs), ("; first: " + diffs[0]) if diffs else ""))
+    if n == 0:
+        sys.exit(2)
+    sys.exit(1 if diffs else 0)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--tilegrid", required=True)
@@ -198,6 +268,9 @@ def main():
     p = sub.add_parser("touching-nets")
     p.add_argument("placed")
     p.add_argument("cell_types", nargs="+")
+    p = sub.add_parser("lut-functions")
+    p.add_argument("before")
+    p.add_argument("after")
     p = sub.add_parser("escaping")
     p.add_argument("placed")
     p.add_argument("routes")
@@ -222,6 +295,8 @@ def main():
         escaping(grid, a.placed, a.routes, a.x0, a.y0, a.x1, a.y1)
     elif a.cmd == "unplace":
         unplace(a.placed, a.out, a.cell_types)
+    elif a.cmd == "lut-functions":
+        lut_functions(a.before, a.after)
     elif a.cmd == "pin":
         pin(a.placed, a.out, a.bel, a.strength)
 
