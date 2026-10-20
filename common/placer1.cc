@@ -629,6 +629,8 @@ class SAPlacer
         CellInfo *other_cell = ctx->getBoundBelCell(newBel);
         if (other_cell != nullptr && roi_static_frozen(other_cell))
             return false;
+        if (other_cell != nullptr && (!check_cell_bel_region(other_cell, oldBel) || bel_excluded(other_cell, oldBel)))
+            return false;
         if (!require_legal && other_cell != nullptr &&
             (is_constrained(other_cell) || other_cell->belStrength > STRENGTH_WEAK)) {
             return false;
