@@ -154,15 +154,19 @@ void Arch::parseXdc(std::istream &in)
         if (split.size() < 2)
             log_error("failed to parse target (on line %d)\n", lineno);
         const std::string target_name = strip_quotes(split_name);
-        NetInfo *maybe_net = getNetByAlias(id_if_interned(target_name));
-        if (maybe_net == nullptr) {
-            std::string base = debus_zero(target_name);
-            if (!base.empty())
-                maybe_net = getNetByAlias(id_if_interned(base));
+        auto grouped = split_to_args(str, true);
+        const std::string member_list = grouped.size() >= 2 ? strip_quotes(grouped.at(1)) : target_name;
+        for (auto &member : split_to_args(member_list, false)) {
+            NetInfo *maybe_net = getNetByAlias(id_if_interned(member));
+            if (maybe_net == nullptr) {
+                std::string base = debus_zero(member);
+                if (!base.empty())
+                    maybe_net = getNetByAlias(id_if_interned(base));
+            }
+            if (maybe_net != nullptr && std::find(tgt_nets.begin(), tgt_nets.end(), maybe_net) == tgt_nets.end())
+                tgt_nets.push_back(maybe_net);
         }
-        if (maybe_net != nullptr)
-            tgt_nets.push_back(maybe_net);
-        else {
+        if (tgt_nets.empty()) {
             missing_targets++;
             if (xdc_strict)
                 xdc_dropped.push_back(stringf("%s line %d: %s: no net or port named '%s'", xdc_file.c_str(), lineno,

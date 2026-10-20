@@ -96,5 +96,40 @@ else
     report "FAIL replay of the --freq 50 run: $(grep -m1 '^ERROR' "$OUT/replay-50.log" 2>/dev/null)"
 fi
 
+union_replay() {
+    NEXTPNR_TIMING_ONLY=1 "$NEXTPNR" --chipdb "$CHIPDB" --xdc "$HERE/pins.xdc" --xdc "$HERE/$1" \
+        --json "$OUT/routed.json" --no-pack --no-place --no-route --log "$OUT/$2" -q >/dev/null 2>&1
+}
+if union_replay clock-union.xdc replay-union.log; then
+    line=$(fmax_line "$OUT/replay-union.log")
+    dropped=$(grep -c 'matched no net, constraint dropped' "$OUT/replay-union.log")
+    case $line in
+        *"at 100.00 MHz"*)
+            if [ "$dropped" -eq 0 ]; then
+                report "PASS create_clock on a union naming one absent and one present net: $line, 0 dropped"
+            else
+                report "FAIL create_clock on a union naming one absent and one present net: $line, $dropped dropped"
+            fi ;;
+        *) report "FAIL create_clock on a union naming one absent and one present net: '$line'" ;;
+    esac
+else
+    report "FAIL create_clock on a union naming one absent and one present net: $(grep -m1 '^ERROR' "$OUT/replay-union.log")"
+fi
+if union_replay clock-union-none.xdc replay-union-none.log; then
+    line=$(fmax_line "$OUT/replay-union-none.log")
+    dropped=$(grep -c 'matched no net, constraint dropped' "$OUT/replay-union-none.log")
+    case $line in
+        *UNCONSTRAINED*)
+            if [ "$dropped" -eq 1 ]; then
+                report "PASS create_clock on a union naming no present net is dropped with its warning: $line"
+            else
+                report "FAIL create_clock on a union naming no present net: $dropped dropped warning(s)"
+            fi ;;
+        *) report "FAIL create_clock on a union naming no present net: '$line'" ;;
+    esac
+else
+    report "FAIL create_clock on a union naming no present net: $(grep -m1 '^ERROR' "$OUT/replay-union-none.log")"
+fi
+
 echo "artefacts kept in $OUT"
 exit "$rc_total"
