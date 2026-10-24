@@ -413,6 +413,9 @@ struct Router2
                 bool complete = false;
                 WireId cursor = ad.sink_wire;
                 while (true) {
+                    if (path.size() > flat_wires.size())
+                        log_error("router2: the routing bound to net '%s' contains a cycle through wire '%s'\n",
+                                  ctx->nameOf(net), ctx->nameOfWire(cursor));
                     int idx = wire_to_idx.at(cursor);
                     auto &bound_nets = flat_wires.at(idx).bound_nets;
                     auto it = bound_nets.find(net->udata);
@@ -1012,7 +1015,11 @@ struct Router2
                     // Only do this if the existing routing is uncontented; however
                     int cursor2 = cursor;
                     bool bwd_merge_fail = false;
+                    size_t merge_hops = 0;
                     while (flat_wires.at(cursor2).bound_nets.count(net->udata)) {
+                        if (++merge_hops > flat_wires.size())
+                            log_error("router2: the routing bound to net '%s' contains a cycle through wire '%s'\n",
+                                      ctx->nameOf(net), ctx->nameOfWire(flat_wires.at(cursor2).w));
                         if (!unbounded && int(flat_wires.at(cursor2).bound_nets.size()) > (allowed_cong + 1)) {
                             bwd_merge_fail = true;
                             break;
@@ -1180,7 +1187,11 @@ struct Router2
                 // Only do this if the existing routing is uncontented; however
                 int cursor2 = cursor;
                 bool bwd_merge_fail = false;
+                size_t merge_hops = 0;
                 while (flat_wires.at(cursor2).bound_nets.count(net->udata)) {
+                    if (++merge_hops > flat_wires.size())
+                        log_error("router2: the routing bound to net '%s' contains a cycle through wire '%s'\n",
+                                  ctx->nameOf(net), ctx->nameOfWire(flat_wires.at(cursor2).w));
                     PipId p = flat_wires.at(cursor2).bound_nets.at(net->udata).second;
                     if (p == PipId())
                         break;

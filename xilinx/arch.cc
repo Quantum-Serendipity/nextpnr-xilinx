@@ -2055,6 +2055,22 @@ void Arch::applyFixedRoutes(const std::string &filename, std::function<void()> r
                     continue;
                 }
             }
+            bool closes_cycle = dst == getCtx()->getNetinfoSourceWire(net);
+            WireId cur = src;
+            for (size_t hops = 0; !closes_cycle && sn == net && hops <= net->wires.size(); hops++) {
+                auto bw = net->wires.find(cur);
+                if (bw == net->wires.end() || bw->second.pip == PipId())
+                    break;
+                cur = getPipSrcWire(bw->second.pip);
+                closes_cycle = cur == dst;
+            }
+            if (closes_cycle) {
+                if (malformed++ < 20)
+                    log_warning("fixed-routes: pip %s would drive the source of net '%s' or close a routing cycle; "
+                                "not bound\n",
+                                getPipName(pip).str(this).c_str(), nameOf(net));
+                continue;
+            }
             if (sn == nullptr)
                 bindWire(src, net, STRENGTH_LOCKED);
             if (dn == nullptr)
