@@ -71,6 +71,31 @@ for v in "${VARIANTS[@]}"; do
     report "$("$PYTHON" "$HERE/grade.py" "$OUT/routed.json" "$OUT/base.tsv" "$OUT/$v.tsv" "$OUT/$v.log" "$v")"
 done
 
+src=$(cd "$HERE" && "$PYTHON" -B -c '
+import csv, re, sys
+import grade
+g = grade.groups_of(sys.argv[1])
+def sources(tsv, want, cross):
+    out = set()
+    for r in csv.DictReader(open(tsv), delimiter="\t"):
+        if g.get(r["cell"], "?") == want and (r["launch_clk"] != r["capture_clk"]) == cross:
+            out.add(r.get("requirement_source", "(no requirement_source column)"))
+    return ",".join(sorted(out)) or "(none)"
+idx = "?"
+for line in open(sys.argv[4]):
+    m = re.search(r"set_max_delay: exception #(\d+)", line)
+    if m:
+        idx = m.group(1)
+print(sources(sys.argv[2], "dst_b", True), sources(sys.argv[3], "dst_b", True), "max_delay#" + idx,
+      sources(sys.argv[2], "dst_slow", False))
+' "$OUT/routed.json" "$OUT/base.tsv" "$OUT/maxdelay_cdc.tsv" "$OUT/maxdelay_cdc.log" 2>&1)
+read -r src_base src_var src_want src_same <<<"$src"
+if [ "$src_base" = unrelated-min ] && [ "$src_var" = "$src_want" ] && [ "$src_same" = same ]; then
+    report "PASS requirement_source: dst_b crossing rows read $src_base with no exception and $src_var under maxdelay_cdc; dst_slow same-clock rows read $src_same"
+else
+    report "FAIL requirement_source: base dst_b [$src_base], maxdelay_cdc dst_b [$src_var] (want $src_want), base dst_slow [$src_same]"
+fi
+
 strict_arm() {
     local name=$1 xdc=$2 why=$3
     if replay "$name" --xdc "$HERE/xdc/$xdc.xdc" --xdc-strict; then

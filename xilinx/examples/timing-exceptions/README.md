@@ -35,6 +35,13 @@ its D input) and, through the net `mid`, `dst_mid`.
 | `maxdelay_cdc` | every `dst_b` row graded against 30 ns with positive slack |
 | `maxdelay_tight` | every `dst_slow` endpoint has a 0.5 ns row, and the worst slack is worse |
 
+Every setup-export row names what set its requirement in `requirement_source` (`same`, `same-half`,
+`related`, `unrelated-min`, `capture-only`, `default`, `max_delay#<n>` or `multicycle#<n>+<base>`,
+where `<n>` is the exception number the reader logs). The `requirement_source` arm passes when the
+`dst_b` crossing rows read `unrelated-min` in the base replay and `max_delay#<n>` under
+`maxdelay_cdc`, with `<n>` taken from that replay's log, and the `dst_slow` same-clock rows read
+`same`.
+
 Under `--xdc-strict` each of `fp_nomatch`, `fp_pins_bogus`, `fp_pins_q`, `fp_clock_typo`,
 `groups_typo` and `fp_from_comb` must be refused, for its own reason. A full place and route with
 `groups` and `fp_from_to` applied must finish with no `dst_b` row in its export (`pnr_groups`), and

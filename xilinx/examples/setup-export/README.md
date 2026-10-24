@@ -14,6 +14,7 @@ default).
 | arm | passes when |
 |---|---|
 | router2 export | a default (router2) run's export has a `delay_source` column and every row says `routed` |
+| row identity | the export carries `launch_clk_delay_ns`, `capture_clk_delay_ns` and `requirement_source`; on every row `slack_ns` equals `period_ns - (driver_arrival_ns + net_delay_ns + setup_ns - capture_clk_delay_ns)` to 1.5 ps, both clock delays are positive, and every row's `requirement_source` is `same` |
 | replay agreement | every row's slack in that export equals the `NEXTPNR_TIMING_ONLY` replay of the routed JSON |
 | placement-only export | with `NEXTPNR_POST_ROUTE_TIMING=0` every row says `estimate` |
 | unwritable export | an export path in a missing directory stops the run with an error naming `NEXTPNR_SETUP_EXPORT` |
