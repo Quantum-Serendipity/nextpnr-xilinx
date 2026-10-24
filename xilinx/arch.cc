@@ -4843,8 +4843,8 @@ void Arch::load_exempt_nets() const
             ln.pop_back();
         if (ln.empty() || ln[0] == '#')
             continue;
-        IdString nn = id(ln);
-        if (!nets.count(nn)) {
+        IdString nn = id_if_interned(ln);
+        if (nn == IdString() || !nets.count(nn)) {
             log_warning("NEXTPNR_PARTITION_EXEMPT_NETS: '%s' names net '%s', which does not exist in this "
                         "design\n",
                         f, ln.c_str());
@@ -4882,8 +4882,8 @@ std::unordered_set<IdString> Arch::load_keepout_exempt_nets() const
                 ln.pop_back();
             if (ln.empty() || ln[0] == '#')
                 continue;
-            IdString nn = id(ln);
-            if (!nets.count(nn)) {
+            IdString nn = id_if_interned(ln);
+            if (nn == IdString() || !nets.count(nn)) {
                 log_warning("NEXTPNR_PARTITION_KEEPOUT_EXEMPT: '%s' names net '%s', which does not exist in this "
                             "design\n",
                             f, ln.c_str());
@@ -4926,7 +4926,8 @@ std::unordered_map<IdString, std::vector<PipId>> Arch::load_keepout_licence_pips
             continue;
         }
         std::string netname = ln.substr(0, sp), pipspec = ln.substr(sp + 1);
-        auto nit = nets.find(id(netname));
+        IdString nn = id_if_interned(netname);
+        auto nit = nn == IdString() ? nets.end() : nets.find(nn);
         if (nit == nets.end()) {
             if (miss_net++ < 20)
                 log_warning("keepout licence: net not found: '%s'\n", netname.c_str());

@@ -166,6 +166,18 @@ arm_static_keepout() {
         report "FAIL static keepout, router2 control: rc $rc, $inside static pip(s) in tile ($sx,$sy), $census clean gate census line(s)"
     fi
 
+    printf 'no_such_net_stale_a\nno_such_net_stale_b\n' >"$OUT/m10-stale.nets"
+    NEXTPNR_PARTITION_ROI=$r NEXTPNR_PARTITION_KEEPOUT_EXEMPT=$OUT/m10-stale.nets \
+        NEXTPNR_PARTITION_EXEMPT_NETS=$OUT/m10-stale.nets npnr "$OUT/m10-stale.log" --json "$OUT/placed.json" \
+        --no-pack --no-place --write-fixed-routes "$OUT/m10-stale.routes"
+    rc=$?
+    if [ "$rc" -eq 0 ] && grep -q '0 from .*m10-stale.nets, 2 unresolved)' "$OUT/m10-stale.log" \
+            && cmp -s <(grep -v '^#' "$OUT/m10-router2.routes") <(grep -v '^#' "$OUT/m10-stale.routes"); then
+        report "PASS stale exemption names: two names matching no net are counted unresolved and the routes equal the run without them"
+    else
+        report "FAIL stale exemption names: rc $rc, $(grep -m1 'partition keepout exemptions' "$OUT/m10-stale.log"), routes $(cmp -s <(grep -v '^#' "$OUT/m10-router2.routes") <(grep -v '^#' "$OUT/m10-stale.routes") && echo equal || echo differ)"
+    fi
+
     NEXTPNR_PARTITION_ROI=$r npnr "$OUT/m10-fixed.log" --json "$OUT/placed.json" --no-pack --no-place \
         --fixed-routes "$OUT/all.routes" --write-fixed-routes "$OUT/m10-fixed.routes"
     rc=$?
