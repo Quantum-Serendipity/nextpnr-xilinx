@@ -105,10 +105,10 @@ if union_replay clock-union.xdc replay-union.log; then
     dropped=$(grep -c 'matched no net, constraint dropped' "$OUT/replay-union.log")
     case $line in
         *"at 100.00 MHz"*)
-            if [ "$dropped" -eq 0 ]; then
-                report "PASS create_clock on a union naming one absent and one present net: $line, 0 dropped"
+            if [ "$dropped" -eq 0 ] && grep -q "member 'no_such_net' of .* matched no net or port" "$OUT/replay-union.log"; then
+                report "PASS create_clock on a union naming one absent and one present net: $line, 0 dropped, the absent member named in the log"
             else
-                report "FAIL create_clock on a union naming one absent and one present net: $line, $dropped dropped"
+                report "FAIL create_clock on a union naming one absent and one present net: $line, $dropped dropped, $(grep -c "member 'no_such_net'" "$OUT/replay-union.log") line(s) naming the absent member"
             fi ;;
         *) report "FAIL create_clock on a union naming one absent and one present net: '$line'" ;;
     esac
