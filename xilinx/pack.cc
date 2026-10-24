@@ -1389,9 +1389,13 @@ void XC7Packer::pack_bram()
                 if (write_width >= (9 * we_width))
                     continue;
                 int used_we_width = std::max(write_width / 9, 1);
-                for (int i = used_we_width; i < we_width; i++) {
-                    NetInfo *low_we = get_net_or_empty(ci, ctx->id(std::string(port == 'B' ? "WEBWE[" : "WEA[") +
-                                                                   std::to_string(i % used_we_width) + "]"));
+                const bool pairs = ci->type == ctx->id("RAMB18E1") && port == 'B';
+                std::vector<NetInfo *> used_we;
+                for (int i = 0; i < used_we_width; i++)
+                    used_we.push_back(get_net_or_empty(
+                            ci, ctx->id(std::string(port == 'B' ? "WEBWE[" : "WEA[") + std::to_string(i) + "]")));
+                for (int i = pairs ? 0 : used_we_width; i < we_width; i++) {
+                    NetInfo *low_we = used_we.at(pairs ? (i * used_we_width / we_width) : (i % used_we_width));
                     IdString curr_we = ctx->id(std::string(port == 'B' ? "WEBWE[" : "WEA[") + std::to_string(i) + "]");
                     if (!ci->ports.count(curr_we)) {
                         ci->ports[curr_we].type = PORT_IN;
