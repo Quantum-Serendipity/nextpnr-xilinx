@@ -48,6 +48,9 @@ void arch_wrap_python()
 
     fn_wrapper_2a<Context, decltype(&Context::isValidBelForCell), &Context::isValidBelForCell, pass_through<bool>,
                   addr_and_unwrap<CellInfo>, conv_from_str<BelId>>::def_wrap(ctx_cls, "isValidBelForCell");
+    class_<DelayInfo>("DelayInfo").def("maxDelay", &DelayInfo::maxDelay).def("minDelay", &DelayInfo::minDelay);
+    fn_wrapper_1a<Context, decltype(&Context::getWireType), &Context::getWireType, conv_to_str<IdString>,
+                  conv_from_str<WireId>>::def_wrap(ctx_cls, "getWireType");
 
     typedef std::unordered_map<IdString, std::unique_ptr<CellInfo>> CellMap;
     typedef std::unordered_map<IdString, std::unique_ptr<NetInfo>> NetMap;

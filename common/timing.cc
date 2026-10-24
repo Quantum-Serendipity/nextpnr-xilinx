@@ -570,6 +570,8 @@ struct Timing
     }
 
     static constexpr float clock_network_min_scale = 0.9f;
+    bool clock_intents_ready = false;
+    std::unordered_set<IdString> clock_network_intents, general_intents;
 
     struct ClockPathStep
     {
@@ -597,7 +599,24 @@ struct Timing
         WireId src = ctx->getNetinfoSourceWire(clk);
         if (usr == nullptr || src == WireId())
             return path;
-        std::vector<std::pair<WireId, std::pair<delay_t, delay_t>>> steps;
+        if (!clock_intents_ready) {
+            for (const char *n : {"GLOBAL", "BUFGROUT"})
+                clock_network_intents.insert(ctx->id_if_interned(n));
+            for (const char *n : {"SINGLE", "DOUBLE", "HQUAD", "VQUAD", "HLONG", "VLONG", "VLONG12", "BENTQUAD",
+                                  "SLOWSINGLE", "BOUNCEIN", "BOUNCEACROSS", "PINBOUNCE", "OUTBOUND", "LUTINPUT",
+                                  "GENERIC"})
+                general_intents.insert(ctx->id_if_interned(n));
+            clock_network_intents.erase(IdString());
+            general_intents.erase(IdString());
+            clock_intents_ready = true;
+        }
+        struct Hop
+        {
+            WireId wire;
+            delay_t max, fabric_min;
+            int kind;
+        };
+        std::vector<Hop> steps;
         WireId cursor = ctx->getNetinfoSinkWire(clk, *usr);
         size_t hops = 0;
         while (cursor != WireId() && cursor != src && hops++ <= clk->wires.size()) {
@@ -605,20 +624,32 @@ struct Timing
             if (it == clk->wires.end() || it->second.pip == PipId())
                 return path;
             PipId pip = it->second.pip;
-            const delay_t hop_max = ctx->getPipDelay(pip).maxDelay() + ctx->getWireDelay(cursor).maxDelay();
-            steps.emplace_back(cursor, std::make_pair(hop_max, delay_t(hop_max * clock_network_min_scale)));
-            cursor = ctx->getPipSrcWire(pip);
+            const WireId pip_src = ctx->getPipSrcWire(pip);
+            int kind = 0;
+            for (WireId w : {pip_src, cursor}) {
+                IdString t = ctx->getWireType(w);
+                if (general_intents.count(t))
+                    kind = 1;
+                else if (kind == 0 && clock_network_intents.count(t))
+                    kind = 2;
+            }
+            steps.push_back(Hop{cursor, ctx->getPipDelay(pip).maxDelay() + ctx->getWireDelay(cursor).maxDelay(),
+                                ctx->getPipDelay(pip).minDelay() + ctx->getWireDelay(cursor).minDelay(), kind});
+            cursor = pip_src;
         }
         if (cursor != src)
             return path;
-        const delay_t src_max = ctx->getWireDelay(src).maxDelay();
-        steps.emplace_back(src, std::make_pair(src_max, delay_t(src_max * clock_network_min_scale)));
+        steps.push_back(Hop{src, ctx->getWireDelay(src).maxDelay(), ctx->getWireDelay(src).minDelay(), 0});
         delay_t up_max = 0, up_min = 0;
+        bool on_clock_network = false;
         path.resize(steps.size());
         for (size_t i = steps.size(); i-- > 0;) {
-            up_max += steps.at(i).second.first;
-            up_min += steps.at(i).second.second;
-            path.at(i) = ClockPathStep{steps.at(i).first, up_max, up_min};
+            const Hop &h = steps.at(i);
+            if (h.kind != 0)
+                on_clock_network = h.kind == 2;
+            up_max += h.max;
+            up_min += on_clock_network ? delay_t(h.max * clock_network_min_scale) : h.fabric_min;
+            path.at(i) = ClockPathStep{h.wire, up_max, up_min};
         }
         return path;
     }
