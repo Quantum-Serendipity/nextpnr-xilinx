@@ -119,8 +119,33 @@ else
     report "FAIL hold launch corner: [$hident]"
 fi
 
-"${PYTHON:-python3}" "$HERE/cppr.py" "$OUT/routed.json" "$OUT/routed.tsv" "$OUT/routed-hold.tsv" > "$OUT/cppr.out" 2>&1
-report "$(tail -1 "$OUT/cppr.out")"
+hops() {
+    CLOCKHOPS_OUT="$2" "$NEXTPNR" --chipdb "$CHIPDB" --json "$1" --run "$HERE/clockhops.py" \
+        --log "$2.log" -q >/dev/null 2>&1
+}
+if hops "$OUT/routed.json" "$OUT/clockhops.tsv"; then
+    "${PYTHON:-python3}" "$HERE/cppr.py" "$OUT/routed.json" "$OUT/routed.tsv" "$OUT/routed-hold.tsv" \
+        "$OUT/clockhops.tsv" bufg > "$OUT/cppr.out" 2>&1
+    report "$(tail -1 "$OUT/cppr.out")"
+else
+    report "FAIL hold CPPR bufg: the clock-hop dump failed: $(grep -m1 -E '^ERROR|Error' "$OUT/clockhops.tsv.log")"
+fi
+
+if ! "$YOSYS" -q -l "$OUT/fab-yosys.log" \
+        -p "read_verilog \"$HERE/fabclk.v\"; synth_xilinx -flatten -abc9 -noclkbuf -arch xc7 -top top; write_json \"$OUT/fab.json\"" \
+        >/dev/null 2>&1; then
+    report "FAIL hold CPPR fabric: yosys"
+elif ! NEXTPNR_SETUP_EXPORT="$OUT/fab.tsv" NEXTPNR_HOLD_EXPORT="$OUT/fab-hold.tsv" "$NEXTPNR" --chipdb "$CHIPDB" \
+        --xdc "$HERE/pins.xdc" --xdc "$HERE/clock.xdc" --json "$OUT/fab.json" --write "$OUT/fab-routed.json" \
+        --log "$OUT/fab.log" -q --seed 1 >/dev/null 2>&1; then
+    report "FAIL hold CPPR fabric: nextpnr place and route: $(grep -m1 '^ERROR' "$OUT/fab.log")"
+elif ! hops "$OUT/fab-routed.json" "$OUT/fab-clockhops.tsv"; then
+    report "FAIL hold CPPR fabric: the clock-hop dump failed: $(grep -m1 -E '^ERROR|Error' "$OUT/fab-clockhops.tsv.log")"
+else
+    "${PYTHON:-python3}" "$HERE/cppr.py" "$OUT/fab-routed.json" "$OUT/fab.tsv" "$OUT/fab-hold.tsv" \
+        "$OUT/fab-clockhops.tsv" fabric > "$OUT/fab-cppr.out" 2>&1
+    report "$(tail -1 "$OUT/fab-cppr.out")"
+fi
 
 if ! NEXTPNR_POST_ROUTE_TIMING=0 NEXTPNR_SETUP_EXPORT="$OUT/placed.tsv" pnr placed; then
     report "FAIL placement-only export: nextpnr exited non-zero"
