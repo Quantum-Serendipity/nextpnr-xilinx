@@ -81,6 +81,25 @@ else
     report "FAIL router2 export: $n row(s) differ from the routed-JSON replay"
 fi
 
+ident=$(awk -F'\t' 'NR == 1 { for (i = 1; i <= NF; i++) col[$i] = i
+                               if (!col["capture_clk_delay_ns"] || !col["launch_clk_delay_ns"] || !col["requirement_source"]) { print "missing-columns"; exit }
+                               next }
+                     { n++; r = $col["period_ns"] - $col["driver_arrival_ns"] - $col["net_delay_ns"] - $col["setup_ns"] + $col["capture_clk_delay_ns"] - $col["slack_ns"]
+                       if (r < 0) r = -r
+                       if (r > worst) worst = r
+                       if ($col["launch_clk_delay_ns"] <= 0 || $col["capture_clk_delay_ns"] <= 0) nonpos++
+                       src[$col["requirement_source"]]++ }
+                     END { if (!col["requirement_source"]) exit
+                           s = ""; for (k in src) s = s k ":" src[k] " "
+                           printf "%d %.4f %d %s\n", n, worst, nonpos, s }' "$OUT/routed.tsv")
+read -r id_n id_worst id_nonpos id_src <<<"$ident"
+if [ "$ident" != missing-columns ] && [ "${id_n:-0}" -gt 0 ] && awk -v w="$id_worst" 'BEGIN { exit !(w <= 0.0015) }' \
+        && [ "$id_nonpos" = 0 ] && [ "$id_src" = "same:$id_n" ]; then
+    report "PASS row identity: slack = period - (driver_arrival + net_delay + setup - capture_clk_delay) on all $id_n rows (worst residual $id_worst ns), both clock delays positive, requirement_source [$id_src]"
+else
+    report "FAIL row identity: [$ident]"
+fi
+
 if ! NEXTPNR_POST_ROUTE_TIMING=0 NEXTPNR_SETUP_EXPORT="$OUT/placed.tsv" pnr placed; then
     report "FAIL placement-only export: nextpnr exited non-zero"
 else

@@ -496,6 +496,8 @@ void Arch::parseXdc(std::istream &in)
             return refuse(what, "no delay value");
         if (is_max && (setup_only || hold_only))
             return refuse(what, "-setup/-hold are not read for set_max_delay");
+        if (is_max && exc.datapath_only && !got_from)
+            return refuse(what, "-datapath_only requires -from");
         if (is_mcp) {
             if (!got_value)
                 return refuse(what, "no path multiplier");

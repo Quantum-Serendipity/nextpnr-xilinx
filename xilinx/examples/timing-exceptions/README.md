@@ -35,8 +35,23 @@ its D input) and, through the net `mid`, `dst_mid`.
 | `maxdelay_cdc` | every `dst_b` row graded against 30 ns with positive slack |
 | `maxdelay_tight` | every `dst_slow` endpoint has a 0.5 ns row, and the worst slack is worse |
 
+Every setup-export row names what set its requirement in `requirement_source` (`same`, `same-half`,
+`related`, `unrelated-min`, `capture-only`, `default`, `max_delay#<n>` (with `-datapath_only` appended when
+that flag is set) or `multicycle#<n>+<base>`,
+where `<n>` is the exception number the reader logs). The `requirement_source` arm passes when the
+`dst_b` crossing rows read `unrelated-min` in the base replay and `max_delay#<n>` under
+`maxdelay_cdc`, with `<n>` taken from that replay's log, and the `dst_slow` same-clock rows read
+`same`.
+
 Under `--xdc-strict` each of `fp_nomatch`, `fp_pins_bogus`, `fp_pins_q`, `fp_clock_typo`,
-`groups_typo` and `fp_from_comb` must be refused, for its own reason. A full place and route with
+`groups_typo`, `fp_from_comb` and `maxdelay_dp_nofrom` must be refused, for its own reason.
+
+`set_max_delay -datapath_only` removes clock skew as well as hold: the `datapath_only` arm replays
+`maxdelay_cdc` and `maxdelay_cdc_skew` (the same constraint without `-datapath_only`) and passes
+when every `dst_b` crossing row under the first reads `30 - (driver_arrival_ns + net_delay_ns +
+setup_ns)` with both clock-delay columns 0 and `requirement_source` `max_delay#<n>-datapath_only`,
+and its slack differs from the same row under the second by exactly that row's
+`launch_clk_delay_ns - capture_clk_delay_ns`. A full place and route with
 `groups` and `fp_from_to` applied must finish with no `dst_b` row in its export (`pnr_groups`), and
 its `NEXTPNR_CRIT_EXPORT` must give no `src_slow` register a criticality, where the base place and
 route gives all of them one (`pnr_crit`). Every `src_slow` path is excepted there, so `pnr_crit` is
@@ -54,7 +69,7 @@ under `--xdc-strict`, which must accept it and grade no distributed-RAM row (`dr
 
 - `set_false_path [-setup|-hold] [-from <objs>] [-to <objs>]`
 - `set_false_path -through [get_nets ...]`, alone: the nets carry no timing at all
-- `set_max_delay <ns> [-datapath_only] [-from <objs>] [-to <objs>]`
+- `set_max_delay <ns> [-datapath_only] [-from <objs>] [-to <objs>]`; `-datapath_only` needs `-from`
 - `set_clock_groups [-asynchronous|-physically_exclusive|-logically_exclusive]
   [-include_generated_clocks] -group <clocks> ...`
 
