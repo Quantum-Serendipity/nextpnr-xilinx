@@ -8,7 +8,8 @@ import sys
 TOL = 0.0025
 
 HOLD_COLUMNS = ["cell", "port", "hold_slack_ns", "net", "net_delay_min_ns", "driver_min_arrival_ns", "hold_ns",
-                "hold_req_ns", "capture_clk_delay_ns", "launch_clk", "capture_clk", "delay_source"]
+                "hold_req_ns", "capture_clk_delay_ns", "launch_clk", "capture_clk", "delay_source",
+                "launch_clk_delay_ns", "requirement_source"]
 
 
 def read_tsv(path):
