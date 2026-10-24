@@ -2606,7 +2606,7 @@ struct FasmBackend
             if (bool_or_default(ci->params, ctx->id("DOA_REG"), false))
                 write_bit("ZINV_REGCLKARDRCLK",
                           !bool_or_default(ci->params, ctx->id("IS_CLKARDCLK_INVERTED"), false));
-            if (bool_or_default(ci->params, ctx->id("DOB_REG"), false))
+            if (bool_or_default(ci->params, ctx->id("DOB_REG"), false) && !bram_regclkb_without_net(ctx, ci))
                 write_bit("ZINV_REGCLKB",
                           !bool_or_default(ci->params, ctx->id("IS_CLKBWRCLK_INVERTED"), false));
             // golden per-half defaults (dcp2fasm campaign):
