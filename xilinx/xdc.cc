@@ -156,6 +156,7 @@ void Arch::parseXdc(std::istream &in)
         const std::string target_name = strip_quotes(split_name);
         auto grouped = split_to_args(str, true);
         const std::string member_list = grouped.size() >= 2 ? strip_quotes(grouped.at(1)) : target_name;
+        std::vector<std::string> unresolved;
         for (auto &member : split_to_args(member_list, false)) {
             NetInfo *maybe_net = getNetByAlias(id_if_interned(member));
             if (maybe_net == nullptr) {
@@ -163,9 +164,16 @@ void Arch::parseXdc(std::istream &in)
                 if (!base.empty())
                     maybe_net = getNetByAlias(id_if_interned(base));
             }
+            if (maybe_net == nullptr)
+                unresolved.push_back(member);
             if (maybe_net != nullptr && std::find(tgt_nets.begin(), tgt_nets.end(), maybe_net) == tgt_nets.end())
                 tgt_nets.push_back(maybe_net);
         }
+        if (!tgt_nets.empty())
+            for (auto &m : unresolved)
+                log_info("%s: member '%s' of '%s' matched no net or port; the target is applied to the %d member(s) "
+                         "that did (on line %d)\n",
+                         split.front().c_str(), m.c_str(), target_name.c_str(), int(tgt_nets.size()), lineno);
         if (tgt_nets.empty()) {
             missing_targets++;
             if (xdc_strict)
