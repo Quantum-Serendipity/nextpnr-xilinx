@@ -52,6 +52,7 @@ struct PartitionKeepoutLicence
 {
     bool exempt_named = false;
     bool exempt_buf = false;
+    bool exempt_const = false;
     int governed = -1;
     uint64_t anchored = 0;
     uint64_t allow = 0;
