@@ -23,6 +23,8 @@ default).
 | `mmcm_mult_default`, `pll_mult_default` | an unset `CLKFBOUT_MULT_F`/`CLKFBOUT_MULT` is 5: `CLKFBOUT` high 2, low 3, no `NO_COUNT`, and the log's VCO is five times the input; for the PLL, `LKTABLE` and `TABLE` are the multiply-5 rows (`40'h73BE8FA401`, `10'h1EC`) |
 | `dsp_pattern` | `PATTERN=48'h000000000001` and `MASK=48'hC00000000002` are written bit for bit, `MASK[47:46]` included |
 | `dsp_default` | no `PATTERN` line, and `MASK[47:0]` is the primitive default `48'h3FFFFFFFFFFF` |
+| `dsp_autoreset_match` | `AUTORESET_PATDET="RESET_MATCH"` writes `AUTORESET_PATDET_RESET` alone |
+| `dsp_autoreset_not_match` | `AUTORESET_PATDET="RESET_NOT_MATCH"` writes both `AUTORESET_PATDET_RESET` and `AUTORESET_PATDET_RESET_NOT_MATCH`, as prjxray's 100-dsp-mskpat fuzzer tags them |
 | `dsp_areg3`, `dsp_areg0_acascreg1`, `dsp_breg1_bcascreg2` | refused, naming the illegal `AREG`/`ACASCREG` or `BREG`/`BCASCREG` pair |
 | `dsp_simd_bogus` | refused, naming `USE_SIMD` and its legal values |
 | `dsp_simd_four12` | `USE_SIMD_FOUR12` and `USE_SIMD_FOUR12_TWO24` |

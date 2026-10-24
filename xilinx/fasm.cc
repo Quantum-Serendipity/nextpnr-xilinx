@@ -5572,7 +5572,8 @@ void write_gtx_channel(CellInfo *ci)
             write_vector("PATTERN[47:0]", dsp_bits48("PATTERN", 0));
 
         auto autoreset_patdet = param_choice(ci, "AUTORESET_PATDET", {"NO_RESET", "RESET_MATCH", "RESET_NOT_MATCH"});
-        if (autoreset_patdet == "RESET_MATCH")     write_bit("AUTORESET_PATDET_RESET");
+        if (autoreset_patdet == "RESET_MATCH" || autoreset_patdet == "RESET_NOT_MATCH")
+            write_bit("AUTORESET_PATDET_RESET");
         if (autoreset_patdet == "RESET_NOT_MATCH") write_bit("AUTORESET_PATDET_RESET_NOT_MATCH");
 
         write_vector("MASK[47:0]", dsp_bits48("MASK", 0x3FFFFFFFFFFFULL));
