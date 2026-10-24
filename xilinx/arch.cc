@@ -3381,9 +3381,16 @@ Arch::SyncPinTiming Arch::bramPinTiming(const CellInfo *cell, IdString port) con
     if (s == "DOADO" || s == "DOPADOP" || s == "DOBDO" || s == "DOPBDOP") {
         bool a = (s == "DOADO" || s == "DOPADOP");
         bool reg = int_or_default(cell->params, a ? id_DOA_REG : id("DOB_REG"), 0) != 0;
+        bool upper = is36 && str_or_default(cell->params, id(a ? "RAM_EXTENSION_A" : "RAM_EXTENSION_B"), "NONE") ==
+                                     "UPPER";
+        bool ecc = is36 && str_or_default(cell->params, id("EN_ECC_READ"), "FALSE") == "TRUE";
         t.kind = SYNC_PIN_OUTPUT;
         t.clock = clock_of((a || sdp) ? 'A' : 'B');
-        t.clk_to_q_max = reg ? 0.74 : 2.13;
+        t.clk_to_q_max = upper ? (reg ? 1.28 : 2.88) : ecc ? (reg ? 0.81 : 3.04) : (reg ? 0.74 : 2.13);
+        if (!bram_source_logged.exchange(true))
+            log_info("block RAM: clock-to-out, setup and hold are DS181 v1.25 Table 30 -2 literals (cascade upper "
+                     "half TRCKO_DO_CASCOUT, ECC read TRCKO_DO_ECC); the fabric arcs are the chipdb SDF's single "
+                     "grade\n");
         t.clk_to_q_min = reg ? 0.204 : 0.585;
         return t;
     }

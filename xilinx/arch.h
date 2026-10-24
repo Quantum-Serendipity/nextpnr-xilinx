@@ -23,6 +23,7 @@
 #error Include "arch.h" via "nextpnr.h" only.
 #endif
 
+#include <atomic>
 #include <unordered_set>
 #include <boost/iostreams/device/mapped_file.hpp>
 
@@ -1728,6 +1729,7 @@ struct Arch : BaseCtx
         double setup = 0, hold = 0, clk_to_q_max = 0, clk_to_q_min = 0;
     };
     SyncPinTiming bramPinTiming(const CellInfo *cell, IdString port) const;
+    mutable std::atomic<bool> bram_source_logged{false};
     SyncPinTiming icapPinTiming(const CellInfo *cell, IdString port) const;
     SyncPinTiming dramPinTiming(const CellInfo *cell, IdString port, bool lookup) const;
     bool dramTimingSite(const CellInfo *cell, int &tt_id, int &inst_id, IdString &variant, bool &is_lut5) const;
