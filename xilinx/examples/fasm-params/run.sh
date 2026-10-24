@@ -142,6 +142,12 @@ if builds dsp_default; then
     lines dsp_default '\.PATTERN\[' 0
     feature dsp_default '\.MASK\[' "DSP48.DSP_0.MASK[47:0] = 48'b00$(printf '1%.0s' $(seq 46))"
 fi
+if builds dsp_autoreset_match; then
+    feature dsp_autoreset_match 'AUTORESET_PATDET' 'DSP48.DSP_0.AUTORESET_PATDET_RESET'
+fi
+if builds dsp_autoreset_not_match; then
+    feature dsp_autoreset_not_match 'AUTORESET_PATDET' 'DSP48.DSP_0.AUTORESET_PATDET_RESET DSP48.DSP_0.AUTORESET_PATDET_RESET_NOT_MATCH'
+fi
 refuses dsp_areg3 'AREG=3 and ACASCREG=1'
 refuses dsp_areg0_acascreg1 'AREG=0 and ACASCREG=1'
 refuses dsp_breg1_bcascreg2 'BREG=1 and BCASCREG=2'
