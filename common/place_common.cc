@@ -344,18 +344,8 @@ class ConstraintLegaliseWorker
                                ? (child->constr_z | (rootLoc.z & ~0x3F))
                                : rootLoc.z + (child->constr_z == child->UNCONSTR ? 0 : child->constr_z);
                 BelId target = ctx->getBelByLocation(cl);
-                if (target != BelId() && ctx->checkBelAvail(target)) {
+                if (target != BelId() && ctx->checkBelAvail(target))
                     ctx->bindBel(target, child, STRENGTH_STRONG);
-                    if (getenv("DBG_BIND") && std::string(ctx->nameOf(child)).find("$LUT$") != std::string::npos)
-                        log_info("BIND-OK child %s -> %s\n", ctx->nameOf(child), ctx->nameOfBel(target));
-                }
-                else if (getenv("DBG_BIND"))
-                    log_info("BIND-FAIL child %s -> loc(%d,%d,%d) bel=%s %s\n",
-                             ctx->nameOf(child), cl.x, cl.y, cl.z,
-                             target == BelId() ? "NONE" : ctx->nameOfBel(target),
-                             target == BelId() ? "" :
-                               (ctx->checkBelAvail(target) ? "avail" :
-                                 ("occupied-by:" + std::string(ctx->nameOf(ctx->getBoundBelCell(target)))).c_str()));
             }
             bind_unplaced_children(child);
         }

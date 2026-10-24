@@ -224,7 +224,7 @@ void XC7Packer::pack_plls()
             // (VC707 eth-arp: no LEDs until the fasm was hand-patched back
             // to CLKFBOUT2IN).  Tie only when CLKFBIN is genuinely undriven.
             if (str_or_default(ci->params, ctx->id("COMPENSATION"), "INTERNAL") == "INTERNAL" &&
-                !ci->attrs.count(ctx->id("BEL"))) {
+                !ci->attrs.count(id_BEL)) {
                 NetInfo *fb = get_net_or_empty(ci, ctx->id("CLKFBIN"));
                 bool has_real_fb = fb != nullptr && fb->driver.cell != nullptr;
                 if (!has_real_fb) {
@@ -347,7 +347,7 @@ void XC7Packer::pack_gbs()
         // fully solved (matches the working golden path via CLK_HROW_BOT_R +
         // CK_BUFG_CASCO into the bottom BUFG tile).
         if ((ci->type == id_BUFGCTRL || ci->type == id_BUFG_BUFG || ci->type == id_BUFHCE_BUFHCE) &&
-            !ci->attrs.count(ctx->id("BEL"))) {
+            !ci->attrs.count(id_BEL)) {
             bool pll_driven = false;
             if (ci->type == id_BUFGCTRL) {
                 NetInfo *n = get_net_or_empty(ci, id_I0);
@@ -365,13 +365,13 @@ void XC7Packer::pack_gbs()
                     if (!ctx->checkBelAvail(bel))
                         continue;
                     used_bels.insert(bel);
-                    ci->attrs[ctx->id("BEL")] = std::string(ctx->nameOfBel(bel));
+                    ci->attrs[id_BEL] = std::string(ctx->nameOfBel(bel));
                     log_info("    Constrained BUFGCTRL '%s' to bel '%s' (PLL-driven, bottom region)\n", ctx->nameOf(ci),
                              ctx->nameOfBel(bel));
                     break;
                 }
             }
-            if (!ci->attrs.count(ctx->id("BEL")))
+            if (!ci->attrs.count(id_BEL))
                 preplace_unique(ci);
         }
     }

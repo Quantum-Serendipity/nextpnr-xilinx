@@ -158,7 +158,7 @@ void XC7Packer::pack_carries_atomic()
         // unconstrained (the BEL attr binds it); its S/DI/FF children keep
         // their own absolute-z constraints, which are unaffected.
         root->constr_abs_z = true;
-        if (!root->attrs.count(ctx->id("BEL")))
+        if (!root->attrs.count(id_BEL))
             root->constr_z = BEL_CARRY4;
 
         CellInfo *prev = root;
@@ -290,7 +290,7 @@ void XC7Packer::pack_carries_atomic()
                     ((lut_types.count(c4_s->driver.cell->type) && c4_s->users.size() == 1) ||
                      // pinned import: any LUT1-6 Vivado placed at this slot
                      ((lut_types.count(c4_s->driver.cell->type) || c4_s->driver.cell->type == ctx->id("LUT6")) &&
-                      c4_s->driver.cell->attrs.count(ctx->id("BEL"))))) {
+                      c4_s->driver.cell->attrs.count(id_BEL)))) {
                     s_lut = c4_s->driver.cell;
                     for (int j = 0; j < 5; j++) {
                         NetInfo *ix = get_net_or_empty(s_lut, ctx->id("I" + std::to_string(j)));
@@ -300,7 +300,7 @@ void XC7Packer::pack_carries_atomic()
                 if (c4_di && c4_di->driver.cell != nullptr &&
                     ((lut_types.count(c4_di->driver.cell->type) && c4_di->users.size() == 1) ||
                      (lut_types.count(c4_di->driver.cell->type) &&
-                      c4_di->driver.cell->attrs.count(ctx->id("BEL"))))) {
+                      c4_di->driver.cell->attrs.count(id_BEL)))) {
                     di_lut = c4_di->driver.cell;
                     for (int j = 0; j < 5; j++) {
                         NetInfo *ix = get_net_or_empty(di_lut, ctx->id("I" + std::to_string(j)));
@@ -313,9 +313,9 @@ void XC7Packer::pack_carries_atomic()
                 if (lut_inp_count > 5) {
                     // BEL-pinned LUTs (imported placement) stay adopted --
                     // Vivado already proved the input sharing legal.
-                    if (!(di_lut && di_lut->attrs.count(ctx->id("BEL"))))
+                    if (!(di_lut && di_lut->attrs.count(id_BEL)))
                         di_lut = nullptr;
-                    if (s_inputs > 4 && !(s_lut && s_lut->attrs.count(ctx->id("BEL"))))
+                    if (s_inputs > 4 && !(s_lut && s_lut->attrs.count(id_BEL)))
                         s_lut = nullptr;
                 }
                 if (!s_lut && c4_s) {
@@ -325,11 +325,6 @@ void XC7Packer::pack_carries_atomic()
                     s_lut = s_feed.get();
                     if (ctx->debug)
                         log_info("feedthru %s for %s.S[%s]\n", ctx->nameOf(s_lut), ctx->nameOf(prev), zs.c_str());
-                    if (getenv("DBG_SFEED"))
-                        log_info("SFEED s_lut=%s for %s.S[%d] prevBEL=%s\n", ctx->nameOf(s_lut),
-                                 ctx->nameOf(prev), z,
-                                 prev->attrs.count(ctx->id("BEL")) ?
-                                   prev->attrs.at(ctx->id("BEL")).as_string().c_str() : "NONE");
                     new_cells.push_back(std::move(s_feed));
                 }
                 // Imported placement: DI comes from O5 (feed-through in
@@ -393,7 +388,7 @@ void XC7Packer::pack_carries_atomic()
                 // A6 pin ("No wire found for port A6", e.g. the SGMII elastic-
                 // buffer wr_occupancy carries).  Route such a DI via the AX
                 // bypass too, not just constant/remote DIs.
-                if (prev->attrs.count(ctx->id("BEL")) && !di_lut && c4_di &&
+                if (prev->attrs.count(id_BEL) && !di_lut && c4_di &&
                     (is_const(c4_di) || di_remote || !di_feed_fits) &&
                     !(z == 0 && dyn_cyinit) &&
                     !(di_remote_real && di_feed_fits)) {
@@ -424,8 +419,8 @@ void XC7Packer::pack_carries_atomic()
                     if (ctx->debug || getenv("DBG_DIFEED"))
                         log_info("DIFEED %s for %s.DI[%s] di_net=%s prevBEL=%s\n", ctx->nameOf(di_lut),
                                  ctx->nameOf(prev), zs.c_str(), ctx->nameOf(c4_di),
-                                 prev->attrs.count(ctx->id("BEL")) ?
-                                   prev->attrs.at(ctx->id("BEL")).as_string().c_str() : "NONE");
+                                 prev->attrs.count(id_BEL) ?
+                                   prev->attrs.at(id_BEL).as_string().c_str() : "NONE");
                     new_cells.push_back(std::move(di_feed));
                 }
                 // Cells with absolute BEL pins (imported Vivado placement)
@@ -433,22 +428,17 @@ void XC7Packer::pack_carries_atomic()
                 // carry feeder LUTs in NEIGHBOUR slices, so a relative
                 // constraint can never be satisfied and the legaliser would
                 // relocate the whole pinned chain.
-                if (s_lut && s_lut->attrs.count(ctx->id("BEL")))
+                if (s_lut && s_lut->attrs.count(id_BEL))
                     s_lut = nullptr;
-                if (di_lut && di_lut->attrs.count(ctx->id("BEL")))
+                if (di_lut && di_lut->attrs.count(id_BEL))
                     di_lut = nullptr;
                 // When the segment carry itself is BEL-pinned (imported
                 // placement), anchor created feed-throughs to IT with zero
                 // offset -- the root-relative row arithmetic (idx + idx/25)
                 // mis-phases across HCLK rows depending on the root's
                 // position within the clock region.
-                CellInfo *anchor = prev->attrs.count(ctx->id("BEL")) ? prev : root;
+                CellInfo *anchor = prev->attrs.count(id_BEL) ? prev : root;
                 int anchor_y = (anchor == prev) ? 0 : constr_y;
-                if (getenv("DBG_SFEED") && s_lut == nullptr && c4_s)
-                    log_info("SFEED-NULLED %s.S[%d] (s_lut nulled before constrain) prevBEL=%s\n",
-                             ctx->nameOf(prev), z,
-                             prev->attrs.count(ctx->id("BEL")) ?
-                               prev->attrs.at(ctx->id("BEL")).as_string().c_str() : "NONE");
                 // A BEL-pinned child (imported placement) already has its z
                 // fixed by its BEL attr; adding an ABSOLUTE constr_z assumes the
                 // standard carry-slice z base (BEL_CARRY4 = 0xF), but some
@@ -462,7 +452,7 @@ void XC7Packer::pack_carries_atomic()
                     s_lut->constr_parent = anchor;
                     s_lut->constr_x = 0;
                     s_lut->constr_y = anchor_y;
-                    if (!s_lut->attrs.count(ctx->id("BEL"))) {
+                    if (!s_lut->attrs.count(id_BEL)) {
                         s_lut->constr_abs_z = true;
                         s_lut->constr_z = (z << 4 | BEL_6LUT);
                     }
@@ -472,7 +462,7 @@ void XC7Packer::pack_carries_atomic()
                     di_lut->constr_parent = anchor;
                     di_lut->constr_x = 0;
                     di_lut->constr_y = anchor_y;
-                    if (!di_lut->attrs.count(ctx->id("BEL"))) {
+                    if (!di_lut->attrs.count(id_BEL)) {
                         di_lut->constr_abs_z = true;
                         di_lut->constr_z = (z << 4 | BEL_5LUT);
                     }
@@ -524,7 +514,7 @@ void XC7Packer::pack_carries_atomic()
                     // chain unplaceable; skip such FFs (the generic packer
                     // then places them in a control-set-compatible slice).
                     if (sum_ff != nullptr && !ambiguous &&
-                        !sum_ff->attrs.count(ctx->id("BEL")) &&
+                        !sum_ff->attrs.count(id_BEL) &&
                         sum_ff->constr_parent == nullptr &&
                         sum_ff->constr_children.empty()) {
                         // Full control-set key: FFs sharing a carry slice
@@ -571,7 +561,7 @@ void XC7Packer::pack_carries_atomic()
                     } else if (getenv("DBG_CARRYFF") && sum_ff != nullptr) {
                         log_info("CARRYFF SKIP %s for %s.O[%d] amb=%d pinned=%d constr=%d\n",
                                  ctx->nameOf(sum_ff), ctx->nameOf(prev), z, ambiguous,
-                                 (int)sum_ff->attrs.count(ctx->id("BEL")),
+                                 (int)sum_ff->attrs.count(id_BEL),
                                  (int)(sum_ff->constr_parent != nullptr));
                     }
                 }
@@ -599,7 +589,7 @@ void XC7Packer::pack_carries_atomic()
             }
             if (!next) break;
             ++idx_in_chain;
-            if (next->attrs.count(ctx->id("BEL"))) {
+            if (next->attrs.count(id_BEL)) {
                 // pinned chain segment: placement comes from the import
                 prev = next;
                 continue;
@@ -1299,7 +1289,7 @@ void XC7Packer::relocate_carry_o_fabric()
     }
 
     for (auto *root : roots) {
-        if (root->attrs.count(ctx->id("BEL"))) {
+        if (root->attrs.count(id_BEL)) {
             ++chains_pinned;
             continue;
         }
@@ -1320,7 +1310,7 @@ void XC7Packer::relocate_carry_o_fabric()
         while (!work.empty()) {
             auto [c4, off] = work.back();
             work.pop_back();
-            if (c4->attrs.count(ctx->id("BEL"))) {
+            if (c4->attrs.count(id_BEL)) {
                 ++cells_pinned;
                 continue;
             }
@@ -1382,7 +1372,7 @@ void XC7Packer::relocate_carry_o_fabric()
                 idx++;
                 continue; // root keeps UNCONSTR x/y (only z is pinned)
             }
-            if (c->attrs.count(ctx->id("BEL"))) {
+            if (c->attrs.count(id_BEL)) {
                 idx++;
                 continue;
             }
@@ -1397,7 +1387,7 @@ void XC7Packer::relocate_carry_o_fabric()
         // lanes pinned to rows -7/-8 where no CARRY4 sits, and two LUTs
         // booked onto one (x,y,z) -- unroutable carry S inputs).
         for (CellInfo *c = root; c != nullptr; c = next_in_chain(c)) {
-            if (c->attrs.count(ctx->id("BEL")))
+            if (c->attrs.count(id_BEL))
                 continue;
             int row_y = (c == root) ? 0 : c->constr_y;
             for (int b = 0; b < 4; b++) {

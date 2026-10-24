@@ -532,7 +532,7 @@ void XilinxPacker::pack_lutffs()
         // placement): the LUT and the FF it drives may legitimately sit in
         // different slices, and a relative-Z constraint would contradict the
         // pin and break legalisation.
-        if (ci->attrs.count(ctx->id("BEL")))
+        if (ci->attrs.count(id_BEL))
             continue;
         NetInfo *d = get_net_or_empty(ci, id_D);
         if (d->driver.cell == nullptr || d->driver.cell->type != id_SLICE_LUTX || d->driver.port != id_O6)
@@ -540,7 +540,7 @@ void XilinxPacker::pack_lutffs()
         CellInfo *lut = d->driver.cell;
         if (lut->constr_parent != nullptr || !lut->constr_children.empty())
             continue;
-        if (lut->attrs.count(ctx->id("BEL")))
+        if (lut->attrs.count(id_BEL))
             continue;
         if (ctx->xc7) {
             NetInfo *lut_clk = get_net_or_empty(lut, id_CLK);
@@ -577,7 +577,7 @@ void XilinxPacker::legalise_muxf_tree(CellInfo *curr, std::vector<CellInfo *> &m
         if (pn == nullptr || pn->driver.cell == nullptr)
             continue;
         if (curr->type == ctx->id("MUXF7")) {
-            if (curr->attrs.count(ctx->id("BEL")) && pn->driver.cell->attrs.count(ctx->id("BEL")) &&
+            if (curr->attrs.count(id_BEL) && pn->driver.cell->attrs.count(id_BEL) &&
                 pn->driver.cell->type.str(ctx).substr(0, 3) == "LUT")
                 continue;   // pinned pair: stamped placement is authoritative
             if (pn->driver.cell->type.str(ctx).substr(0, 3) != "LUT" || is_constrained(pn->driver.cell)) {
@@ -603,8 +603,8 @@ void XilinxPacker::legalise_muxf_tree(CellInfo *curr, std::vector<CellInfo *> &m
             // simultaneously) -- never feed it through, the synthetic $MUX$
             // child could not bind anyway (the real pinned mux owns the
             // BEL).
-            bool pinned_pair = curr->attrs.count(ctx->id("BEL")) &&
-                               pn->driver.cell->attrs.count(ctx->id("BEL"));
+            bool pinned_pair = curr->attrs.count(id_BEL) &&
+                               pn->driver.cell->attrs.count(id_BEL);
             if (!pinned_pair &&
                 (pn->driver.cell->type != next_type || is_constrained(pn->driver.cell) ||
                  bool_or_default(pn->driver.cell->attrs, ctx->id("MUX_TREE_ROOT")))) {
@@ -650,7 +650,7 @@ void XilinxPacker::constrain_muxf_tree(CellInfo *curr, CellInfo *base, int zoffs
         input_spacing = 4;
     } else
         curr_z += BEL_6LUT;
-    if (curr != base && !curr->attrs.count(ctx->id("BEL"))) {
+    if (curr != base && !curr->attrs.count(id_BEL)) {
         curr->constr_x = 0;
         curr->constr_y = 0;
         curr->constr_z = curr_z - base_z;
@@ -753,7 +753,7 @@ void XilinxPacker::pack_srls()
             // mapping above assumes the 6LUT position (DI2/O6).  A6 also
             // doesn't exist on the 5LUT bel.
             bool is5 = false;
-            auto bel = ci->attrs.find(ctx->id("BEL"));
+            auto bel = ci->attrs.find(id_BEL);
             if (bel != ci->attrs.end() &&
                 bel->second.as_string().find("5LUT") != std::string::npos)
                 is5 = true;
@@ -845,7 +845,7 @@ void XilinxPacker::constrain_srl_cascades()
                 // pinned-root lesson in pack_carries).
                 bool pinned = false;
                 for (size_t i = 0; i < glen; i++)
-                    pinned |= bool(chain[g + i]->attrs.count(ctx->id("BEL")));
+                    pinned |= bool(chain[g + i]->attrs.count(id_BEL));
                 if (!pinned) {
                     CellInfo *base = chain[g];
                     base->constr_abs_z = true;
@@ -1602,7 +1602,7 @@ bool Arch::pack()
         for (auto &cell : cells) {
             CellInfo *ci = cell.second.get();
             const bool is_regional_buffer = ci->type == id("BUFIO_BUFIO") || ci->type == id("BUFR_BUFR");
-            const bool buffer_is_placed = (ci->attrs.count(id("BEL")) > 0);
+            const bool buffer_is_placed = (ci->attrs.count(id_BEL) > 0);
             const bool placed_regional_buffer = is_regional_buffer && buffer_is_placed;
             if (placed_regional_buffer)
                 packer.constrain_regional_clock_sinks(ci);
