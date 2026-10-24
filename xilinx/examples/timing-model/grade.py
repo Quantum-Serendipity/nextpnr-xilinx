@@ -9,7 +9,7 @@ TOL = 0.0025
 
 HOLD_COLUMNS = ["cell", "port", "hold_slack_ns", "net", "net_delay_min_ns", "driver_min_arrival_ns", "hold_ns",
                 "hold_req_ns", "capture_clk_delay_ns", "launch_clk", "capture_clk", "delay_source",
-                "launch_clk_delay_ns", "requirement_source"]
+                "launch_clk_delay_ns", "requirement_source", "cppr_ns"]
 
 
 def read_tsv(path):
@@ -190,7 +190,7 @@ def grade_hold(argv):
     for r in rows:
         f = {k: float(r[k]) for k in HOLD_COLUMNS[2:9] if k != "net"}
         want = (f["driver_min_arrival_ns"] + f["net_delay_min_ns"] - f["hold_ns"] - f["hold_req_ns"] -
-                f["capture_clk_delay_ns"])
+                f["capture_clk_delay_ns"] + float(r["cppr_ns"]))
         if abs(want - f["hold_slack_ns"]) > TOL:
             return "FAIL %s: %s.%s hold slack %.3f where its columns give %.3f" % (name, r["cell"], r["port"],
                                                                                   f["hold_slack_ns"], want)
@@ -254,11 +254,16 @@ def grade_skew(argv):
             return "FAIL %s: %s.%s hold row takes a %s ns capture clock where the SDF gives %.3f" % (
                 name, r["cell"], r["port"], h["capture_clk_delay_ns"], capture)
         min_arr = float(h["driver_min_arrival_ns"])
-        if not any(abs(min_arr - launch - c[0]) <= TOL for c in ctq):
-            return "FAIL %s: %s.%s hold arrival %.3f ns; less the %.3f ns SDF launch clock that is %.3f, no SDF " \
-                   "clk->Q min (%s)" % (name, r["cell"], r["port"], min_arr, launch, min_arr - launch,
-                                       ", ".join("%.3f" % c[0] for c in sorted(ctq)))
-        hslack = min_arr + float(h["net_delay_min_ns"]) - float(h["hold_ns"]) - float(h["hold_req_ns"]) - capture
+        launch_min = float(h["launch_clk_delay_ns"])
+        if not 0 < launch_min <= launch + TOL:
+            return "FAIL %s: %s.%s hold launch clock %.3f ns is not a fast-corner delay at or below the %.3f ns SDF " \
+                   "slow-corner one" % (name, r["cell"], r["port"], launch_min, launch)
+        if not any(abs(min_arr - launch_min - c[0]) <= TOL for c in ctq):
+            return "FAIL %s: %s.%s hold arrival %.3f ns; less the %.3f ns SDF fast-corner launch clock that is %.3f, " \
+                   "no SDF clk->Q min (%s)" % (name, r["cell"], r["port"], min_arr, launch_min, min_arr - launch_min,
+                                              ", ".join("%.3f" % c[0] for c in sorted(ctq)))
+        hslack = (min_arr + float(h["net_delay_min_ns"]) - float(h["hold_ns"]) - float(h["hold_req_ns"]) - capture +
+                  float(h["cppr_ns"]))
         if abs(hslack - float(h["hold_slack_ns"])) > TOL:
             return "FAIL %s: %s.%s hold slack %s where its arrival, hold and the %.3f ns SDF capture clock give " \
                    "%.3f" % (name, r["cell"], r["port"], h["hold_slack_ns"], capture, hslack)
@@ -330,10 +335,14 @@ def grade_srl_launch(argv):
         if h is None:
             return "FAIL %s: no hold row for %s.%s" % (name, r["cell"], r["port"])
         min_arr = float(h["driver_min_arrival_ns"])
-        if abs(min_arr - launch - arc[0]) > TOL:
-            return "FAIL %s: %s.%s hold arrival %.3f ns where the %.3f ns SDF launch clock and the %s CLK->%s " \
-                   "min %.3f give %.3f" % (name, r["cell"], r["port"], min_arr, launch, variant, out, arc[0],
-                                           launch + arc[0])
+        launch_min = float(h["launch_clk_delay_ns"])
+        if not 0 < launch_min <= launch + TOL:
+            return "FAIL %s: %s.%s hold launch clock %.3f ns is not a fast-corner delay at or below the %.3f ns SDF " \
+                   "slow-corner one" % (name, r["cell"], r["port"], launch_min, launch)
+        if abs(min_arr - launch_min - arc[0]) > TOL:
+            return "FAIL %s: %s.%s hold arrival %.3f ns where the %.3f ns SDF fast-corner launch clock and the %s " \
+                   "CLK->%s min %.3f give %.3f" % (name, r["cell"], r["port"], min_arr, launch_min, variant, out,
+                                                  arc[0], launch_min + arc[0])
     return "PASS %s: %d row(s) on %s take %s's %.3f ns SDF clock-pin delay plus the %s CLK->%s max %.3f and " \
            "min %.3f into the setup and hold arrival" % (name, len(rows), netname, drv, launch, variant, out, arc[1],
                                                           arc[0])
