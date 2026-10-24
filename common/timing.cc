@@ -200,6 +200,7 @@ struct Timing
         delay_t max_value = 0;
         int mcp_setup = 1, mcp_hold = 0;
         int max_index = -1, mcp_setup_index = -1, mcp_hold_index = -1;
+        bool datapath_only = false;
         bool mcp_setup_launch = false, mcp_hold_launch = true;
     };
 
@@ -407,6 +408,7 @@ struct Timing
                 if (!res.has_max || e.value < res.max_value) {
                     res.max_value = e.value;
                     res.max_index = i;
+                    res.datapath_only = e.datapath_only;
                 }
                 res.has_max = true;
                 res.skip_hold |= !e.hold;
@@ -503,7 +505,7 @@ struct Timing
     static std::string setup_source(const ExceptionResult &exc, const std::string &base)
     {
         if (exc.has_max)
-            return "max_delay#" + std::to_string(exc.max_index);
+            return "max_delay#" + std::to_string(exc.max_index) + (exc.datapath_only ? "-datapath_only" : "");
         if (exc.mcp_setup != 1)
             return "multicycle#" + std::to_string(exc.mcp_setup_index) + "+" + base;
         return base;
@@ -605,6 +607,7 @@ struct Timing
         bool false_startpoint = false;
         bool estimated = false;
         delay_t launch_delay = 0, min_launch_delay = 0;
+        delay_t max_data_arrival = 0;
         std::vector<delay_t> min_required;
         std::unordered_map<ClockEvent, delay_t> arrival_time;
     };
@@ -697,6 +700,7 @@ struct Timing
                         sd = TimingData{clkInfo.clockToQ.maxDelay() + launch};
                         sd.min_arrival = clkInfo.clockToQ.minDelay() + launch;
                         sd.launch_delay = sd.min_launch_delay = launch;
+                        sd.max_data_arrival = clkInfo.clockToQ.maxDelay();
                     }
 
                 } else {
@@ -749,6 +753,7 @@ struct Timing
                             sd = TimingData{clkInfo.clockToQ.maxDelay() + launch};
                             sd.min_arrival = clkInfo.clockToQ.minDelay() + launch;
                             sd.launch_delay = sd.min_launch_delay = launch;
+                            sd.max_data_arrival = clkInfo.clockToQ.maxDelay();
                         }
                         if (!port_fanin.count(o))
                             topographical_order.emplace_back(o->net);
@@ -1032,6 +1037,8 @@ struct Timing
                                 arrival = cand;
                                 data.launch_delay = nd.launch_delay;
                             }
+                            data.max_data_arrival =
+                                    std::max(data.max_data_arrival, nd.max_data_arrival + net_delay + comb_delay.maxDelay());
                             const delay_t min_cand = usr_min_arrival + comb_delay.minDelay();
                             if (min_cand < data.min_arrival) {
                                 data.min_arrival = min_cand;
@@ -1090,8 +1097,10 @@ struct Timing
                                         return;
                                 }
                             }
-                            const auto net_arrival = nd.max_arrival;
-                            const auto endpoint_arrival = net_arrival + net_delay + setup - capture_delay;
+                            const bool dp_only = exc.has_max && exc.datapath_only;
+                            const auto net_arrival = dp_only ? nd.max_data_arrival : nd.max_arrival;
+                            const auto endpoint_arrival =
+                                    net_arrival + net_delay + setup - (dp_only ? delay_t(0) : capture_delay);
                             delay_t period = setup_requirement(startdomain.first, clksig, edge, clk_period);
                             double this_mcp = 1.0;
                             if (exc.has_max) {
@@ -1131,8 +1140,8 @@ struct Timing
                                     << startdomain.first.clock.c_str(ctx) << '\t' << clksig.c_str(ctx) << '\t'
                                     << nd.max_path_length << '\t'
                                     << ((nd.estimated || (net_delays && net->wires.empty())) ? "estimate" : "routed")
-                                    << '\t' << ctx->getDelayNS(nd.launch_delay) << '\t'
-                                    << ctx->getDelayNS(capture_delay) << '\t'
+                                    << '\t' << ctx->getDelayNS(dp_only ? delay_t(0) : nd.launch_delay) << '\t'
+                                    << ctx->getDelayNS(dp_only ? delay_t(0) : capture_delay) << '\t'
                                     << setup_source(exc, base_requirement_source(startdomain.first, clksig, edge))
                                     << '\n';
                                 std::string key = std::string(usr.cell->name.c_str(ctx)) + '\t' + usr.port.c_str(ctx) +
@@ -1360,12 +1369,15 @@ struct Timing
                         int port_clocks;
                         TimingPortClass portClass = ctx->getPortTimingClass(usr.cell, usr.port, port_clocks);
                         if (portClass == TMG_REGISTER_INPUT || portClass == TMG_ENDPOINT) {
-                            auto process_endpoint = [&](IdString clksig, ClockEdge edge, delay_t setup) {
+                            auto process_endpoint = [&](IdString clksig, ClockEdge edge, delay_t setup,
+                                                        delay_t capture) {
                                 ExceptionResult exc = match_exceptions(startdomain.first, clksig, usr.cell, usr.port);
                                 if (exc.skip_setup)
                                     return;
                                 delay_t period = setup_requirement(startdomain.first, clksig, edge, clk_period);
-                                if (exc.has_max)
+                                if (exc.has_max && exc.datapath_only)
+                                    period = exc.max_value + nd.launch_delay - capture;
+                                else if (exc.has_max)
                                     period = exc.max_value;
                                 else
                                     apply_multicycle(exc, startdomain.first.clock, clksig, clk_period, &period,
@@ -1377,12 +1389,12 @@ struct Timing
                                     TimingClockingInfo clkInfo = ctx->getPortClockingInfo(usr.cell, usr.port, j);
                                     const NetInfo *clknet = get_net_or_empty(usr.cell, clkInfo.clock_port);
                                     IdString clksig = clknet ? clknet->name : async_clock;
+                                    const delay_t capture = clock_pin_delay(usr.cell, clkInfo.clock_port);
                                     process_endpoint(clksig, clknet ? clkInfo.edge : RISING_EDGE,
-                                                     clkInfo.setup.maxDelay() -
-                                                             clock_pin_delay(usr.cell, clkInfo.clock_port));
+                                                     clkInfo.setup.maxDelay() - capture, capture);
                                 }
                             } else {
-                                process_endpoint(async_clock, RISING_EDGE, 0);
+                                process_endpoint(async_clock, RISING_EDGE, 0, 0);
                             }
                         }
                         net_min_required = std::min(net_min_required, nd.min_required.at(i) - net_delay);

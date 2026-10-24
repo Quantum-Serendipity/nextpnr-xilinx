@@ -90,10 +90,48 @@ print(sources(sys.argv[2], "dst_b", True), sources(sys.argv[3], "dst_b", True), 
       sources(sys.argv[2], "dst_slow", False))
 ' "$OUT/routed.json" "$OUT/base.tsv" "$OUT/maxdelay_cdc.tsv" "$OUT/maxdelay_cdc.log" 2>&1)
 read -r src_base src_var src_want src_same <<<"$src"
-if [ "$src_base" = unrelated-min ] && [ "$src_var" = "$src_want" ] && [ "$src_same" = same ]; then
+if [ "$src_base" = unrelated-min ] && [ "${src_var%-datapath_only}" = "$src_want" ] && [ "$src_same" = same ]; then
     report "PASS requirement_source: dst_b crossing rows read $src_base with no exception and $src_var under maxdelay_cdc; dst_slow same-clock rows read $src_same"
 else
     report "FAIL requirement_source: base dst_b [$src_base], maxdelay_cdc dst_b [$src_var] (want $src_want), base dst_slow [$src_same]"
+fi
+
+if ! replay maxdelay_cdc_skew --xdc "$HERE/xdc/maxdelay_cdc_skew.xdc"; then
+    report "FAIL datapath_only: the maxdelay_cdc_skew replay exited non-zero"
+else
+    dp=$(cd "$HERE" && "$PYTHON" -B -c '
+import csv, sys
+import grade
+g = grade.groups_of(sys.argv[1])
+def rows(tsv):
+    out = {}
+    for r in csv.DictReader(open(tsv), delimiter="\t"):
+        if g.get(r["cell"], "?") == "dst_b" and r["launch_clk"] != r["capture_clk"]:
+            out[(r["cell"], r["port"])] = r
+    return out
+dp, sk = rows(sys.argv[2]), rows(sys.argv[3])
+if not dp or set(dp) != set(sk) or "requirement_source" not in next(iter(dp.values())):
+    print("bad-population", len(dp), len(sk))
+    sys.exit()
+worst_id = worst_skew = 0.0
+srcs = set()
+for k, r in dp.items():
+    f = lambda row, c: float(row[c])
+    ident = 30.0 - (f(r, "driver_arrival_ns") + f(r, "net_delay_ns") + f(r, "setup_ns")) - f(r, "slack_ns")
+    worst_id = max(worst_id, abs(ident), abs(f(r, "launch_clk_delay_ns")), abs(f(r, "capture_clk_delay_ns")))
+    s = sk[k]
+    skew = (f(r, "slack_ns") - f(s, "slack_ns")) - (f(s, "launch_clk_delay_ns") - f(s, "capture_clk_delay_ns"))
+    worst_skew = max(worst_skew, abs(skew))
+    srcs.add(r["requirement_source"])
+print(len(dp), "%.4f" % worst_id, "%.4f" % worst_skew, ",".join(sorted(srcs)))
+' "$OUT/routed.json" "$OUT/maxdelay_cdc.tsv" "$OUT/maxdelay_cdc_skew.tsv" 2>&1)
+    read -r dp_n dp_id dp_skew dp_src <<<"$dp"
+    if [ "${dp_n:-x}" != bad-population ] && [ -n "${dp_src:-}" ] && awk -v a="$dp_id" -v b="$dp_skew" 'BEGIN { exit !(a <= 0.0015 && b <= 0.0015) }' \
+            && [ "$dp_src" = "${src_want}-datapath_only" ]; then
+        report "PASS datapath_only: $dp_n dst_b row(s) graded as 30 - (driver_arrival + net_delay + setup) with no clock term (worst $dp_id ns), each differing from the same row without -datapath_only by exactly its launch - capture clock delay (worst $dp_skew ns), requirement_source $dp_src"
+    else
+        report "FAIL datapath_only: [$dp]"
+    fi
 fi
 
 strict_arm() {
@@ -113,6 +151,7 @@ strict_arm strict_pins_q fp_pins_q 'is not a timed data pin'
 strict_arm strict_clock_typo fp_clock_typo "clock 'no_such_clk' matched no clock"
 strict_arm strict_groups_typo groups_typo "clock 'clkb_typo' matched no clock"
 strict_arm strict_from_comb fp_from_comb 'matched no timing startpoint'
+strict_arm strict_dp_nofrom maxdelay_dp_nofrom '-datapath_only requires -from'
 
 if ! NEXTPNR_SETUP_EXPORT="$OUT/pnr_groups.tsv" NEXTPNR_CRIT_EXPORT="$OUT/pnr_groups_crit.tsv" "$NEXTPNR" --chipdb "$CHIPDB" --xdc "$HERE/base.xdc" \
         --xdc "$HERE/xdc/groups.xdc" --xdc "$HERE/xdc/fp_from_to.xdc" --json "$OUT/top.json" \
