@@ -551,6 +551,8 @@ struct Timing
         return pin == fnd->second.end() ? d : pin->second;
     }
 
+    static constexpr float clock_network_min_scale = 0.9f;
+
     struct ClockPathStep
     {
         WireId wire;
@@ -585,13 +587,14 @@ struct Timing
             if (it == clk->wires.end() || it->second.pip == PipId())
                 return path;
             PipId pip = it->second.pip;
-            steps.emplace_back(cursor, std::make_pair(ctx->getPipDelay(pip).maxDelay() + ctx->getWireDelay(cursor).maxDelay(),
-                                                      ctx->getPipDelay(pip).minDelay() + ctx->getWireDelay(cursor).minDelay()));
+            const delay_t hop_max = ctx->getPipDelay(pip).maxDelay() + ctx->getWireDelay(cursor).maxDelay();
+            steps.emplace_back(cursor, std::make_pair(hop_max, delay_t(hop_max * clock_network_min_scale)));
             cursor = ctx->getPipSrcWire(pip);
         }
         if (cursor != src)
             return path;
-        steps.emplace_back(src, std::make_pair(ctx->getWireDelay(src).maxDelay(), ctx->getWireDelay(src).minDelay()));
+        const delay_t src_max = ctx->getWireDelay(src).maxDelay();
+        steps.emplace_back(src, std::make_pair(src_max, delay_t(src_max * clock_network_min_scale)));
         delay_t up_max = 0, up_min = 0;
         path.resize(steps.size());
         for (size_t i = steps.size(); i-- > 0;) {
