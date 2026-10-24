@@ -175,6 +175,8 @@ arm_static_keepout() {
         report "PASS keepout census: the constant nets are counted and listed as constant ($consts), the clock-buffer list is [$bufs]"
     else
         report "FAIL keepout census: clock-buffer list [$bufs], constant list [$consts], counts total=${total:-?} buffer=${nbuf:-?} constant=${nconst:-?}"
+    fi
+
     printf 'no_such_net_stale_a\nno_such_net_stale_b\n' >"$OUT/m10-stale.nets"
     NEXTPNR_PARTITION_ROI=$r NEXTPNR_PARTITION_KEEPOUT_EXEMPT=$OUT/m10-stale.nets \
         NEXTPNR_PARTITION_EXEMPT_NETS=$OUT/m10-stale.nets npnr "$OUT/m10-stale.log" --json "$OUT/placed.json" \
