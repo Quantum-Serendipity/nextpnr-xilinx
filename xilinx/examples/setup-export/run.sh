@@ -55,7 +55,7 @@ column_values() {
                 c { print $c } END { if (!c) print "(no delay_source column)" }' "$1" | sort | uniq -c | tr -s ' \n' ' '
 }
 
-if ! NEXTPNR_SETUP_EXPORT="$OUT/routed.tsv" pnr full --write "$OUT/routed.json"; then
+if ! NEXTPNR_SETUP_EXPORT="$OUT/routed.tsv" NEXTPNR_HOLD_EXPORT="$OUT/routed-hold.tsv" pnr full --write "$OUT/routed.json"; then
     echo "FAIL nextpnr place and route: $(grep -m1 '^ERROR' "$OUT/full.log")"
     exit 1
 fi
@@ -98,6 +98,25 @@ if [ "$ident" != missing-columns ] && [ "${id_n:-0}" -gt 0 ] && awk -v w="$id_wo
     report "PASS row identity: slack = period - (driver_arrival + net_delay + setup - capture_clk_delay) on all $id_n rows (worst residual $id_worst ns), both clock delays positive, requirement_source [$id_src]"
 else
     report "FAIL row identity: [$ident]"
+fi
+
+hident=$(awk -F'\t' 'NR == 1 { for (i = 1; i <= NF; i++) col[$i] = i
+                                if (!col["cppr_ns"] || !col["launch_clk_delay_ns"]) { print "missing-columns"; exit }
+                                next }
+                      $col["delay_source"] == "routed" {
+                        n++; r = $col["driver_min_arrival_ns"] + $col["net_delay_min_ns"] - $col["hold_ns"] - $col["hold_req_ns"] - $col["capture_clk_delay_ns"] + $col["cppr_ns"] - $col["hold_slack_ns"]
+                        if (r < 0) r = -r
+                        if (r > worst) worst = r
+                        if (!($col["cppr_ns"] > 0 && $col["cppr_ns"] < $col["capture_clk_delay_ns"])) bad++
+                        if (!($col["launch_clk_delay_ns"] < $col["capture_clk_delay_ns"])) bad++ }
+                      END { if (!col["cppr_ns"]) exit
+                            printf "%d %.4f %d\n", n, worst, bad }' "$OUT/routed-hold.tsv")
+read -r h_n h_worst h_bad <<<"$hident"
+if [ "$hident" != missing-columns ] && [ "${h_n:-0}" -gt 0 ] && [ "$h_bad" = 0 ] \
+        && awk -v w="$h_worst" 'BEGIN { exit !(w <= 0.0015) }'; then
+    report "PASS hold launch corner: on all $h_n routed hold rows hold_slack = driver_min_arrival + net_delay_min - hold - hold_req - capture_clk_delay + cppr (worst residual $h_worst ns), the fast-corner launch delay is below the slow-corner capture delay, and 0 < cppr_ns < capture_clk_delay_ns"
+else
+    report "FAIL hold launch corner: [$hident]"
 fi
 
 if ! NEXTPNR_POST_ROUTE_TIMING=0 NEXTPNR_SETUP_EXPORT="$OUT/placed.tsv" pnr placed; then
