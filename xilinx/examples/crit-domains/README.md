@@ -4,6 +4,9 @@ Places and routes `top.v` on an `xc7a100tfgg484` and grades the criticality expo
 `x_q` on `clk_a` and `y_q` on `clk_b`, each capture the top byte of a 12x12 LUT multiplier from
 their own domain XORed with one register from the other domain. So each D net is reached from two
 start domains: its own, where it ends the longest path, and the other, where it ends a single LUT.
+`negedge.v` is a second design whose multiplier operands `na` and `nb` are launched on the falling
+edge of `clk` and captured only by `n_q` on the rising edge, so its launch domain has no path that
+ends on its own edge.
 
 ```
 CHIPDB=/path/to/xc7a100tfgg484.bin YOSYS=yosys NEXTPNR=/path/to/nextpnr-xilinx ./run.sh
@@ -15,3 +18,4 @@ outputs in `$OUT` (a fresh `mktemp -d` by default).
 | arm | passes when |
 |---|---|
 | `x_q`, `y_q` | the `NEXTPNR_CRIT_EXPORT` criticality of the cell driving each of the eight D nets is at least `FLOOR` |
+| `n_q` | the same, for `negedge.v`'s half-cycle capture register |

@@ -187,7 +187,7 @@ struct Timing
     std::vector<std::vector<int>> tag_sets{{}};
     std::unordered_map<std::string, int> tag_index;
     std::unordered_map<const CellInfo *, std::vector<std::pair<int, IdString>>> to_ids;
-    std::unordered_map<ClockEvent, delay_t> domain_raw_max;
+    std::unordered_map<ClockEvent, delay_t> domain_raw_max, domain_raw_max_any;
     std::unordered_map<IdString, std::vector<std::vector<std::string>>> clock_names, clock_names_gen;
     int exc_setup_skipped = 0, exc_hold_skipped = 0, exc_max_delay = 0, exc_multicycle = 0;
     std::ofstream hold_export;
@@ -620,6 +620,8 @@ struct Timing
     delay_t walk_paths()
     {
         const auto clk_period = ctx->getDelayFromNS(1.0e9 / ctx->setting<float>("target_freq")).maxDelay();
+        domain_raw_max.clear();
+        domain_raw_max_any.clear();
 
         std::vector<NetInfo *> topographical_order;
         std::unordered_map<const NetInfo *, std::unordered_map<ClockEvent, TimingData>> net_data;
@@ -1098,15 +1100,21 @@ struct Timing
                             ClockPair clockPair{startdomain.first, dest_ev};
                             nd.arrival_time[dest_ev] = std::max(nd.arrival_time[dest_ev], endpoint_arrival);
 
-                            if (crit_path) {
-                                if (startdomain.first.clock == clksig && startdomain.first.edge == edge) {
-                                    ClockEvent domain{clksig, edge};
-                                    auto raw = domain_raw_max.find(domain);
-                                    if (raw == domain_raw_max.end())
-                                        domain_raw_max.emplace(domain, endpoint_arrival);
+                            if (crit_path || net_crit) {
+                                auto note_max = [&](std::unordered_map<ClockEvent, delay_t> &m, const ClockEvent &k) {
+                                    auto raw = m.find(k);
+                                    if (raw == m.end())
+                                        m.emplace(k, endpoint_arrival);
                                     else if (raw->second < endpoint_arrival)
                                         raw->second = endpoint_arrival;
-                                }
+                                };
+                                if (startdomain.first.clock == clksig && startdomain.first.edge == edge)
+                                    note_max(domain_raw_max, ClockEvent{clksig, edge});
+                                if (clksig != async_clock)
+                                    note_max(domain_raw_max_any,
+                                             ClockEvent{startdomain.first.clock, startdomain.first.edge});
+                            }
+                            if (crit_path) {
                                 double norm_arrival = double(endpoint_arrival) / this_mcp;
                                 if (!crit_nets.count(clockPair) || crit_nets.at(clockPair).first < norm_arrival) {
                                     crit_nets[clockPair] = std::make_pair(norm_arrival, net);
@@ -1279,7 +1287,6 @@ struct Timing
         }
 
         if (net_crit) {
-            NPNR_ASSERT(crit_path);
             // Go through in reverse topographical order to set required times
             for (auto net : boost::adaptors::reverse(topographical_order)) {
                 if (!net_data.count(net))
@@ -1409,17 +1416,20 @@ struct Timing
                         nc.slack.at(i) = std::min(nc.slack.at(i), ds.second.at(i));
                 net_domain_slack.emplace(net, std::move(domain_slack));
             }
-            const std::unordered_map<ClockEvent, delay_t> &domain_dmax = domain_raw_max;
             for (auto &entry : net_domain_slack) {
                 const NetInfo *net = entry.first;
                 auto &nc = (*net_crit)[net->name];
+                if (nc.criticality.empty())
+                    nc.criticality.resize(net->users.size(), 0);
                 for (auto &ds : entry.second) {
                     const ClockEvent &domain = ds.first;
-                    if (!domain_dmax.count(domain))
+                    auto intra = domain_raw_max.find(domain);
+                    auto any = domain_raw_max_any.find(domain);
+                    if (intra == domain_raw_max.end() && any == domain_raw_max_any.end())
                         continue;
-                    if (nc.criticality.empty())
-                        nc.criticality.resize(net->users.size(), 0);
-                    delay_t dmax = domain_dmax.at(domain);
+                    if (intra == domain_raw_max.end() && any->second <= 0)
+                        continue;
+                    delay_t dmax = intra != domain_raw_max.end() ? intra->second : any->second;
                     for (size_t i = 0; i < net->users.size(); i++) {
                         float criticality =
                                 1.0f - ((float(ds.second.at(i)) - float(worst_slack.at(domain))) / dmax);

@@ -40,5 +40,19 @@ fi
 
 "$PYTHON" "$HERE/grade.py" "$OUT/routed.json" "$OUT/crit.tsv" "$FLOOR"
 rc=$?
+
+if ! "$YOSYS" -q -l "$OUT/negedge-yosys.log" \
+        -p "read_verilog \"$HERE/negedge.v\"; synth_xilinx -flatten -abc9 -arch xc7 -top top; write_json \"$OUT/negedge.json\"" \
+        >/dev/null 2>&1; then
+    echo "FAIL negedge yosys"
+    rc=1
+elif ! NEXTPNR_CRIT_EXPORT="$OUT/negedge-crit.tsv" "$NEXTPNR" --chipdb "$CHIPDB" --xdc "$HERE/negedge.xdc" \
+        --json "$OUT/negedge.json" --write "$OUT/negedge-routed.json" --log "$OUT/negedge-pnr.log" -q --seed 1 \
+        >/dev/null 2>&1; then
+    echo "FAIL negedge nextpnr place and route: $(grep -m1 '^ERROR' "$OUT/negedge-pnr.log")"
+    rc=1
+else
+    "$PYTHON" "$HERE/grade.py" "$OUT/negedge-routed.json" "$OUT/negedge-crit.tsv" "$FLOOR" n_q || rc=1
+fi
 echo "artefacts kept in $OUT"
 exit "$rc"
