@@ -1277,6 +1277,14 @@ void USPacker::pack_bram()
     }
 }
 
+bool bram_regclkb_without_net(const Context *ctx, const CellInfo *ci)
+{
+    const bool sdp_by_mode = str_or_default(ci->params, ctx->id("RAM_MODE"), "TDP") == "SDP";
+    const bool is36 = ci->type == ctx->id("RAMB36E1") || ci->type == id_RAMB36E1_RAMB36E1;
+    const bool sdp_by_width = int_or_default(ci->params, ctx->id("WRITE_WIDTH_B"), 0) == (is36 ? 72 : 36);
+    return sdp_by_mode || sdp_by_width;
+}
+
 void XC7Packer::pack_bram()
 {
     log_info("Packing BRAM..\n");
@@ -1334,6 +1342,28 @@ void XC7Packer::pack_bram()
     // 72-bit BRAMs: drop upper bits of WEB in TDP mode
     for (int i = 4; i < 8; i++)
         bram_rules[ctx->id("RAMB36E1")].port_multixform[ctx->id(std::string("WEBWE[" + std::to_string(i) + "]"))] = {};
+
+    for (auto cell : sorted(ctx->cells)) {
+        CellInfo *ci = cell.second;
+        if (ci->type != ctx->id("RAMB18E1") && ci->type != ctx->id("RAMB36E1"))
+            continue;
+        auto connect_register_clock = [&](const char *regclk, const char *data_clock) {
+            NetInfo *clk = get_net_or_empty(ci, ctx->id(data_clock));
+            if (clk == nullptr)
+                return;
+            IdString port = ctx->id(regclk);
+            if (!ci->ports.count(port)) {
+                ci->ports[port].name = port;
+                ci->ports[port].type = PORT_IN;
+            }
+            disconnect_port(ctx, ci, port);
+            connect_port(ctx, clk, ci, port);
+        };
+        if (bool_or_default(ci->params, ctx->id("DOA_REG"), false))
+            connect_register_clock("REGCLKARDRCLK", "CLKARDCLK");
+        if (bool_or_default(ci->params, ctx->id("DOB_REG"), false) && !bram_regclkb_without_net(ctx, ci))
+            connect_register_clock("REGCLKB", "CLKBWRCLK");
+    }
 
     // Process SDP BRAM first
     for (auto cell : sorted(ctx->cells)) {
