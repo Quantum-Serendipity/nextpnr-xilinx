@@ -398,6 +398,22 @@ arm_pre_place_region_kept() {
     fi
 }
 
+arm_heap_scarce_by_device() {
+    geom unplace "$OUT/placed.json" "$OUT/rm-scarce.json" SLICE_LUTX SLICE_FFX
+    roi "$OUT/scarce.roi.json" 100 180 120 200
+    NEXTPNR_PARTITION_ROI=$OUT/scarce.roi.json NEXTPNR_PARTITION_NETS=warn npnr "$OUT/l30.log" \
+        --json "$OUT/rm-scarce.json" --no-pack --no-route --placer heap --write "$OUT/l30.json"
+    local rc=$? line dev cand
+    line=$(grep -m1 'HeAP legaliser: SLICE_LUTX has' "$OUT/l30.log")
+    dev=$(sed -n 's/.* has \([0-9]*\) bel(s) on the device and \([0-9]*\) placement.*/\1/p' <<<"$line")
+    cand=$(sed -n 's/.* has \([0-9]*\) bel(s) on the device and \([0-9]*\) placement.*/\2/p' <<<"$line")
+    if [ "$rc" -eq 0 ] && [ -n "$dev" ] && [ "$cand" -le 4096 ] && [ "$dev" -gt 4096 ] && [[ $line == *"; abundant" ]]; then
+        report "PASS HeAP scarcity by device population: under a rectangle with $cand SLICE_LUTX candidate(s) of $dev on the device, SLICE_LUTX is abundant"
+    else
+        report "FAIL HeAP scarcity by device population: rc $rc, classification line '${line:-none}'"
+    fi
+}
+
 sentinel_files() {
     local f
     for f in "$@"; do printf 'sentinel\n' >"$f"; done
@@ -834,6 +850,7 @@ arm_partition_modes_recorded
 arm_lut_perm_drop_mode
 arm_lut_perm_function
 arm_fixed_routes_chipdb_identity
+arm_heap_scarce_by_device
 
 echo "artefacts kept in $OUT"
 exit "$rc_total"

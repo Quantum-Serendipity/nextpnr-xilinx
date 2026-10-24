@@ -480,6 +480,8 @@ class HeAPPlacer
         ctx->yield();
     }
 
+    std::set<int> scarce_logged;
+
     // Construct the fast_bels, nearest_row_with_bel and nearest_col_with_bel
     void build_fast_bels()
     {
@@ -938,25 +940,17 @@ class HeAPPlacer
             // log_info("   Legalising %s (%s)\n", top.second.c_str(ctx), ci->type.c_str(ctx));
             int bt = std::get<0>(bel_types.at(ci->type));
             auto &fb = fast_bels.at(bt);
-            // Population of this bel type (lazy, cached).  The
-            // eviction-last-resort rule below only applies to SCARCE types
-            // (BRAM: 135 on an a100, DSP, clock buffers, config singletons):
-            // that is where two cells sharing a neighbourhood can evict each
-            // other forever.  For abundant fabric types (tens of thousands
-            // of LUT/FF bels) the evicted cell rehomes trivially and the
-            // greedy commit gives tighter placements -- applying the rule
-            // globally regressed ddr3-test-arty-s7 into a placement with
-            // unroutable output-mux contention (3 overused SITEWIREs).
-            static std::unordered_map<int, int> type_pop_cache;
-            auto tp = type_pop_cache.find(bt);
-            if (tp == type_pop_cache.end()) {
-                int n = 0;
+            const int device_pop = std::get<1>(bel_types.at(ci->type));
+            const bool scarce_type = device_pop <= 4096;
+            if (scarce_logged.insert(bt).second) {
+                int candidates = 0;
                 for (auto &col : fb)
                     for (auto &cv : col)
-                        n += int(cv.size());
-                tp = type_pop_cache.emplace(bt, n).first;
+                        candidates += int(cv.size());
+                log_info("HeAP legaliser: %s has %d bel(s) on the device and %d placement candidate(s); %s\n",
+                         ci->type.c_str(ctx), device_pop, candidates,
+                         scarce_type ? "scarce, a cell is never evicted while a free home was seen" : "abundant");
             }
-            const bool scarce_type = tp->second <= 4096;
             int radius = 0;
             int iter = 0;
             int iter_at_radius = 0;
