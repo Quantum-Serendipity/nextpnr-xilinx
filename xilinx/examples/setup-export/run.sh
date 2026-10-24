@@ -119,6 +119,9 @@ else
     report "FAIL hold launch corner: [$hident]"
 fi
 
+"${PYTHON:-python3}" "$HERE/cppr.py" "$OUT/routed.json" "$OUT/routed.tsv" "$OUT/routed-hold.tsv" > "$OUT/cppr.out" 2>&1
+report "$(tail -1 "$OUT/cppr.out")"
+
 if ! NEXTPNR_POST_ROUTE_TIMING=0 NEXTPNR_SETUP_EXPORT="$OUT/placed.tsv" pnr placed; then
     report "FAIL placement-only export: nextpnr exited non-zero"
 else
