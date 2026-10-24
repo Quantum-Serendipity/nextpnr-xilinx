@@ -571,6 +571,83 @@ struct Timing
         return pin == fnd->second.end() ? d : pin->second;
     }
 
+    struct ClockPathStep
+    {
+        WireId wire;
+        delay_t max_up, min_up;
+    };
+    std::unordered_map<std::pair<const CellInfo *, IdString>, std::vector<ClockPathStep>, PinKeyHash> clock_paths;
+
+    const std::vector<ClockPathStep> &clock_path(const CellInfo *cell, IdString clock_port)
+    {
+        auto key = std::make_pair(cell, clock_port);
+        auto fnd = clock_paths.find(key);
+        if (fnd != clock_paths.end())
+            return fnd->second;
+        auto &path = clock_paths[key];
+        const NetInfo *clk = get_net_or_empty(cell, clock_port);
+        if (!net_delays || clk == nullptr || clk->wires.empty())
+            return path;
+        const PortRef *usr = nullptr;
+        for (auto &u : clk->users)
+            if (u.cell == cell && u.port == clock_port) {
+                usr = &u;
+                break;
+            }
+        WireId src = ctx->getNetinfoSourceWire(clk);
+        if (usr == nullptr || src == WireId())
+            return path;
+        std::vector<std::pair<WireId, std::pair<delay_t, delay_t>>> steps;
+        WireId cursor = ctx->getNetinfoSinkWire(clk, *usr);
+        size_t hops = 0;
+        while (cursor != WireId() && cursor != src && hops++ <= clk->wires.size()) {
+            auto it = clk->wires.find(cursor);
+            if (it == clk->wires.end() || it->second.pip == PipId())
+                return path;
+            PipId pip = it->second.pip;
+            steps.emplace_back(cursor, std::make_pair(ctx->getPipDelay(pip).maxDelay() + ctx->getWireDelay(cursor).maxDelay(),
+                                                      ctx->getPipDelay(pip).minDelay() + ctx->getWireDelay(cursor).minDelay()));
+            cursor = ctx->getPipSrcWire(pip);
+        }
+        if (cursor != src)
+            return path;
+        steps.emplace_back(src, std::make_pair(ctx->getWireDelay(src).maxDelay(), ctx->getWireDelay(src).minDelay()));
+        delay_t up_max = 0, up_min = 0;
+        path.resize(steps.size());
+        for (size_t i = steps.size(); i-- > 0;) {
+            up_max += steps.at(i).second.first;
+            up_min += steps.at(i).second.second;
+            path.at(i) = ClockPathStep{steps.at(i).first, up_max, up_min};
+        }
+        return path;
+    }
+
+    delay_t clock_pessimism_removal(const CellInfo *launch_cell, IdString launch_port, const CellInfo *capture_cell,
+                                    IdString capture_port)
+    {
+        if (launch_cell == nullptr || capture_cell == nullptr)
+            return 0;
+        if (get_net_or_empty(launch_cell, launch_port) != get_net_or_empty(capture_cell, capture_port))
+            return 0;
+        const auto &lp = clock_path(launch_cell, launch_port);
+        const auto &cp = clock_path(capture_cell, capture_port);
+        if (lp.empty() || cp.empty())
+            return 0;
+        std::unordered_set<WireId> on_capture;
+        for (auto &st : cp)
+            on_capture.insert(st.wire);
+        for (auto &st : lp)
+            if (on_capture.count(st.wire))
+                return st.max_up - st.min_up;
+        return 0;
+    }
+
+    delay_t clock_pin_delay_min(const CellInfo *cell, IdString clock_port)
+    {
+        const auto &p = clock_path(cell, clock_port);
+        return p.empty() ? clock_pin_delay(cell, clock_port) : p.front().min_up;
+    }
+
     delay_t clock_period_of(IdString clk, delay_t clk_period) const
     {
         if (clk == async_clock)
@@ -608,6 +685,8 @@ struct Timing
         bool estimated = false;
         delay_t launch_delay = 0, min_launch_delay = 0;
         delay_t max_data_arrival = 0;
+        const CellInfo *min_launch_cell = nullptr;
+        IdString min_launch_port;
         std::vector<delay_t> min_required;
         std::unordered_map<ClockEvent, delay_t> arrival_time;
     };
@@ -655,7 +734,7 @@ struct Timing
                     log_error("cannot open NEXTPNR_HOLD_EXPORT file '%s' for writing\n", hf);
                 hold_export << "cell\tport\thold_slack_ns\tnet\tnet_delay_min_ns\tdriver_min_arrival_ns\thold_ns\thold_"
                                "req_ns\tcapture_clk_delay_ns\tlaunch_clk\tcapture_clk\tdelay_"
-                               "source\tlaunch_clk_delay_ns\trequirement_source\n";
+                               "source\tlaunch_clk_delay_ns\trequirement_source\tcppr_ns\n";
             }
         }
     }
@@ -700,8 +779,12 @@ struct Timing
                                                                start_tag(cell.second.get())}];
                         delay_t launch = clock_pin_delay(cell.second.get(), clkInfo.clock_port);
                         sd = TimingData{clkInfo.clockToQ.maxDelay() + launch};
-                        sd.min_arrival = clkInfo.clockToQ.minDelay() + launch;
-                        sd.launch_delay = sd.min_launch_delay = launch;
+                        const delay_t launch_min = clock_pin_delay_min(cell.second.get(), clkInfo.clock_port);
+                        sd.min_arrival = clkInfo.clockToQ.minDelay() + launch_min;
+                        sd.launch_delay = launch;
+                        sd.min_launch_delay = launch_min;
+                        sd.min_launch_cell = cell.second.get();
+                        sd.min_launch_port = clkInfo.clock_port;
                         sd.max_data_arrival = clkInfo.clockToQ.maxDelay();
                     }
 
@@ -753,8 +836,12 @@ struct Timing
                                                                    start_tag(cell.second.get())}];
                             delay_t launch = clock_pin_delay(cell.second.get(), clkInfo.clock_port);
                             sd = TimingData{clkInfo.clockToQ.maxDelay() + launch};
-                            sd.min_arrival = clkInfo.clockToQ.minDelay() + launch;
-                            sd.launch_delay = sd.min_launch_delay = launch;
+                            const delay_t launch_min = clock_pin_delay_min(cell.second.get(), clkInfo.clock_port);
+                            sd.min_arrival = clkInfo.clockToQ.minDelay() + launch_min;
+                            sd.launch_delay = launch;
+                            sd.min_launch_delay = launch_min;
+                            sd.min_launch_cell = cell.second.get();
+                            sd.min_launch_port = clkInfo.clock_port;
                             sd.max_data_arrival = clkInfo.clockToQ.maxDelay();
                         }
                         if (!port_fanin.count(o))
@@ -1045,6 +1132,8 @@ struct Timing
                             if (min_cand < data.min_arrival) {
                                 data.min_arrival = min_cand;
                                 data.min_launch_delay = nd.min_launch_delay;
+                                data.min_launch_cell = nd.min_launch_cell;
+                                data.min_launch_port = nd.min_launch_port;
                             }
                             if (!budget_override) { // Do not increment path length if budget overriden since it doesn't
                                 // require a share of the slack
@@ -1206,8 +1295,10 @@ struct Timing
                                                       clk_period, &hold_req);
                                     apply_multicycle(exc, startdomain.first.clock, clksig, clk_period, nullptr,
                                                      &hold_req);
+                                    const delay_t cppr = clock_pessimism_removal(
+                                            nd.min_launch_cell, nd.min_launch_port, usr.cell, clkInfo.clock_port);
                                     delay_t hold_slack = nd.min_arrival + net_delay_min - clkInfo.hold.maxDelay() -
-                                                         hold_req - capture;
+                                                         hold_req - capture + cppr;
                                     worst_hold_slack = std::min(worst_hold_slack, hold_slack);
                                     if (crit_path)
                                         hold_endpoints.push_back({usr.cell->name, usr.port, hold_slack});
@@ -1227,7 +1318,7 @@ struct Timing
                                             << hold_source(exc, base_requirement_source(
                                                                         startdomain.first, clksig,
                                                                         clknet ? clkInfo.edge : RISING_EDGE))
-                                            << '\n';
+                                            << '\t' << ctx->getDelayNS(cppr) << '\n';
                                         std::string key = std::string(usr.cell->name.c_str(ctx)) + '\t' +
                                                           usr.port.c_str(ctx) + '\t' +
                                                           startdomain.first.clock.c_str(ctx) + '\t' +
