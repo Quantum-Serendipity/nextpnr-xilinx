@@ -71,6 +71,15 @@ for v in "${VARIANTS[@]}"; do
     report "$("$PYTHON" "$HERE/grade.py" "$OUT/routed.json" "$OUT/base.tsv" "$OUT/$v.tsv" "$OUT/$v.log" "$v")"
 done
 
+printf 'clk_a\nclk_b\n' > "$OUT/async_groups.txt"
+if NEXTPNR_ASYNC_GROUPS="$OUT/async_groups.txt" replay async_groups_env; then
+    report "FAIL async_groups_env: a replay with NEXTPNR_ASYNC_GROUPS set finished rc 0"
+elif grep -q 'NEXTPNR_ASYNC_GROUPS is no longer read' "$OUT/async_groups_env.log"; then
+    report "PASS async_groups_env: NEXTPNR_ASYNC_GROUPS is refused and set_clock_groups is named"
+else
+    report "FAIL async_groups_env: the replay failed without the refusal line: $(grep -m1 '^ERROR' "$OUT/async_groups_env.log")"
+fi
+
 strict_arm() {
     local name=$1 xdc=$2 why=$3
     if replay "$name" --xdc "$HERE/xdc/$xdc.xdc" --xdc-strict; then

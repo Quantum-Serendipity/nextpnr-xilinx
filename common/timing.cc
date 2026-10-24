@@ -162,26 +162,6 @@ struct Timing
     NetCriticalityMap *net_crit;
     IdString async_clock;
 
-    // Async clock-group exclusion (nextpnr-xilinx has no set_clock_groups): a
-    // setup path from a launch clock in one group to a capture clock in another
-    // is a CDC false path (synchroniser) and must NOT be timed -- otherwise a
-    // 61 ns cpu->eth synchroniser wire reads as a "16 MHz" failure and misleads
-    // the timing-driven router.  Loaded from NEXTPNR_ASYNC_GROUPS: one group per
-    // line, each a whitespace-separated list of substrings; a clock net joins
-    // the first group whose substring its name contains.
-    std::vector<std::vector<std::string>> async_groups;
-    int clock_group(IdString clk) const
-    {
-        if (async_groups.empty())
-            return -1;
-        std::string n = clk.c_str(ctx);
-        for (size_t g = 0; g < async_groups.size(); g++)
-            for (const auto &sub : async_groups[g])
-                if (n.find(sub) != std::string::npos)
-                    return int(g);
-        return -1;
-    }
-
     bool have_exceptions = false;
     IdString texc_from_attr, texc_to_attr, ignore_attr;
     std::vector<std::vector<int>> tag_sets{{}};
@@ -583,21 +563,8 @@ struct Timing
         }
         if (ctx->timing_ignore_nets)
             ignore_attr = ctx->id("NEXTPNR_TIMING_IGNORE");
-        if (const char *fn = getenv("NEXTPNR_ASYNC_GROUPS")) {
-            std::ifstream in(fn);
-            std::string line;
-            while (std::getline(in, line)) {
-                std::istringstream iss(line);
-                std::vector<std::string> grp;
-                std::string tok;
-                while (iss >> tok)
-                    grp.push_back(tok);
-                if (!grp.empty())
-                    async_groups.push_back(std::move(grp));
-            }
-            if (!async_groups.empty())
-                log_info("timing: loaded %zu async clock group(s) from %s\n", async_groups.size(), fn);
-        }
+        if (getenv("NEXTPNR_ASYNC_GROUPS"))
+            log_error("NEXTPNR_ASYNC_GROUPS is no longer read; declare the crossing with set_clock_groups in an XDC\n");
         if (export_setup) {
             if (const char *sf = getenv("NEXTPNR_SETUP_EXPORT")) {
                 setup_export.open(sf);
@@ -1028,17 +995,6 @@ struct Timing
                                 if (crit_path && !update)
                                     ++exc_setup_skipped;
                                 return;
-                            }
-                            // Async clock-group exclusion: a launch->capture path
-                            // crossing two different async groups is a CDC false
-                            // path -- skip it entirely (no slack/budget/crit).
-                            {
-                                IdString launch_clk = startdomain.first.clock;
-                                if (launch_clk != async_clock && clksig != async_clock) {
-                                    int gl = clock_group(launch_clk), gc = clock_group(clksig);
-                                    if (gl >= 0 && gc >= 0 && gl != gc)
-                                        return;
-                                }
                             }
                             const auto net_arrival = nd.max_arrival;
                             const auto endpoint_arrival = net_arrival + net_delay + setup - capture_delay;
