@@ -480,7 +480,7 @@ class HeAPPlacer
         ctx->yield();
     }
 
-    std::set<int> scarce_logged;
+    std::unordered_map<int, int> type_candidates;
 
     // Construct the fast_bels, nearest_row_with_bel and nearest_col_with_bel
     void build_fast_bels()
@@ -940,17 +940,19 @@ class HeAPPlacer
             // log_info("   Legalising %s (%s)\n", top.second.c_str(ctx), ci->type.c_str(ctx));
             int bt = std::get<0>(bel_types.at(ci->type));
             auto &fb = fast_bels.at(bt);
-            const int device_pop = std::get<1>(bel_types.at(ci->type));
-            const bool scarce_type = device_pop <= 4096;
-            if (scarce_logged.insert(bt).second) {
+            auto tp = type_candidates.find(bt);
+            if (tp == type_candidates.end()) {
                 int candidates = 0;
                 for (auto &col : fb)
                     for (auto &cv : col)
                         candidates += int(cv.size());
-                log_info("HeAP legaliser: %s has %d bel(s) on the device and %d placement candidate(s); %s\n",
-                         ci->type.c_str(ctx), device_pop, candidates,
-                         scarce_type ? "scarce, a cell is never evicted while a free home was seen" : "abundant");
+                tp = type_candidates.emplace(bt, candidates).first;
+                log_info("HeAP legaliser: %s has %d placement candidate(s) of %d bel(s) on the device; %s\n",
+                         ci->type.c_str(ctx), candidates, std::get<1>(bel_types.at(ci->type)),
+                         candidates <= 4096 ? "scarce, a cell is never evicted while a free home was seen"
+                                            : "abundant");
             }
+            const bool scarce_type = tp->second <= 4096;
             int radius = 0;
             int iter = 0;
             int iter_at_radius = 0;

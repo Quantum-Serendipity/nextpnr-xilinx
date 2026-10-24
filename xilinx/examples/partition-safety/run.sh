@@ -426,14 +426,16 @@ arm_heap_scarce_by_device() {
     roi "$OUT/scarce.roi.json" 100 180 120 200
     NEXTPNR_PARTITION_ROI=$OUT/scarce.roi.json NEXTPNR_PARTITION_NETS=warn npnr "$OUT/l30.log" \
         --json "$OUT/rm-scarce.json" --no-pack --no-route --placer heap --write "$OUT/l30.json"
-    local rc=$? line dev cand
+    local rc=$? line dev cand n
     line=$(grep -m1 'HeAP legaliser: SLICE_LUTX has' "$OUT/l30.log")
-    dev=$(sed -n 's/.* has \([0-9]*\) bel(s) on the device and \([0-9]*\) placement.*/\1/p' <<<"$line")
-    cand=$(sed -n 's/.* has \([0-9]*\) bel(s) on the device and \([0-9]*\) placement.*/\2/p' <<<"$line")
-    if [ "$rc" -eq 0 ] && [ -n "$dev" ] && [ "$cand" -le 4096 ] && [ "$dev" -gt 4096 ] && [[ $line == *"; abundant" ]]; then
-        report "PASS HeAP scarcity by device population: under a rectangle with $cand SLICE_LUTX candidate(s) of $dev on the device, SLICE_LUTX is abundant"
+    n=$(grep -c 'HeAP legaliser: SLICE_LUTX has' "$OUT/l30.log")
+    cand=$(sed -n 's/.* has \([0-9]*\) placement candidate(s) of \([0-9]*\) bel(s).*/\1/p' <<<"$line")
+    dev=$(sed -n 's/.* has \([0-9]*\) placement candidate(s) of \([0-9]*\) bel(s).*/\2/p' <<<"$line")
+    if [ "$rc" -eq 0 ] && [ "$n" -eq 1 ] && [ -n "$cand" ] && [ "$cand" -le 4096 ] && [ "$dev" -gt 4096 ] \
+            && [[ $line == *"; scarce, "* ]]; then
+        report "PASS HeAP scarcity classification logged: under a rectangle with $cand SLICE_LUTX candidate(s) of $dev on the device, SLICE_LUTX is logged once and classed scarce by its candidate count"
     else
-        report "FAIL HeAP scarcity by device population: rc $rc, classification line '${line:-none}'"
+        report "FAIL HeAP scarcity classification logged: rc $rc, $n classification line(s), first '${line:-none}'"
     fi
 }
 
