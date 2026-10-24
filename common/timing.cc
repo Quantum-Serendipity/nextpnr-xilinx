@@ -118,7 +118,7 @@ template <> struct hash<NEXTPNR_NAMESPACE_PREFIX ClockPair>
     {
         std::size_t seed = 0;
         boost::hash_combine(seed, hash<NEXTPNR_NAMESPACE_PREFIX ClockEvent>()(obj.start));
-        boost::hash_combine(seed, hash<NEXTPNR_NAMESPACE_PREFIX ClockEvent>()(obj.start));
+        boost::hash_combine(seed, hash<NEXTPNR_NAMESPACE_PREFIX ClockEvent>()(obj.end));
         return seed;
     }
 };
