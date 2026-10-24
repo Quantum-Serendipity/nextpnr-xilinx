@@ -434,6 +434,9 @@ arm_heap_scarce_by_device() {
         report "PASS HeAP scarcity by device population: under a rectangle with $cand SLICE_LUTX candidate(s) of $dev on the device, SLICE_LUTX is abundant"
     else
         report "FAIL HeAP scarcity by device population: rc $rc, classification line '${line:-none}'"
+    fi
+}
+
 arm_routing_cycle_refused() {
     local net
     net=$("$PYTHON" - "$OUT/routed.json" "$OUT/cycle.json" <<'PY'
@@ -472,6 +475,9 @@ PY
         else
             report "FAIL routing cycle in a fixed-routes file: rc $rc, $(grep -m1 'fixed-routes: bound' "$OUT/l31-fixed.log")"
         fi
+    fi
+}
+
 arm_carry_tree_on_a_blacklisted_bel() {
     printf 'set_property -dict {PACKAGE_PIN %s IOSTANDARD LVCMOS33} [get_ports %s]\n' W19 clk N15 en P19 '{q[0]}' \
         P20 '{q[1]}' T21 '{q[2]}' R19 '{q[3]}' >"$OUT/carry.xdc"
