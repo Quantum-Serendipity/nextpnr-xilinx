@@ -398,6 +398,47 @@ arm_pre_place_region_kept() {
     fi
 }
 
+arm_routing_cycle_refused() {
+    local net
+    net=$("$PYTHON" - "$OUT/routed.json" "$OUT/cycle.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+top = d["modules"]["top"]
+lv, lh = "INT_L_X0Y190/LV_L0", "INT_L_X0Y190/LH12"
+for name in sorted(top["netnames"]):
+    attrs = top["netnames"][name].get("attributes", {})
+    r = attrs.get("ROUTING", "")
+    if name.startswith("$PACKER") or r.count(";") < 9:
+        continue
+    attrs["ROUTING"] = r + ";%s;%s->%s;1;%s;%s->%s;1" % (lh, lv, lh, lv, lh, lv)
+    json.dump(d, open(sys.argv[2], "w"))
+    print(name)
+    break
+PY
+)
+    if [ -z "$net" ]; then
+        report "FAIL routing cycle in an imported ROUTING attribute: no routed net to edit"
+    else
+        npnr "$OUT/l31-import.log" --json "$OUT/cycle.json" --no-pack --no-place --no-route
+        local rc=$?
+        if [ "$rc" -ne 0 ] && grep -q "ROUTING import on net .*: the bound pips form a cycle" "$OUT/l31-import.log"; then
+            report "PASS routing cycle in an imported ROUTING attribute: refused at rc $rc"
+        else
+            report "FAIL routing cycle in an imported ROUTING attribute: rc $rc, no cycle refusal"
+        fi
+        printf '%s INT_L_X0Y190/LV_L0->INT_L_X0Y190/LH12\n%s INT_L_X0Y190/LH12->INT_L_X0Y190/LV_L0\n' "$net" "$net" \
+            >"$OUT/cycle.routes"
+        npnr "$OUT/l31-fixed.log" --json "$OUT/placed.json" --no-pack --no-place --fixed-routes "$OUT/cycle.routes"
+        rc=$?
+        if [ "$rc" -eq 0 ] && grep -q "fixed-routes: pip .* would drive the source of net .* or close a routing cycle; not bound" "$OUT/l31-fixed.log" \
+                && grep -q 'fixed-routes: bound 1/2 pips' "$OUT/l31-fixed.log"; then
+            report "PASS routing cycle in a fixed-routes file: the cycle-closing pip is refused and the run routes at rc 0"
+        else
+            report "FAIL routing cycle in a fixed-routes file: rc $rc, $(grep -m1 'fixed-routes: bound' "$OUT/l31-fixed.log")"
+        fi
+    fi
+}
+
 sentinel_files() {
     local f
     for f in "$@"; do printf 'sentinel\n' >"$f"; done
@@ -834,6 +875,7 @@ arm_partition_modes_recorded
 arm_lut_perm_drop_mode
 arm_lut_perm_function
 arm_fixed_routes_chipdb_identity
+arm_routing_cycle_refused
 
 echo "artefacts kept in $OUT"
 exit "$rc_total"

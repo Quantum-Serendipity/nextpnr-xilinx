@@ -320,8 +320,12 @@ delay_t Context::getNetinfoRouteDelay(const NetInfo *net_info, const PortRef &us
     WireId dst_wire = getNetinfoSinkWire(net_info, user_info);
     WireId cursor = dst_wire;
     delay_t delay = 0;
+    size_t hops = 0;
 
     while (cursor != WireId() && cursor != src_wire) {
+        if (++hops > net_info->wires.size() + 1)
+            log_error("the routing bound to net '%s' contains a cycle through wire '%s'\n", nameOf(net_info),
+                      nameOfWire(cursor));
         auto it = net_info->wires.find(cursor);
 
         if (it == net_info->wires.end())
@@ -685,6 +689,19 @@ void BaseCtx::attributesToArchInfo()
                         log_error("ROUTING import on net '%s': unresolved pip '%s'\n",
                                   ni->name.c_str(getCtx()), pip.c_str());
                     getCtx()->bindPip(p, ni, strength);
+                }
+            }
+            for (auto &bw : ni->wires) {
+                WireId cursor = bw.first;
+                size_t hops = 0;
+                while (true) {
+                    auto it = ni->wires.find(cursor);
+                    if (it == ni->wires.end() || it->second.pip == PipId())
+                        break;
+                    if (++hops > ni->wires.size())
+                        log_error("ROUTING import on net '%s': the bound pips form a cycle through wire '%s'\n",
+                                  ni->name.c_str(getCtx()), getCtx()->nameOfWire(bw.first));
+                    cursor = getCtx()->getPipSrcWire(it->second.pip);
                 }
             }
         }
