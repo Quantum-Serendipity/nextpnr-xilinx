@@ -398,6 +398,39 @@ arm_pre_place_region_kept() {
     fi
 }
 
+arm_carry_tree_on_a_blacklisted_bel() {
+    printf 'set_property -dict {PACKAGE_PIN %s IOSTANDARD LVCMOS33} [get_ports %s]\n' W19 clk N15 en P19 '{q[0]}' \
+        P20 '{q[1]}' T21 '{q[2]}' R19 '{q[3]}' >"$OUT/carry.xdc"
+    if ! "$YOSYS" -q -l "$OUT/carry-yosys.log" \
+            -p "read_verilog \"$HERE/carry.v\"; synth_xilinx -flatten -abc9 -arch xc7 -top top; write_json \"$OUT/carry.json\"" \
+            >/dev/null 2>&1; then
+        report "FAIL CARRY4 tree pinned on a blacklisted bel: yosys"
+        return
+    fi
+    if ! npnr "$OUT/carry-place.log" --xdc "$OUT/carry.xdc" --json "$OUT/carry.json" --write "$OUT/carry-placed.json" \
+            --no-route --seed 1; then
+        report "FAIL CARRY4 tree pinned on a blacklisted bel: base placement: $(grep -m1 '^ERROR' "$OUT/carry-place.log")"
+        return
+    fi
+    local bel
+    bel=$(geom cell-tiles "$OUT/carry-placed.json" CARRY4 | awk 'NR == 1 { print $1 }')
+    if [ -z "$bel" ] || ! geom pin "$OUT/carry-placed.json" "$OUT/carry-pin.json" "$bel" 3; then
+        report "FAIL CARRY4 tree pinned on a blacklisted bel: no CARRY4 to pin"
+        return
+    fi
+    printf '%s\n' "$bel" >"$OUT/carry-pin.bel"
+    env -u NEXTPNR_PARTITION_ROI NEXTPNR_BEL_BLACKLIST=$OUT/carry-pin.bel timeout "$NPNR_TIMEOUT" "$NEXTPNR" \
+        --chipdb "$CHIPDB" --log "$OUT/carry-pin.log" -q --json "$OUT/carry-pin.json" --no-pack --no-route \
+        --write "$OUT/carry-pin-out.json" >/dev/null 2>&1
+    local rc=$?
+    if [ "$rc" -ne 0 ] && grep -q '^ERROR: post-place check: [1-9][0-9]* cell(s) without a BEL attribute sit on a blacklisted' "$OUT/carry-pin.log" \
+            && grep -q "post-place check: .* (CARRY4) is on a forbidden bel $bel" "$OUT/carry-pin.log"; then
+        report "PASS CARRY4 tree pinned on a blacklisted bel: refused at rc $rc, the CARRY4 on $bel named"
+    else
+        report "FAIL CARRY4 tree pinned on a blacklisted bel: rc $rc: $(grep -m1 '^ERROR' "$OUT/carry-pin.log" || echo 'no error; the placement was accepted')"
+    fi
+}
+
 sentinel_files() {
     local f
     for f in "$@"; do printf 'sentinel\n' >"$f"; done
@@ -834,6 +867,7 @@ arm_partition_modes_recorded
 arm_lut_perm_drop_mode
 arm_lut_perm_function
 arm_fixed_routes_chipdb_identity
+arm_carry_tree_on_a_blacklisted_bel
 
 echo "artefacts kept in $OUT"
 exit "$rc_total"
