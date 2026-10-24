@@ -75,7 +75,7 @@ void XC7Packer::decompose_iob(CellInfo *xil_iob, bool is_hr, const std::string &
     auto pad_site = [&](NetInfo *n) {
         for (auto user : n->users)
             if (user.cell->type == ctx->id("PAD"))
-                return ctx->getBelSite(ctx->getBelByName(ctx->id(user.cell->attrs[ctx->id("BEL")].as_string())));
+                return ctx->getBelSite(ctx->getBelByName(ctx->id(user.cell->attrs[id_BEL].as_string())));
         NPNR_ASSERT_FALSE(("can't find PAD for net " + n->name.str(ctx)).c_str());
     };
 
@@ -153,9 +153,9 @@ void XC7Packer::decompose_iob(CellInfo *xil_iob, bool is_hr, const std::string &
         CellInfo *inbuf = insert_ibuf(int_name(xil_iob->name, "IBUF", is_se_iobuf), ibuf_type, pad_net, top_out);
         std::string tile = get_tilename_by_sitename(ctx, site);
         if ((boost::starts_with(tile, "RIOB18_") || boost::starts_with(tile, "LIOB18_")))
-            inbuf->attrs[ctx->id("BEL")] = site + "/IOB18/INBUF_DCIEN";
+            inbuf->attrs[id_BEL] = site + "/IOB18/INBUF_DCIEN";
         else
-            inbuf->attrs[ctx->id("BEL")] = site + "/IOB33/INBUF_EN";
+            inbuf->attrs[id_BEL] = site + "/IOB33/INBUF_EN";
         replace_port(xil_iob, ctx->id("IBUFDISABLE"), inbuf, ctx->id("IBUFDISABLE"));
         replace_port(xil_iob, ctx->id("INTERMDISABLE"), inbuf, ctx->id("INTERMDISABLE"));
 
@@ -177,9 +177,9 @@ void XC7Packer::decompose_iob(CellInfo *xil_iob, bool is_hr, const std::string &
                 get_net_or_empty(xil_iob, ctx->id("I")), pad_net, get_net_or_empty(xil_iob, ctx->id("T")));
         std::string tile = get_tilename_by_sitename(ctx, site);
         if ((boost::starts_with(tile, "RIOB18_") || boost::starts_with(tile, "LIOB18_")))
-            obuf->attrs[ctx->id("BEL")] = site + "/IOB18/OUTBUF_DCIEN";
+            obuf->attrs[id_BEL] = site + "/IOB18/OUTBUF_DCIEN";
         else
-            obuf->attrs[ctx->id("BEL")] = site + "/IOB33/OUTBUF";
+            obuf->attrs[id_BEL] = site + "/IOB33/OUTBUF";
         replace_port(xil_iob, ctx->id("DCITERMDISABLE"), obuf, ctx->id("DCITERMDISABLE"));
         if (is_se_iobuf)
             subcells.push_back(obuf);
@@ -217,10 +217,10 @@ void XC7Packer::decompose_iob(CellInfo *xil_iob, bool is_hr, const std::string &
         CellInfo *inbuf = insert_diffibuf(int_name(xil_iob->name, "IBUF", is_se_iobuf), ibuf_type,
                                           {pad_p_net, pad_n_net}, top_out);
         if (is_riob18) {
-            inbuf->attrs[ctx->id("BEL")] = site_p + "/IOB18M/INBUF_DCIEN";
+            inbuf->attrs[id_BEL] = site_p + "/IOB18M/INBUF_DCIEN";
             inbuf->attrs[ctx->id("X_IOB_SITE_TYPE")] = std::string("IOB18M");
         } else {
-            inbuf->attrs[ctx->id("BEL")] = site_p + "/IOB33M/INBUF_EN";
+            inbuf->attrs[id_BEL] = site_p + "/IOB33M/INBUF_EN";
             inbuf->attrs[ctx->id("X_IOB_SITE_TYPE")] = std::string("IOB33M");
         }
 
@@ -248,10 +248,10 @@ void XC7Packer::decompose_iob(CellInfo *xil_iob, bool is_hr, const std::string &
         CellInfo *inv = insert_outinv(int_name(xil_iob->name, is_diff_obuf ? "INV" : "OBUFTDS$subcell$INV"),
                                       get_net_or_empty(xil_iob, ctx->id("I")), inv_i);
         if (is_riob18) {
-            inv->attrs[ctx->id("BEL")] = site_n + "/IOB18S/O_ININV";
+            inv->attrs[id_BEL] = site_n + "/IOB18S/O_ININV";
             inv->attrs[ctx->id("X_IOB_SITE_TYPE")] = std::string("IOB18S");
         } else {
-            inv->attrs[ctx->id("BEL")] = site_n + "/IOB33S/O_ININV";
+            inv->attrs[id_BEL] = site_n + "/IOB33S/O_ININV";
             inv->attrs[ctx->id("X_IOB_SITE_TYPE")] = std::string("IOB33S");
         }
 
@@ -269,10 +269,10 @@ void XC7Packer::decompose_iob(CellInfo *xil_iob, bool is_hr, const std::string &
                                        get_net_or_empty(xil_iob, ctx->id("T")));
 
         if (is_riob18) {
-            obuf_p->attrs[ctx->id("BEL")] = site_p + "/IOB18M/OUTBUF_DCIEN";
+            obuf_p->attrs[id_BEL] = site_p + "/IOB18M/OUTBUF_DCIEN";
             obuf_p->attrs[ctx->id("X_IOB_SITE_TYPE")] = std::string("IOB18M");
         } else {
-            obuf_p->attrs[ctx->id("BEL")] = site_p + "/IOB33M/OUTBUF";
+            obuf_p->attrs[id_BEL] = site_p + "/IOB33M/OUTBUF";
             obuf_p->attrs[ctx->id("X_IOB_SITE_TYPE")] = std::string("IOB33M");
         }
         subcells.push_back(obuf_p);
@@ -285,10 +285,10 @@ void XC7Packer::decompose_iob(CellInfo *xil_iob, bool is_hr, const std::string &
                                        inv_i, pad_n_net, get_net_or_empty(xil_iob, ctx->id("T")));
 
         if (is_riob18) {
-            obuf_n->attrs[ctx->id("BEL")] = site_n + "/IOB18S/OUTBUF_DCIEN";
+            obuf_n->attrs[id_BEL] = site_n + "/IOB18S/OUTBUF_DCIEN";
             obuf_n->attrs[ctx->id("X_IOB_SITE_TYPE")] = std::string("IOB18S");
         } else {
-            obuf_n->attrs[ctx->id("BEL")] = site_n + "/IOB33S/OUTBUF";
+            obuf_n->attrs[id_BEL] = site_n + "/IOB33S/OUTBUF";
             obuf_n->attrs[ctx->id("X_IOB_SITE_TYPE")] = std::string("IOB33S");
         }
         connect_port(ctx, get_net_or_empty(xil_iob, ctx->id("DCITERMDISABLE")), obuf_n, ctx->id("DCITERMDISABLE"));
@@ -378,9 +378,9 @@ void XC7Packer::pack_io()
         // previous pass) is the only kind that can collide with another pad:
         // an unconstrained one is handed a free bel further down, from the set
         // that excludes everything claimed here.
-        const bool pad_site_fixed = pad->attrs.count(ctx->id("BEL")) != 0;
+        const bool pad_site_fixed = pad->attrs.count(id_BEL) != 0;
         if (pad_site_fixed) {
-            const std::string bel_name = pad->attrs.at(ctx->id("BEL")).as_string();
+            const std::string bel_name = pad->attrs.at(id_BEL).as_string();
             auto owner = io_bel_owner.find(bel_name);
             if (owner != io_bel_owner.end()) {
                 // Two IOs on one site -- i.e. two ports (or one port twice)
@@ -421,12 +421,12 @@ void XC7Packer::pack_io()
     // Constrain unconstrained IO
     for (auto &iob : pad_and_buf) {
         CellInfo *pad = iob.first;
-        if (!pad->attrs.count(ctx->id("BEL"))) {
+        if (!pad->attrs.count(id_BEL)) {
             if (available_io_bels.empty()) {
                 log_error("IO placer ran out of available IOs (%d available IO, %d unconstrained pins)\n", avail_count,
                           unconstr_io_count);
             }
-            pad->attrs[ctx->id("BEL")] = std::string(ctx->nameOfBel(available_io_bels.front()));
+            pad->attrs[id_BEL] = std::string(ctx->nameOfBel(available_io_bels.front()));
             available_io_bels.pop();
         }
     }
@@ -552,7 +552,7 @@ void XC7Packer::pack_io()
         if (boost::starts_with(ci->type.str(ctx), "GTP")) continue;
         if (boost::starts_with(ci->type.str(ctx), "GTX")) continue;
         if (boost::starts_with(ci->type.str(ctx), "IBUFDS_GTE2")) continue;
-        if (!ci->attrs.count(ctx->id("BEL")))
+        if (!ci->attrs.count(id_BEL))
             continue;
         if (ci->type == id_PAD)
             continue;
@@ -846,12 +846,12 @@ void XC7Packer::pack_iologic()
             BelId io_bel;
             if (   boost::contains(drv->type.str(ctx), "INBUF_EN")
                 || boost::contains(drv->type.str(ctx), "INBUF_DCIEN"))
-                io_bel = ctx->getBelByName(ctx->id(drv->attrs.at(ctx->id("BEL")).as_string()));
+                io_bel = ctx->getBelByName(ctx->id(drv->attrs.at(id_BEL).as_string()));
             else
                 log_error("%s '%s' has IDATAIN input connected to illegal cell type %s\n", ci->type.c_str(ctx),
                           ctx->nameOf(ci), drv->type.c_str(ctx));
             std::string iol_site = get_idelay_site(ctx->getBelName(io_bel).str(ctx));
-            ci->attrs[ctx->id("BEL")] = iol_site + "/IDELAYE2";
+            ci->attrs[id_BEL] = iol_site + "/IDELAYE2";
             ci->attrs[ctx->id("X_IO_BEL")] = ctx->getBelName(io_bel).str(ctx);
             iodelay_to_io[ci->name] = io_bel;
         } else if (ci->type == ctx->id("ODELAYE2")) {
@@ -870,14 +870,14 @@ void XC7Packer::pack_iologic()
                 if (no_users == 2 && user_type == "INVERTER") continue;
                 if (   boost::contains(user_type, "OUTBUF_EN")
                     || boost::contains(user_type, "OUTBUF_DCIEN"))
-                    io_bel = ctx->getBelByName(ctx->id(user->attrs.at(ctx->id("BEL")).as_string()));
+                    io_bel = ctx->getBelByName(ctx->id(user->attrs.at(id_BEL).as_string()));
                 else
                     // TODO: support SIGNAL_PATTERN = CLOCK
                     log_error("%s '%s' has DATAOUT connected to unsupported cell type %s\n",
                               ci->type.c_str(ctx), ctx->nameOf(ci), user_type.c_str());
             }
             std::string iol_site = get_odelay_site(ctx->getBelName(io_bel).str(ctx));
-            ci->attrs[ctx->id("BEL")] = iol_site + "/ODELAYE2";
+            ci->attrs[id_BEL] = iol_site + "/ODELAYE2";
             ci->attrs[ctx->id("X_IO_BEL")] = ctx->getBelName(io_bel).str(ctx);
             iodelay_to_io[ci->name] = io_bel;
         }
@@ -895,7 +895,7 @@ void XC7Packer::pack_iologic()
             BelId io_bel;
             CellInfo *ob = find_p_outbuf(q);
             if (ob != nullptr)
-                io_bel = ctx->getBelByName(ctx->id(ob->attrs.at(ctx->id("BEL")).as_string()));
+                io_bel = ctx->getBelByName(ctx->id(ob->attrs.at(id_BEL).as_string()));
             else
                 log_error("%s '%s' has illegal fanout on Q output\n", ci->type.c_str(ctx), ctx->nameOf(ci));
             auto io_bel_str = ctx->getBelName(io_bel).str(ctx);
@@ -923,7 +923,7 @@ void XC7Packer::pack_iologic()
                 oddr_rules[ctx->id("ODDR")].port_xform[ctx->id("R")] = ctx->id("SR");
             xform_cell(oddr_rules, ci);
 
-            ci->attrs[ctx->id("BEL")] = ol_site + (is_tristate ? "/TFF" : "/OUTFF");
+            ci->attrs[id_BEL] = ol_site + (is_tristate ? "/TFF" : "/OUTFF");
         } else if (ci->type == id_OSERDESE2) {
             // according to ug953 they should be left unconnected or connected to ground
             // when not in slave mode, which is the same, since there are no wire routes to GND
@@ -1025,7 +1025,7 @@ void XC7Packer::pack_iologic()
             CellInfo *drv = d->driver.cell;
             if (   boost::contains(drv->type.str(ctx), "INBUF_EN")
                 || boost::contains(drv->type.str(ctx), "INBUF_DCIEN"))
-                io_bel = ctx->getBelByName(ctx->id(drv->attrs.at(ctx->id("BEL")).as_string()));
+                io_bel = ctx->getBelByName(ctx->id(drv->attrs.at(id_BEL).as_string()));
             else if (boost::contains(drv->type.str(ctx), "IDELAYE2") && d->driver.port == ctx->id("DATAOUT"))
                 io_bel = iodelay_to_io.at(drv->name);
             else
@@ -1033,7 +1033,7 @@ void XC7Packer::pack_iologic()
                             ctx->nameOf(ci), drv->type.c_str(ctx));
 
             std::string iol_site = get_ilogic_site(ctx->getBelName(io_bel).str(ctx));
-            ci->attrs[ctx->id("BEL")] = iol_site + "/IFF";
+            ci->attrs[id_BEL] = iol_site + "/IFF";
 
             std::unordered_map<IdString, XFormRule> iddr_rules;
             iddr_rules[ctx->id("IDDR")].new_type = ctx->id("ILOGICE3_IFF");
@@ -1243,7 +1243,7 @@ void XC7Packer::pack_idelayctrl()
             CellInfo *ci = cell.second;
             if (ci->type == ctx->id("IDELAYE2_IDELAYE2") || ci->type == ctx->id("ODELAYE2_ODELAYE2")) {
                 auto grp_name = get_iodelay_group_name(ci);
-                if (!ci->attrs.count(ctx->id("BEL")) || grp_name != group_name)
+                if (!ci->attrs.count(id_BEL) || grp_name != group_name)
                     continue;
                 ioctrl_sites.insert(get_ioctrl_site(ci->attrs.at(ctx->id("X_IO_BEL")).as_string()));
             }
@@ -1277,7 +1277,7 @@ void XC7Packer::pack_idelayctrl()
                 connect_port(ctx, dup_rdy, dup_idc.get(), ctx->id("RDY"));
                 dup_rdys.push_back(dup_rdy);
             }
-            dup_idc->attrs[ctx->id("BEL")] = site + "/IDELAYCTRL";
+            dup_idc->attrs[id_BEL] = site + "/IDELAYCTRL";
             new_cells.push_back(std::move(dup_idc));
             ++i;
         }

@@ -99,3 +99,7 @@ CHIPDB=/path/to/xc7a35tcsg324.bin ./run.sh
 `run.sh` exits non-zero if any arm fails, and fails an arm by name if the
 summary line is missing at all, so "the pass found nothing to do" and "the pass
 was removed" cannot be confused.
+
+The `debug-env` arms re-run `conflict.v` and `ctl_pinned.v` with `DBG_SFEED`, `DBG_BIND` and
+`NEXTPNR_DBG_LUTGATE` set and pass when the log carries none of the debug lines those names once
+enabled and the written JSON is byte-identical to the run without them.

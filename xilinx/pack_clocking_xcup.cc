@@ -111,15 +111,15 @@ BelId XilinxPacker::find_bel_with_short_route(WireId source, IdString beltype, I
 
 void XilinxPacker::try_preplace(CellInfo *cell, IdString port)
 {
-    if (cell->attrs.count(ctx->id("BEL")))
+    if (cell->attrs.count(id_BEL))
         return;
     NetInfo *n = get_net_or_empty(cell, port);
     if (n == nullptr || n->driver.cell == nullptr)
         return;
     CellInfo *drv = n->driver.cell;
-    if (!drv->attrs.count(ctx->id("BEL")))
+    if (!drv->attrs.count(id_BEL))
         return;
-    BelId drv_bel = ctx->getBelByName(ctx->id(drv->attrs.at(ctx->id("BEL")).as_string()));
+    BelId drv_bel = ctx->getBelByName(ctx->id(drv->attrs.at(id_BEL).as_string()));
     if (drv_bel == BelId())
         return;
     WireId drv_wire = ctx->getBelPinWire(drv_bel, n->driver.port);
@@ -128,7 +128,7 @@ void XilinxPacker::try_preplace(CellInfo *cell, IdString port)
     BelId tgt = find_bel_with_short_route(drv_wire, cell->type, port);
     if (tgt != BelId()) {
         used_bels.insert(tgt);
-        cell->attrs[ctx->id("BEL")] = std::string(ctx->nameOfBel(tgt));
+        cell->attrs[id_BEL] = std::string(ctx->nameOfBel(tgt));
         log_info("    Constrained %s '%s' to bel '%s' based on dedicated routing\n", cell->type.c_str(ctx),
                  ctx->nameOf(cell), ctx->nameOfBel(tgt));
     }
@@ -136,11 +136,11 @@ void XilinxPacker::try_preplace(CellInfo *cell, IdString port)
 
 void XilinxPacker::preplace_unique(CellInfo *cell)
 {
-    if (cell->attrs.count(ctx->id("BEL")))
+    if (cell->attrs.count(id_BEL))
         return;
     for (auto bel : ctx->getBels()) {
         if (ctx->checkBelAvail(bel) && ctx->getBelType(bel) == cell->type && !used_bels.count(bel)) {
-            cell->attrs[ctx->id("BEL")] = std::string(ctx->nameOfBel(bel));
+            cell->attrs[id_BEL] = std::string(ctx->nameOfBel(bel));
             used_bels.insert(bel);
             return;
         }
@@ -162,8 +162,8 @@ void USPacker::prepare_clocking()
             IdString new_type = upgrade.at(ci->type);
             ci->type = new_type;
         }
-        if (ci->attrs.count(ctx->id("BEL")))
-            used_bels.insert(ctx->getBelByName(ctx->id(ci->attrs.at(ctx->id("BEL")).as_string())));
+        if (ci->attrs.count(id_BEL))
+            used_bels.insert(ctx->getBelByName(ctx->id(ci->attrs.at(id_BEL).as_string())));
     }
 }
 

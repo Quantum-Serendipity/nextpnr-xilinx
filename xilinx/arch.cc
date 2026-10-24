@@ -4820,7 +4820,7 @@ void Arch::snapshot_rm_cells()
     int n = 0, packer = 0;
     for (auto &cp : cells) {
         CellInfo *ci = cp.second.get();
-        if (ci->bel != BelId() || ci->attrs.count(id("BEL")))
+        if (ci->bel != BelId() || ci->attrs.count(id_BEL))
             continue;
         if (ci->name.str(this).find("$PACKER_") != std::string::npos) {
             packer++;

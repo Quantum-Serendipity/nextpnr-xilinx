@@ -540,7 +540,7 @@ void XilinxPacker::pack_dram()
             xform_cell(dram_rules, ci);
         } else if (ci->type == ctx->id("RAMD32") || ci->type == ctx->id("RAMS32")) {
             bool is5 = false;
-            auto bel = ci->attrs.find(ctx->id("BEL"));
+            auto bel = ci->attrs.find(id_BEL);
             if (bel != ci->attrs.end() &&
                 bel->second.as_string().find("5LUT") != std::string::npos)
                 is5 = true;
@@ -590,8 +590,8 @@ void XilinxPacker::pack_dram()
             // for pinned parents (pinned cells must not be chain-constrained,
             // cf. the carry import).
             std::string dram_site;
-            if (ci->attrs.count(ctx->id("BEL"))) {
-                std::string b = ci->attrs.at(ctx->id("BEL")).as_string();
+            if (ci->attrs.count(id_BEL)) {
+                std::string b = ci->attrs.at(id_BEL).as_string();
                 auto sl = b.find('/');
                 dram_site = (sl == std::string::npos) ? b : b.substr(0, sl);
             }
@@ -610,7 +610,7 @@ void XilinxPacker::pack_dram()
                                                      pinned ? nullptr : base, dcs, address, di,
                                                      dout, zoffset + i);
                     if (pinned)
-                        dram->attrs[ctx->id("BEL")] =
+                        dram->attrs[id_BEL] =
                                 stringf("%s/%c6LUT", dram_site.c_str(), 'A' + i);
                     if (base == nullptr)
                         base = dram;
@@ -626,7 +626,7 @@ void XilinxPacker::pack_dram()
                                                            pinned ? nullptr : base, dcs,
                                                            address, di, dout, (j == 0), zoffset + i);
                         if (pinned)
-                            dram->attrs[ctx->id("BEL")] =
+                            dram->attrs[id_BEL] =
                                     stringf("%s/%c%cLUT", dram_site.c_str(), 'A' + i, (j == 0) ? '5' : '6');
                         if (base == nullptr)
                             base = dram;

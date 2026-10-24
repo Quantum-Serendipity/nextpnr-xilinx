@@ -1143,7 +1143,7 @@ bool Arch::isValidBelForCell(CellInfo *cell, BelId bel) const
     // carrying a BEL attr is trusted (Vivado/SVS-stamped to a proven SLICEM).
     if (xc7 && cell->type == id_SLICE_LUTX &&
         (cell->lutInfo.is_memory || cell->lutInfo.is_srl) &&
-        !cell->attrs.count(id("BEL"))) {
+        !cell->attrs.count(id_BEL)) {
         IdString tt = getBelTileType(bel);
         if ((tt != id_CLBLM_L && tt != id_CLBLM_R) || locInfo(bel).bel_data[bel.index].z >= 64)
             return false;
@@ -1162,7 +1162,7 @@ bool Arch::isValidBelForCell(CellInfo *cell, BelId bel) const
     // (Only gates USER cells: an imported BEL-pinned cell is fixed at a
     // Vivado-proven bel -- e.g. a $trt routethru LUT1 deliberately placed at a
     // free 5LUT -- so it is trusted, not re-validated by this heuristic.)
-    if (cell->type == id_SLICE_LUTX && !cell->attrs.count(id("BEL")) &&
+    if (cell->type == id_SLICE_LUTX && !cell->attrs.count(id_BEL) &&
         getBelPinWire(bel, id_A6) == WireId()) {
         // Count CONNECTED input ports directly rather than lutInfo.input_count:
         // ABC-mapped LUTs still carry logical pin names (I0..I5) at placement
@@ -1179,14 +1179,6 @@ bool Arch::isValidBelForCell(CellInfo *cell, BelId bel) const
             else if (p.first == id_O6)
                 drives_o6 = true;
         }
-        if (getenv("NEXTPNR_DBG_LUTGATE") && cell->name.str(this).find("47890") != std::string::npos) {
-            log_info("LUTGATE %s at 5LUT bel: in_used=%d drives_o6=%d out_count=%d in_count=%d\n",
-                     cell->name.c_str(this), in_used, int(drives_o6), cell->lutInfo.output_count,
-                     cell->lutInfo.input_count);
-            for (auto &p : cell->ports)
-                log_info("   port %s type=%d net=%d\n", p.first.c_str(this), int(p.second.type),
-                         int(p.second.net != nullptr));
-        }
         if (in_used == 6 || cell->lutInfo.output_count == 2 || drives_o6 ||
             get_net_or_empty(cell, id_A6) != nullptr)
             return false;
@@ -1196,17 +1188,6 @@ bool Arch::isValidBelForCell(CellInfo *cell, BelId bel) const
 
 void Arch::fixupPlacement()
 {
-    if (getenv("DBG_SFEED")) {
-        for (auto cell : sorted(cells)) {
-            CellInfo *ci = cell.second;
-            std::string nm = ci->name.str(this);
-            if (nm.find("$LUT$24") != std::string::npos || nm.find("$LUT$26") != std::string::npos)
-                log_info("FEEDPOS %s bel=%s strength=%d constr_parent=%s\n", nm.c_str(),
-                         ci->bel == BelId() ? "UNBOUND" : getBelName(ci->bel).c_str(this),
-                         int(ci->belStrength),
-                         ci->constr_parent ? ci->constr_parent->name.c_str(this) : "none");
-        }
-    }
     log_info("Running post-placement legalisation...\n");
     auto region_outside = [&]() {
         int n = 0;
@@ -1235,7 +1216,7 @@ void Arch::fixupPlacement()
             CellInfo *ci = cp.second.get();
             if (ci->bel == BelId() || ci->constr_parent != nullptr)
                 continue; // only cluster roots / standalone
-            if (ci->attrs.count(id("BEL")))
+            if (ci->attrs.count(id_BEL))
                 continue; // stamped: trusted at a proven bel
             // gather the full cluster tree (root + all transitive children)
             std::vector<CellInfo *> tree;
@@ -1863,7 +1844,7 @@ void Arch::fixupBramCascades()
         // (BEL-constrained) cell is somebody else's decision.
         const bool is_a_ramb36 = drv->type == ramb36;
         const bool is_placed = drv->bel != BelId();
-        const bool is_stamped_or_pinned = drv->attrs.count(id("BEL")) > 0;
+        const bool is_stamped_or_pinned = drv->attrs.count(id_BEL) > 0;
         const bool is_ours_to_move = is_a_ramb36 && is_placed && !is_stamped_or_pinned;
         if (!is_ours_to_move)
             continue;
@@ -1886,7 +1867,7 @@ void Arch::fixupBramCascades()
                     continue;
                 }
                 const bool sink_is_already_adjacent = sink->bel == want;
-                const bool sink_is_pinned = sink->attrs.count(id("BEL")) > 0 || sink->belStrength > STRENGTH_STRONG;
+                const bool sink_is_pinned = sink->attrs.count(id_BEL) > 0 || sink->belStrength > STRENGTH_STRONG;
                 if (sink_is_already_adjacent)
                     ++n_legal;
                 else if (sink_is_pinned)
@@ -1920,7 +1901,7 @@ void Arch::fixupBramCascades()
             const bool target_is_free = occ == nullptr;
             const bool occupant_is_a_ramb36 = !target_is_free && occ->type == ramb36;
             const bool occupant_is_pinned =
-                    !target_is_free && (occ->attrs.count(id("BEL")) > 0 || occ->belStrength > STRENGTH_STRONG);
+                    !target_is_free && (occ->attrs.count(id_BEL) > 0 || occ->belStrength > STRENGTH_STRONG);
             const bool occupant_is_in_a_cluster =
                     !target_is_free && (occ->constr_parent != nullptr || !occ->constr_children.empty());
             const bool occupant_can_be_swapped =

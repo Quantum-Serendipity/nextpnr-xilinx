@@ -206,10 +206,6 @@ class SAPlacer
             std::function<void(CellInfo *)> bind_children = [&](CellInfo *root) {
                 Loc rootLoc = ctx->getBelLocation(root->bel);
                 for (auto child : root->constr_children) {
-                    if (getenv("DBG_SFEED") && std::string(ctx->nameOf(child)).find("$LUT$") != std::string::npos)
-                        log_info("BINDCH child=%s root=%s childBel=%s\n", ctx->nameOf(child),
-                                 ctx->getBelName(root->bel).c_str(ctx),
-                                 child->bel == BelId() ? "UNBOUND" : ctx->getBelName(child->bel).c_str(ctx));
                     if (child->bel == BelId()) {
                         Loc cl;
                         cl.x = rootLoc.x + (child->constr_x == child->UNCONSTR ? 0 : child->constr_x);
