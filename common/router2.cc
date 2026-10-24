@@ -194,6 +194,8 @@ struct Router2
     std::atomic<int64_t> keepout_bb_retries{0};
     int64_t keepout_nets_scope = 0;
     int64_t keepout_nets_exempt_buf = 0, keepout_nets_exempt_named = 0, keepout_nets_exempt_both = 0;
+    int64_t keepout_nets_exempt_const = 0;
+    std::vector<IdString> keepout_exempt_const_names;
     std::vector<int> keepout_nets_governed, keepout_nets_anchored;
     int64_t keepout_nets_narrowed = 0, keepout_narrow_pips = 0, keepout_narrow_pips_unbound = 0;
     std::vector<int> keepout_nets_narrowed_rect, keepout_locked_pips_rect;
@@ -325,12 +327,16 @@ struct Router2
                 kl = partition_keepout_licence(ctx, cfg, ni);
                 if (kl.exempt_named)
                     keepout_nets_exempt_named++;
+                if (kl.exempt_const) {
+                    keepout_nets_exempt_const++;
+                    keepout_exempt_const_names.push_back(ni->name);
+                }
                 if (kl.exempt_buf) {
                     keepout_nets_exempt_buf++;
                     if (keepout_exempt_buf_names.size() < keepout_exempt_buf_report_cap)
                         keepout_exempt_buf_names.push_back(ni->name);
                 }
-                if (kl.exempt_named && kl.exempt_buf)
+                if (kl.exempt_named && (kl.exempt_buf || kl.exempt_const))
                     keepout_nets_exempt_both++;
                 if (kl.governed >= 0)
                     keepout_nets_governed.at(kl.governed)++;
@@ -544,11 +550,15 @@ struct Router2
                             "cell inside a rectangle owns a STRENGTH_LOCKED pip or a licence-file pip there. The "
                             "wide licence is what ran, and this arm is the keepout arm under another name.\n");
         }
-        log_info("partition static keepout: %lld net(s) exempt (%lld by global clock buffer driver, %lld by name "
-                 "list, %lld by both)\n",
-                 (long long)(keepout_nets_exempt_buf + keepout_nets_exempt_named - keepout_nets_exempt_both),
-                 (long long)keepout_nets_exempt_buf, (long long)keepout_nets_exempt_named,
-                 (long long)keepout_nets_exempt_both);
+        log_info("partition static keepout: %lld net(s) exempt (%lld by global clock buffer driver, %lld constant, "
+                 "%lld by name list, %lld by both)\n",
+                 (long long)(keepout_nets_exempt_buf + keepout_nets_exempt_const + keepout_nets_exempt_named -
+                             keepout_nets_exempt_both),
+                 (long long)keepout_nets_exempt_buf, (long long)keepout_nets_exempt_const,
+                 (long long)keepout_nets_exempt_named, (long long)keepout_nets_exempt_both);
+        for (IdString n : keepout_exempt_const_names)
+            log_info("partition static keepout: exempt constant net, held by the constant-path gate instead: %s\n",
+                     n.c_str(ctx));
         for (IdString n : keepout_exempt_buf_names)
             log_info("partition static keepout: exempt by global clock buffer driver: %s\n", n.c_str(ctx));
         if (keepout_nets_exempt_buf > int64_t(keepout_exempt_buf_names.size()))
@@ -2071,9 +2081,13 @@ PartitionKeepoutLicence partition_keepout_licence(const Context *ctx, const Part
                   cfg.partition_rect_count());
     PartitionKeepoutLicence kl;
     kl.exempt_named = cfg.keepout_exempt_nets.count(ni->name) > 0;
-    kl.exempt_buf =
-            ni->driver.cell != nullptr && ni->driver.cell->bel != BelId() && ctx->getBelGlobalBuf(ni->driver.cell->bel);
-    if (kl.exempt_named || kl.exempt_buf)
+    if (ni->driver.cell != nullptr) {
+        const std::string drv_type = ni->driver.cell->type.str(ctx);
+        kl.exempt_const = drv_type == "PSEUDO_GND" || drv_type == "PSEUDO_VCC";
+    }
+    kl.exempt_buf = !kl.exempt_const && ni->driver.cell != nullptr && ni->driver.cell->bel != BelId() &&
+                    ctx->getBelGlobalBuf(ni->driver.cell->bel);
+    if (kl.exempt_named || kl.exempt_buf || kl.exempt_const)
         return kl;
     auto pit = cfg.partition_nets.find(ni->name);
     if (pit != cfg.partition_nets.end()) {

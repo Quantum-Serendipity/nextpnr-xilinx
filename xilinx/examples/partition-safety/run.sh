@@ -166,6 +166,17 @@ arm_static_keepout() {
         report "FAIL static keepout, router2 control: rc $rc, $inside static pip(s) in tile ($sx,$sy), $census clean gate census line(s)"
     fi
 
+    local bufs consts total nbuf nconst
+    bufs=$(sed -n 's/^Info: partition static keepout: exempt by global clock buffer driver: //p' "$OUT/m10-router2.log" | sort | paste -sd' ' -)
+    consts=$(sed -n 's/^Info: partition static keepout: exempt constant net, held by the constant-path gate instead: //p' "$OUT/m10-router2.log" | sort | paste -sd' ' -)
+    read -r total nbuf nconst < <(sed -n 's/^Info: partition static keepout: \([0-9]*\) net(s) exempt (\([0-9]*\) by global clock buffer driver, \([0-9]*\) constant,.*/\1 \2 \3/p' "$OUT/m10-router2.log")
+    if [ "$consts" = '$PACKER_GND_NET $PACKER_VCC_NET' ] && [[ " $bufs " != *' $PACKER_'* ]] && [ -n "$bufs" ] \
+            && [ "${nconst:-x}" = 2 ] && [ "${nbuf:-x}" = "$(wc -w <<<"$bufs")" ]; then
+        report "PASS keepout census: the constant nets are counted and listed as constant ($consts), the clock-buffer list is [$bufs]"
+    else
+        report "FAIL keepout census: clock-buffer list [$bufs], constant list [$consts], counts total=${total:-?} buffer=${nbuf:-?} constant=${nconst:-?}"
+    fi
+
     NEXTPNR_PARTITION_ROI=$r npnr "$OUT/m10-fixed.log" --json "$OUT/placed.json" --no-pack --no-place \
         --fixed-routes "$OUT/all.routes" --write-fixed-routes "$OUT/m10-fixed.routes"
     rc=$?
