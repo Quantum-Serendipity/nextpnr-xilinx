@@ -105,6 +105,7 @@
  *
  */
 
+#include <sstream>
 #include "design_utils.h"
 #include "log.h"
 #include "nextpnr.h"
@@ -427,6 +428,13 @@ template <typename FrontendType> struct GenericFrontend
                 if (mapped_bit != -1) {
                     NetInfo *ni = net_flatindex.at(mapped_bit);
                     impl.foreach_attr(nn, [&](const std::string &name, const Property &value) {
+                        if (name == "NEXTPNR_NET_ALIASES") {
+                            std::istringstream names(value.is_string ? value.as_string() : value.to_string());
+                            std::string alias;
+                            while (names >> alias)
+                                ctx->written_net_aliases.emplace(alias, ni->name);
+                            return;
+                        }
                         ni->attrs[ctx->id(name)] = value;
                     });
                 }

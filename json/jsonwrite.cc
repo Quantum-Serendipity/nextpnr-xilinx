@@ -18,7 +18,9 @@
  */
 
 #include "jsonwrite.h"
+#include <algorithm>
 #include <assert.h>
+#include <cctype>
 #include <fstream>
 #include <iostream>
 #include <iterator>
@@ -185,6 +187,27 @@ void write_module(std::ostream &f, Context *ctx)
 
     f << stringf("\n      },\n");
 
+    std::unordered_map<IdString, std::vector<std::string>> aliases;
+    auto keep_alias = [&](const std::string &alias, IdString net) {
+        if (alias.empty() || alias.find('$') != std::string::npos ||
+            std::any_of(alias.begin(), alias.end(), [](unsigned char c) { return std::isspace(c) || c == '"'; }))
+            return;
+        IdString a = ctx->id_if_interned(alias);
+        if (a != IdString() && ctx->nets.count(a))
+            return;
+        if (ctx->nets.count(net))
+            aliases[net].push_back(alias);
+    };
+    for (auto &a : ctx->net_aliases)
+        if (a.first != a.second)
+            keep_alias(a.first.str(ctx), a.second);
+    for (auto &a : ctx->written_net_aliases)
+        keep_alias(a.first, a.second);
+    for (auto &a : aliases) {
+        std::sort(a.second.begin(), a.second.end());
+        a.second.erase(std::unique(a.second.begin(), a.second.end()), a.second.end());
+    }
+
     f << stringf("      \"netnames\": {");
     first = true;
     for (auto &pair : ctx->nets) {
@@ -195,6 +218,14 @@ void write_module(std::ostream &f, Context *ctx)
         f << stringf("          \"bits\": [ %d ] ,\n", pair.first.index);
         f << stringf("          \"attributes\": {");
         write_parameters(f, ctx, w->attrs);
+        auto al = aliases.find(w->name);
+        if (al != aliases.end()) {
+            std::string joined;
+            for (auto &n : al->second)
+                joined += (joined.empty() ? "" : " ") + n;
+            f << stringf("%s\n", w->attrs.empty() ? "" : ",");
+            f << stringf("            \"NEXTPNR_NET_ALIASES\": %s", get_string(Property(joined).to_string()).c_str());
+        }
         f << stringf("\n          }\n");
         f << stringf("        }");
         first = false;

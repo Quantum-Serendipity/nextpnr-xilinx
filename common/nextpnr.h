@@ -719,6 +719,7 @@ struct BaseCtx
 
     // Aliases for nets, which may have more than one name due to assignments and hierarchy
     std::unordered_map<IdString, IdString> net_aliases;
+    std::unordered_map<std::string, IdString> written_net_aliases;
 
     // Top-level ports
     std::unordered_map<IdString, PortInfo> ports;
@@ -865,6 +866,19 @@ struct BaseCtx
                                  : (net_aliases.count(alias) && nets.count(net_aliases.at(alias))
                                             ? nets.at(net_aliases.at(alias)).get()
                                             : nullptr);
+    }
+
+    NetInfo *getNetByAliasName(const std::string &alias) const
+    {
+        IdString a = id_if_interned(alias);
+        NetInfo *ni = a == IdString() ? nullptr : getNetByAlias(a);
+        if (ni != nullptr)
+            return ni;
+        auto w = written_net_aliases.find(alias);
+        if (w == written_net_aliases.end())
+            return nullptr;
+        auto n = nets.find(w->second);
+        return n == nets.end() ? nullptr : n->second.get();
     }
 
     void addConstraint(std::unique_ptr<TimingConstraint> constr);
