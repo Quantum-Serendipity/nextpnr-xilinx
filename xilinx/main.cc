@@ -27,6 +27,7 @@
 #include "design_utils.h"
 #include "jsonwrite.h"
 #include "log.h"
+#include "router2.h"
 #include "timing.h"
 #include "util.h"
 
@@ -65,6 +66,9 @@ po::options_description UspCommandHandler::getArchOptions()
                            "only warn when a constant (GND/VCC) sink cannot be driven; the pin's silicon "
                            "value is then undefined (default: error).  Does not cover a constant driver "
                            "LUT whose net the router itself fails to route");
+    specific.add_options()("test-keepout",
+                           "run the partition keepout licence and verdict unit tests against this chipdb, print one "
+                           "line per test and exit non-zero if any fails");
 
     return specific;
 }
@@ -93,6 +97,8 @@ std::unique_ptr<Context> UspCommandHandler::createContext(std::unordered_map<std
 
 void UspCommandHandler::setupArchContext(Context *ctx)
 {
+    if (vm.count("test-keepout"))
+        std::exit(partition_keepout_self_test(ctx) == 0 ? 0 : 1);
     if (vm.count("fixed-routes"))
         ctx->settings[ctx->id("fixed-routes")] = vm["fixed-routes"].as<std::string>();
 }

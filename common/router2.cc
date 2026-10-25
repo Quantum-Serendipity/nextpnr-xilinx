@@ -2155,6 +2155,317 @@ PartitionKeepoutVerdict partition_keepout_verdict(const PartitionKeepoutLicence 
     return (lic.allow & bit) ? KEEPOUT_ADMIT : KEEPOUT_VETO_RECT;
 }
 
+int partition_keepout_self_test(Context *ctx)
+{
+    int fails = 0, passes = 0;
+    auto check = [&](const std::string &name, bool ok, const std::string &detail) {
+        if (ok)
+            ++passes;
+        else
+            ++fails;
+        log_info("keepout-test: %s %s%s%s\n", ok ? "PASS" : "FAIL", name.c_str(), detail.empty() ? "" : ": ",
+                 detail.c_str());
+    };
+    const char *vname[] = {"OUTSIDE", "ADMIT", "VETO_RECT", "VETO_NARROW"};
+
+    struct Row
+    {
+        bool narrow, locked, check, allow;
+        PartitionKeepoutVerdict want;
+    };
+    const Row rows[] = {
+            {false, false, false, false, KEEPOUT_ADMIT},     {false, false, false, true, KEEPOUT_ADMIT},
+            {false, false, true, false, KEEPOUT_VETO_RECT},  {false, false, true, true, KEEPOUT_ADMIT},
+            {false, true, false, false, KEEPOUT_ADMIT},      {false, true, false, true, KEEPOUT_ADMIT},
+            {false, true, true, false, KEEPOUT_VETO_RECT},   {false, true, true, true, KEEPOUT_ADMIT},
+            {true, false, false, false, KEEPOUT_VETO_NARROW}, {true, false, false, true, KEEPOUT_VETO_NARROW},
+            {true, false, true, false, KEEPOUT_VETO_NARROW}, {true, false, true, true, KEEPOUT_VETO_NARROW},
+            {true, true, false, false, KEEPOUT_ADMIT},       {true, true, false, true, KEEPOUT_ADMIT},
+            {true, true, true, false, KEEPOUT_ADMIT},        {true, true, true, true, KEEPOUT_ADMIT},
+    };
+    PipId some_pip;
+    for (auto p : ctx->getPips()) {
+        some_pip = p;
+        break;
+    }
+    int table_bad = 0;
+    std::string table_detail;
+    for (int kr = 0; kr < 3; kr++)
+        for (auto &r : rows) {
+            PartitionKeepoutLicence lic;
+            const uint64_t bit = uint64_t(1) << kr, other = ~bit;
+            lic.narrow = (r.narrow ? bit : 0) | other;
+            lic.allow = (r.allow ? bit : 0) | (other & 0x5);
+            lic.check = r.check;
+            if (r.locked)
+                lic.locked.insert(some_pip);
+            PartitionKeepoutVerdict got = partition_keepout_verdict(lic, some_pip, kr);
+            if (got != r.want) {
+                ++table_bad;
+                table_detail += stringf(" [kr=%d narrow=%d locked=%d check=%d allow=%d: %s, want %s]", kr, r.narrow,
+                                        r.locked, r.check, r.allow, vname[got], vname[r.want]);
+            }
+            PartitionKeepoutLicence all = lic;
+            all.narrow = ~uint64_t(0);
+            all.allow = ~uint64_t(0);
+            all.check = true;
+            if (partition_keepout_verdict(all, some_pip, -1) != KEEPOUT_OUTSIDE ||
+                partition_keepout_verdict(lic, some_pip, -1) != KEEPOUT_OUTSIDE) {
+                ++table_bad;
+                table_detail += " [a pip outside every rectangle was not OUTSIDE]";
+            }
+        }
+    check("verdict truth table", table_bad == 0,
+          table_bad == 0 ? "48 rows over rectangles 0..2 and 96 outside-rectangle probes agree" : table_detail);
+
+    BelId lut0, lut1, lut2, lut_far, bufg, pvcc;
+    for (auto bel : ctx->getBels()) {
+        IdString t = ctx->getBelType(bel);
+        Loc l = ctx->getBelLocation(bel);
+        if (t == id_BUFGCTRL && bufg == BelId())
+            bufg = bel;
+        else if (t == id_PSEUDO_VCC && pvcc == BelId())
+            pvcc = bel;
+        else if (t == id_SLICE_LUTX) {
+            if (lut0 == BelId() && l.x >= 20 && l.y >= 20)
+                lut0 = bel;
+            else if (lut0 != BelId() && lut1 == BelId()) {
+                Loc l0 = ctx->getBelLocation(lut0);
+                if (l.x >= l0.x + 12 && l.y >= l0.y + 12)
+                    lut1 = bel;
+            } else if (lut1 != BelId() && lut2 == BelId()) {
+                Loc l1 = ctx->getBelLocation(lut1);
+                if (l.x >= l1.x + 12 && l.y >= l1.y + 12)
+                    lut2 = bel;
+            } else if (lut2 != BelId() && lut_far == BelId()) {
+                Loc l2 = ctx->getBelLocation(lut2);
+                if (l.x >= l2.x + 12 && l.y >= l2.y + 12)
+                    lut_far = bel;
+            }
+        }
+    }
+    if (lut0 == BelId() || lut1 == BelId() || lut2 == BelId() || lut_far == BelId() || bufg == BelId() ||
+        pvcc == BelId()) {
+        check("fabric for the licence tests", false, "this chipdb lacks the spread of LUT, BUFGCTRL and PSEUDO_VCC "
+                                                     "bels the licence tests place cells on");
+        return fails;
+    }
+    auto box = [&](BelId b) {
+        Loc l = ctx->getBelLocation(b);
+        return PartitionRouteCfg::PartitionRect{l.x - 2, l.y - 2, l.x + 2, l.y + 2};
+    };
+    PartitionRouteCfg cfg2, cfg3;
+    for (PartitionRouteCfg *c : {&cfg2, &cfg3}) {
+        auto r0 = box(lut0);
+        c->partition_active = true;
+        c->partition_x0 = r0.x0;
+        c->partition_y0 = r0.y0;
+        c->partition_x1 = r0.x1;
+        c->partition_y1 = r0.y1;
+        c->partition_siblings.push_back(box(lut1));
+        c->keepout_active = true;
+    }
+    cfg3.partition_siblings.push_back(box(lut2));
+
+    auto pips_in = [&](BelId b, int rect, size_t want) {
+        std::vector<PipId> out;
+        for (IdString pin : ctx->getBelPins(b)) {
+            WireId w = ctx->getBelPinWire(b, pin);
+            if (w == WireId())
+                continue;
+            for (PipId p : ctx->getPipsUphill(w)) {
+                if (partition_keepout_rect(cfg3, ctx->getPipLocation(p)) == rect &&
+                    std::find(out.begin(), out.end(), p) == out.end())
+                    out.push_back(p);
+                if (out.size() >= want)
+                    return out;
+            }
+        }
+        return out;
+    };
+    std::vector<PipId> in0 = pips_in(lut0, 0, 2), in1 = pips_in(lut1, 1, 1), in2 = pips_in(lut2, 2, 1),
+                       far = pips_in(lut_far, -1, 1);
+    if (in0.size() < 2 || in1.empty() || in2.empty() || far.empty()) {
+        check("pips for the licence tests", false,
+              stringf("found %d, %d, %d and %d pip(s) in rectangles 0, 1, 2 and outside", int(in0.size()),
+                      int(in1.size()), int(in2.size()), int(far.size())));
+        return fails;
+    }
+    const PipId pa = in0[0], pb = in0[1], p1 = in1[0], p2 = in2[0], pfar = far[0];
+
+    std::vector<std::unique_ptr<CellInfo>> cells;
+    std::vector<std::unique_ptr<NetInfo>> nets;
+    auto cell = [&](const char *type, BelId bel) {
+        cells.emplace_back(new CellInfo);
+        CellInfo *c = cells.back().get();
+        c->name = ctx->id(stringf("keepout_test_cell_%d", int(cells.size())));
+        c->type = ctx->id(type);
+        c->bel = bel;
+        return c;
+    };
+    auto net = [&](CellInfo *drv, std::vector<CellInfo *> users) {
+        nets.emplace_back(new NetInfo);
+        NetInfo *n = nets.back().get();
+        n->name = ctx->id(stringf("keepout_test_net_%d", int(nets.size())));
+        n->driver.cell = drv;
+        n->driver.port = id_O;
+        for (auto u : users) {
+            PortRef pr;
+            pr.cell = u;
+            pr.port = id_I;
+            n->users.push_back(pr);
+        }
+        return n;
+    };
+    auto verdicts = [&](const PartitionKeepoutLicence &lic, std::vector<std::pair<PipId, int>> probes,
+                        std::vector<PartitionKeepoutVerdict> want, std::string &detail) {
+        bool ok = true;
+        for (size_t i = 0; i < probes.size(); i++) {
+            auto got = partition_keepout_verdict(lic, probes[i].first, probes[i].second);
+            if (got != want[i]) {
+                ok = false;
+                detail += stringf(" probe %d in rectangle %d: %s, want %s;", int(i), probes[i].second, vname[got],
+                                  vname[want[i]]);
+            }
+        }
+        return ok;
+    };
+    auto lic_text = [&](const PartitionKeepoutLicence &l) {
+        return stringf("named=%d buf=%d const=%d governed=%d anchored=%llx allow=%llx check=%d narrow=%llx locked=%d",
+                       l.exempt_named, l.exempt_buf, l.exempt_const, l.governed, (unsigned long long)l.anchored,
+                       (unsigned long long)l.allow, l.check, (unsigned long long)l.narrow, int(l.locked.size()));
+    };
+
+    {
+        PartitionRouteCfg cfg = cfg2;
+        NetInfo *n = net(cell("SLICE_LUTX", lut0), {cell("SLICE_LUTX", lut_far)});
+        cfg.keepout_exempt_nets.insert(n->name);
+        auto l = partition_keepout_licence(ctx, cfg, n);
+        std::string d;
+        bool ok = l.exempt_named && !l.check && l.allow == 0 &&
+                  verdicts(l, {{pa, 0}, {p1, 1}}, {KEEPOUT_ADMIT, KEEPOUT_ADMIT}, d);
+        check("named exemption admits every rectangle", ok, lic_text(l) + d);
+    }
+    {
+        NetInfo *n = net(cell("PSEUDO_GND", BelId()), {cell("SLICE_LUTX", lut0)});
+        auto l = partition_keepout_licence(ctx, cfg2, n);
+        std::string d;
+        bool ok = l.exempt_const && !l.exempt_buf && !l.exempt_named && !l.check &&
+                  verdicts(l, {{pa, 0}, {p1, 1}}, {KEEPOUT_ADMIT, KEEPOUT_ADMIT}, d);
+        check("unplaced PSEUDO_GND driver is a constant exemption", ok, lic_text(l) + d);
+    }
+    {
+        NetInfo *n = net(cell("PSEUDO_VCC", pvcc), {cell("SLICE_LUTX", lut0)});
+        auto l = partition_keepout_licence(ctx, cfg2, n);
+        bool ok = l.exempt_const && !l.exempt_buf && ctx->getBelGlobalBuf(pvcc);
+        check("PSEUDO_VCC on a global-buffer bel is counted constant, not buffer", ok, lic_text(l));
+    }
+    {
+        NetInfo *n = net(cell("BUFGCTRL", bufg), {cell("SLICE_LUTX", lut0), cell("SLICE_LUTX", lut_far)});
+        auto l = partition_keepout_licence(ctx, cfg2, n);
+        std::string d;
+        bool ok = l.exempt_buf && !l.exempt_const && !l.check &&
+                  verdicts(l, {{pa, 0}, {p1, 1}}, {KEEPOUT_ADMIT, KEEPOUT_ADMIT}, d);
+        check("placed BUFGCTRL driver is a buffer exemption", ok, lic_text(l) + d);
+    }
+    {
+        NetInfo *n = net(cell("BUFGCTRL", BelId()), {cell("SLICE_LUTX", lut0)});
+        auto l = partition_keepout_licence(ctx, cfg2, n);
+        std::string d;
+        bool ok = !l.exempt_buf && !l.exempt_const && l.anchored == 1 && l.check &&
+                  verdicts(l, {{pa, 0}, {p1, 1}}, {KEEPOUT_ADMIT, KEEPOUT_VETO_RECT}, d);
+        check("unplaced BUFGCTRL driver is no exemption", ok, lic_text(l) + d);
+    }
+    {
+        NetInfo *n = net(cell("SLICE_LUTX", lut0), {cell("SLICE_LUTX", lut1)});
+        auto l = partition_keepout_licence(ctx, cfg2, n);
+        std::string d;
+        bool ok = l.anchored == 3 && l.allow == 3 && !l.check &&
+                  verdicts(l, {{pa, 0}, {p1, 1}, {pfar, -1}}, {KEEPOUT_ADMIT, KEEPOUT_ADMIT, KEEPOUT_OUTSIDE}, d);
+        check("a net anchored in both of two rectangles is unchecked", ok, lic_text(l) + d);
+        auto l3 = partition_keepout_licence(ctx, cfg3, n);
+        std::string d3;
+        bool ok3 = l3.anchored == 3 && l3.allow == 3 && l3.check &&
+                   verdicts(l3, {{pa, 0}, {p1, 1}, {p2, 2}}, {KEEPOUT_ADMIT, KEEPOUT_ADMIT, KEEPOUT_VETO_RECT}, d3);
+        check("the same net under three rectangles is vetoed from the third", ok3, lic_text(l3) + d3);
+    }
+    {
+        NetInfo *n = net(cell("SLICE_LUTX", lut_far), {cell("SLICE_LUTX", lut0)});
+        auto l = partition_keepout_licence(ctx, cfg2, n);
+        std::string d;
+        bool ok = l.anchored == 1 && l.allow == 1 && l.check && l.governed == -1 &&
+                  verdicts(l, {{pa, 0}, {p1, 1}, {pfar, -1}}, {KEEPOUT_ADMIT, KEEPOUT_VETO_RECT, KEEPOUT_OUTSIDE},
+                           d);
+        check("a user anchors its rectangle and no other", ok, lic_text(l) + d);
+    }
+    {
+        PartitionRouteCfg cfg = cfg2;
+        NetInfo *n = net(cell("SLICE_LUTX", lut_far), {cell("SLICE_LUTX", BelId())});
+        cfg.partition_nets[n->name] = 1;
+        auto l = partition_keepout_licence(ctx, cfg, n);
+        std::string d;
+        bool ok = l.governed == 1 && l.anchored == 0 && l.allow == 2 && l.check &&
+                  verdicts(l, {{pa, 0}, {p1, 1}}, {KEEPOUT_VETO_RECT, KEEPOUT_ADMIT}, d);
+        check("a governed net is admitted to its own rectangle only", ok, lic_text(l) + d);
+    }
+    {
+        NetInfo *n = net(cell("SLICE_LUTX", lut_far), {cell("SLICE_LUTX", BelId())});
+        auto l = partition_keepout_licence(ctx, cfg2, n);
+        std::string d;
+        bool ok = l.allow == 0 && l.check &&
+                  verdicts(l, {{pa, 0}, {p1, 1}, {pfar, -1}}, {KEEPOUT_VETO_RECT, KEEPOUT_VETO_RECT, KEEPOUT_OUTSIDE},
+                           d);
+        check("an unanchored net is vetoed from every rectangle", ok, lic_text(l) + d);
+    }
+    for (int strength : {int(STRENGTH_LOCKED), int(STRENGTH_STRONG)}) {
+        PartitionRouteCfg cfg = cfg2;
+        cfg.keepout_narrow = true;
+        NetInfo *n = net(cell("SLICE_LUTX", lut0), {cell("SLICE_LUTX", lut_far)});
+        n->wires[ctx->getPipDstWire(pa)] = PipMap{pa, PlaceStrength(strength)};
+        n->wires[ctx->getPipDstWire(p1)] = PipMap{p1, PlaceStrength(strength)};
+        auto l = partition_keepout_licence(ctx, cfg, n);
+        std::string d;
+        bool ok;
+        if (strength == STRENGTH_LOCKED)
+            ok = l.narrow == 1 && l.locked.size() == 1 && l.locked.count(pa) &&
+                 verdicts(l, {{pa, 0}, {pb, 0}, {p1, 1}},
+                          {KEEPOUT_ADMIT, KEEPOUT_VETO_NARROW, KEEPOUT_VETO_RECT}, d);
+        else
+            ok = l.narrow == 0 && l.locked.empty() &&
+                 verdicts(l, {{pa, 0}, {pb, 0}, {p1, 1}}, {KEEPOUT_ADMIT, KEEPOUT_ADMIT, KEEPOUT_VETO_RECT}, d);
+        check(strength == STRENGTH_LOCKED
+                      ? "narrow keepout: a locked pip in an anchored rectangle is the only pip admitted there"
+                      : "narrow keepout: a pip bound below LOCKED does not narrow its rectangle",
+              ok, lic_text(l) + d);
+    }
+    {
+        PartitionRouteCfg cfg = cfg2;
+        NetInfo *n = net(cell("SLICE_LUTX", lut0), {cell("SLICE_LUTX", lut_far)});
+        n->wires[ctx->getPipDstWire(pa)] = PipMap{pa, STRENGTH_LOCKED};
+        auto l = partition_keepout_licence(ctx, cfg, n);
+        std::string d;
+        bool ok = l.narrow == 0 && l.locked.empty() &&
+                  verdicts(l, {{pa, 0}, {pb, 0}}, {KEEPOUT_ADMIT, KEEPOUT_ADMIT}, d);
+        check("narrow keepout off: a locked pip narrows nothing", ok, lic_text(l) + d);
+    }
+    {
+        PartitionRouteCfg cfg = cfg2;
+        cfg.keepout_narrow = true;
+        NetInfo *n = net(cell("SLICE_LUTX", lut0), {cell("SLICE_LUTX", lut_far)});
+        cfg.keepout_licence_pips[n->name] = {pb, p1};
+        auto l = partition_keepout_licence(ctx, cfg, n);
+        std::string d;
+        bool ok = l.narrow == 1 && l.locked.size() == 1 && l.locked.count(pb) && l.locked_taken.size() == 1 &&
+                  !l.locked_taken[0].second &&
+                  verdicts(l, {{pb, 0}, {pa, 0}, {p1, 1}}, {KEEPOUT_ADMIT, KEEPOUT_VETO_NARROW, KEEPOUT_VETO_RECT},
+                           d);
+        check("a licence pip narrows its anchored rectangle, and one in an unanchored rectangle is ignored", ok,
+              lic_text(l) + d);
+    }
+    log_info("keepout-test: %d passed, %d failed\n", passes, fails);
+    return fails;
+}
+
 Router2Cfg::Router2Cfg(Context *ctx)
 {
     backwards_max_iter = ctx->setting<int>("router2/bwdMaxIter", 20);
