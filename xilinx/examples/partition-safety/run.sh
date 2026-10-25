@@ -505,11 +505,38 @@ arm_carry_tree_on_a_blacklisted_bel() {
         --chipdb "$CHIPDB" --log "$OUT/carry-pin.log" -q --json "$OUT/carry-pin.json" --no-pack --no-route \
         --write "$OUT/carry-pin-out.json" >/dev/null 2>&1
     local rc=$?
-    if [ "$rc" -ne 0 ] && grep -q '^ERROR: post-place check: [1-9][0-9]* cell(s) without a BEL attribute sit on a blacklisted' "$OUT/carry-pin.log" \
-            && grep -q "post-place check: .* (CARRY4) is on a forbidden bel $bel" "$OUT/carry-pin.log"; then
+    if [ "$rc" -ne 0 ] && grep -q '^ERROR: post-place check: [1-9][0-9]* placed cell(s) fail isValidBelForCell' "$OUT/carry-pin.log" \
+            && grep -q "post-place check: .* (CARRY4, strength 3) is not valid at its bel $bel" "$OUT/carry-pin.log"; then
         report "PASS CARRY4 tree pinned on a blacklisted bel: refused at rc $rc, the CARRY4 on $bel named"
     else
         report "FAIL CARRY4 tree pinned on a blacklisted bel: rc $rc: $(grep -m1 '^ERROR' "$OUT/carry-pin.log" || echo 'no error; the placement was accepted')"
+    fi
+}
+
+arm_post_place_check_covers_every_cell() {
+    local line want
+    line=$(grep -m1 'post-place check: all [0-9]* placed cell(s) pass isValidBelForCell' "$OUT/carry-place.log")
+    want=$("$PYTHON" - "$OUT/carry-placed.json" <<'PY'
+import json, sys
+cells = json.load(open(sys.argv[1]))["modules"]["top"]["cells"]
+placed = [n for n, c in cells.items() if c["attributes"].get("NEXTPNR_BEL")]
+def root(n):
+    while cells[n]["attributes"].get("CONSTR_PARENT") in cells:
+        n = cells[n]["attributes"]["CONSTR_PARENT"]
+    return n
+tree = [n for n in placed if cells[root(n)]["type"] == "CARRY4"]
+ft = [n for n in tree if "$LUT$" in n and cells[n]["attributes"]["NEXTPNR_BEL"].endswith("5LUT")]
+print(len(placed), len(tree), len(ft))
+PY
+)
+    local n_placed n_tree n_ft got_all got_tree
+    read -r n_placed n_tree n_ft <<<"$want"
+    got_all=$(sed -n 's/.*check: all \([0-9]*\) placed cell(s).*/\1/p' <<<"$line")
+    got_tree=$(sed -n 's/.*, \([0-9]*\) of them in carry trees.*/\1/p' <<<"$line")
+    if [ -n "$line" ] && [ "${got_all:-x}" = "$n_placed" ] && [ "${got_tree:-x}" = "$n_tree" ] && [ "${n_ft:-0}" -gt 0 ]; then
+        report "PASS post-place check covers every placed cell: carry.v's $n_placed placed cell(s), $n_tree in carry trees and $n_ft of those packer feed-through LUTs on 5LUT bels, all pass isValidBelForCell"
+    else
+        report "FAIL post-place check covers every placed cell: '${line:-no post-place check line}', netlist has ${n_placed:-?} placed, ${n_tree:-?} in carry trees, ${n_ft:-?} feed-through LUTs on 5LUT bels"
     fi
 }
 
@@ -952,6 +979,7 @@ arm_fixed_routes_chipdb_identity
 arm_heap_scarce_by_device
 arm_routing_cycle_refused
 arm_carry_tree_on_a_blacklisted_bel
+arm_post_place_check_covers_every_cell
 
 echo "artefacts kept in $OUT"
 exit "$rc_total"
