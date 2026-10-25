@@ -490,6 +490,14 @@ struct FasmBackend
                     if (site_has_tristate_register)
                         continue;
                 }
+                const bool is_zinv_t1 = boost::ends_with(c, ".ZINV_T1");
+                if (is_zinv_t1) {
+                    auto dot = c.find('.');
+                    const bool site_has_t1_tied_low =
+                            dot != std::string::npos && ologic_t1_low.count(tile_name + "/" + c.substr(0, dot));
+                    if (site_has_t1_tied_low)
+                        continue;
+                }
                 // Phantom-BUFGCTRL guard: this pseudo-pip's feature list
                 // includes BUFGCTRL.BUFGCTRL_X0Y<n>.* bits whenever the
                 // router crosses the matching CLK_BUFG_BUFGCTRL<n>_O→I0/I1
@@ -1708,6 +1716,7 @@ struct FasmBackend
     }
 
     std::set<std::string> ologic_t_registered;
+    std::set<std::string> ologic_t1_low;
 
     void write_iol_config(CellInfo *ci)
     {
@@ -1723,6 +1732,13 @@ struct FasmBackend
         push(site_y);
         if (ci->type == ctx->id("OLOGICE2_TFF") || ci->type == ctx->id("OLOGICE3_TFF"))
             ologic_t_registered.insert(tile + "/" + site_y);
+        if (ci->type == ctx->id("OSERDESE2_OSERDESE2")) {
+            NetInfo *t1 = get_net_or_empty(ci, ctx->id("T1"));
+            const bool inverted = bool_or_default(ci->params, ctx->id("IS_T1_INVERTED"), false);
+            const bool tied_to_inverted_vcc = t1 != nullptr && t1->name == ctx->id("$PACKER_VCC_NET") && inverted;
+            if (tied_to_inverted_vcc)
+                ologic_t1_low.insert(tile + "/" + site_y);
+        }
         auto site_bel_is_bound = [&](const char *bel_name) {
             BelId bel = ctx->getBelByName(ctx->id(site + "/" + bel_name));
             return bel != BelId() && ctx->getBoundBelCell(bel) != nullptr;
