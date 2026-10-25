@@ -2252,8 +2252,8 @@ struct FasmBackend
                                   ctx->nameOf(ci), get_tile_name(ci->bel.tile).c_str(), pin, pin);
                 write_bit("IN_USE");
                 write_bit("INIT_OUT", bool_or_default(ci->params, ctx->id("INIT_OUT")));
-                write_bit("IS_IGNORE0_INVERTED", bool_or_default(ci->params, ctx->id("IS_IGNORE0_INVERTED")));
-                write_bit("IS_IGNORE1_INVERTED", bool_or_default(ci->params, ctx->id("IS_IGNORE1_INVERTED")));
+                write_bit("IS_IGNORE0_INVERTED", !bool_or_default(ci->params, ctx->id("IS_IGNORE0_INVERTED")));
+                write_bit("IS_IGNORE1_INVERTED", !bool_or_default(ci->params, ctx->id("IS_IGNORE1_INVERTED")));
                 write_bit("ZINV_CE0", !bool_or_default(ci->params, ctx->id("IS_CE0_INVERTED")));
                 write_bit("ZINV_CE1", !bool_or_default(ci->params, ctx->id("IS_CE1_INVERTED")));
                 write_bit("ZINV_S0", !bool_or_default(ci->params, ctx->id("IS_S0_INVERTED")));
