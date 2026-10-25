@@ -28,7 +28,7 @@ NEXTPNR_NAMESPACE_BEGIN
 void arch_wrap_python()
 {
     using namespace PythonConversion;
-    class_<ArchArgs>("ArchArgs");
+    class_<ArchArgs>("ArchArgs").def_readwrite("chipdb", &ArchArgs::chipdb);
 
     class_<BelId>("BelId").def_readwrite("index", &BelId::index);
 
