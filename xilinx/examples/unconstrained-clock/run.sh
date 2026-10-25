@@ -100,20 +100,13 @@ union_replay() {
     NEXTPNR_TIMING_ONLY=1 "$NEXTPNR" --chipdb "$CHIPDB" --xdc "$HERE/pins.xdc" --xdc "$HERE/$1" \
         --json "$OUT/routed.json" --no-pack --no-place --no-route --log "$OUT/$2" -q >/dev/null 2>&1
 }
-if union_replay clock-union.xdc replay-union.log; then
-    line=$(fmax_line "$OUT/replay-union.log")
-    dropped=$(grep -c 'matched no net, constraint dropped' "$OUT/replay-union.log")
-    case $line in
-        *"at 100.00 MHz"*)
-            if [ "$dropped" -eq 0 ] && grep -q "member 'no_such_net' of .* matched no net or port" "$OUT/replay-union.log"; then
-                report "PASS create_clock on a union naming one absent and one present net: $line, 0 dropped, the absent member named in the log"
-            else
-                report "FAIL create_clock on a union naming one absent and one present net: $line, $dropped dropped, $(grep -c "member 'no_such_net'" "$OUT/replay-union.log") line(s) naming the absent member"
-            fi ;;
-        *) report "FAIL create_clock on a union naming one absent and one present net: '$line'" ;;
-    esac
+union_replay clock-union.xdc replay-union.log
+rc=$?
+if [ "$rc" -ne 0 ] && grep -q "member 'no_such_net' of '{no_such_net clk}' names no net or port" "$OUT/replay-union.log" \
+        && grep -q '^ERROR: create_clock: 1 of the members' "$OUT/replay-union.log"; then
+    report "PASS create_clock on a union naming one absent and one present net is refused: rc $rc, no_such_net named"
 else
-    report "FAIL create_clock on a union naming one absent and one present net: $(grep -m1 '^ERROR' "$OUT/replay-union.log")"
+    report "FAIL create_clock on a union naming one absent and one present net is refused: rc $rc, $(grep -m1 -E '^ERROR|no_such_net' "$OUT/replay-union.log")"
 fi
 if union_replay clock-union-none.xdc replay-union-none.log; then
     line=$(fmax_line "$OUT/replay-union-none.log")

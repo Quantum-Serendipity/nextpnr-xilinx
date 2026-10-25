@@ -156,24 +156,30 @@ void Arch::parseXdc(std::istream &in)
         const std::string target_name = strip_quotes(split_name);
         auto grouped = split_to_args(str, true);
         const std::string member_list = grouped.size() >= 2 ? strip_quotes(grouped.at(1)) : target_name;
+        const std::string shown = grouped.size() >= 2 ? grouped.at(1) : target_name;
         std::vector<std::string> unresolved;
         for (auto &member : split_to_args(member_list, false)) {
-            NetInfo *maybe_net = getNetByAlias(id_if_interned(member));
+            NetInfo *maybe_net = getNetByAliasName(member);
             if (maybe_net == nullptr) {
                 std::string base = debus_zero(member);
                 if (!base.empty())
-                    maybe_net = getNetByAlias(id_if_interned(base));
+                    maybe_net = getNetByAliasName(base);
             }
             if (maybe_net == nullptr)
                 unresolved.push_back(member);
             if (maybe_net != nullptr && std::find(tgt_nets.begin(), tgt_nets.end(), maybe_net) == tgt_nets.end())
                 tgt_nets.push_back(maybe_net);
         }
-        if (!tgt_nets.empty())
+        if (!tgt_nets.empty() && !unresolved.empty()) {
             for (auto &m : unresolved)
-                log_info("%s: member '%s' of '%s' matched no net or port; the target is applied to the %d member(s) "
-                         "that did (on line %d)\n",
-                         split.front().c_str(), m.c_str(), target_name.c_str(), int(tgt_nets.size()), lineno);
+                log_warning("create_clock: member '%s' of '%s' names no net or port of this design (on line %d)\n",
+                            m.c_str(), shown.c_str(), lineno);
+            log_error("create_clock: %d of the members of '%s' name no net or port of this design while %d net(s) "
+                      "matched (on line %d); every member of a target list must name a net or one of its aliases, "
+                      "so a misspelt or stale member is refused rather than dropped from a constraint that still "
+                      "applies\n",
+                      int(unresolved.size()), shown.c_str(), int(tgt_nets.size()), lineno);
+        }
         if (tgt_nets.empty()) {
             missing_targets++;
             if (xdc_strict)
@@ -420,7 +426,7 @@ void Arch::parseXdc(std::istream &in)
         } else if (qcmd == "get_nets") {
             sel.has_nets = true;
             for (auto &p : pats) {
-                NetInfo *exact = getNetByAlias(id_if_interned(p));
+                NetInfo *exact = getNetByAliasName(p);
                 if (exact != nullptr) {
                     if (std::find(sel.nets.begin(), sel.nets.end(), exact) == sel.nets.end())
                         sel.nets.push_back(exact);
