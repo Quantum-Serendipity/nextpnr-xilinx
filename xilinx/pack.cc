@@ -1600,6 +1600,7 @@ bool Arch::pack()
         // packer.prepare_iologic();
         packer.prepare_clocking();
         packer.pack_constants();
+        packer.raise_bufg_ignore1();
         packer.pack_iologic();
         packer.pack_idelayctrl();
         packer.pack_cfg();

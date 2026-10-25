@@ -253,6 +253,8 @@ struct XC7Packer : public XilinxPacker
     void propagate_clock_constraints();
     void apply_cmt_multiplier_defaults();
     void prepare_clocking();
+    std::vector<CellInfo *> bufgs_ignoring_i1;
+    void raise_bufg_ignore1();
     void pack_plls();
     void pack_gbs();
     // Bind every pad-fed BUFIO to the one site its pad can reach; run from
