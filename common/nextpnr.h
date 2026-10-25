@@ -874,6 +874,7 @@ struct BaseCtx
     std::vector<TimingClockGroups> timing_clock_groups;
     std::vector<TimingIoDelay> timing_io_delays;
     std::vector<GeneratedClock> generated_clocks;
+    std::unordered_set<IdString> timing_latency_warned;
     bool timing_ignore_nets = false;
 
     TimingConstrObjectId timingWildcardObject();

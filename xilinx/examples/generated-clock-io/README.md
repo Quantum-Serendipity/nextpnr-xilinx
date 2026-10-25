@@ -36,6 +36,8 @@ log.
 | output min delay to a generated clock at a port | the `sd_di` hold row has a 2 ns hold term and charges `sck`'s source latency at capture |
 | input delay verdict | the `clk_i (input delay) -> clk` max-delay line is a FAIL against the 10.00 ns separation |
 | path report | the critical path report for `din_b` opens with its 10.5 ns input delay |
+| latency warning | `sck`'s source latency passes the arc-less output buffer of `sd_clk`, and the log warns which checks that makes optimistic |
+| IO buffer warning | the `din_a` input delay and the `dout` output delay each warn that the buffer delay is omitted and that setup is optimistic by it |
 | insertion warning | an input delay against a primary clock is warned as omitting that clock's insertion delay |
 | edges | `gen_edges.xdc`, which writes `div2` as `-edges {2 4 6}`, moves every `clk -> dclk` row to 5 ns |
 | edges duty | `gen_duty.xdc`, `-edges {1 2 5}` on a half-high source, derives a 20 ns clock high for a quarter of its period |
@@ -55,8 +57,11 @@ What these commands do and do not model:
   `-invert`, `-duty_cycle`, `-edge_shift`, `-combinational`, `-master_clock` and `-add` are refused.
 - A generated clock's source latency is traced through the netlist from the `-source` net to the
   target: the clock route to the first pin on the source net, then clock-to-out and combinational
-  arcs and the routes between them. A cell on that path with no timing arc, such as an output
-  buffer driving a forwarded clock's pad, is taken as zero and named in the log. Clocks without a
+  arcs and the routes between them. A cell on that path with no timing arc (an output buffer
+  driving a forwarded clock's pad, OLOGIC/ODDR, a regional clock buffer, a PLL or MMCM) is counted
+  as zero and warned: the latency is then understated, so hold from the source domain into the
+  generated one, setup from the generated domain into the source, input-delay setup and
+  output-delay hold against that clock are optimistic by the missing delay. Clocks without a
   generated clock above them keep the model they had: the route from their net's driver.
 - Clock pessimism removal for hold follows the shared part of the two clock paths through any
   generated clocks: the route both share on their common net plus the whole source latency above it.
@@ -65,8 +70,10 @@ What these commands do and do not model:
   other end sees only the route from its clock net's driver, so the pad, input buffer and clock
   buffer insertion above that net is in neither: the hold check of an input delay and the setup check
   of an output delay against a primary clock are optimistic by it, and the log says so.
-- The IO buffers have no timing arcs in this arch, so an input delay is the arrival time at the
-  input buffer's output and an output delay is the setup term at the output buffer's input.
+- The IO buffers have no timing arcs in this arch, and prjxray-db's IOB timings carry only the
+  IBUFDISABLE arc, so an input delay is the arrival time at the input buffer's output and an output
+  delay is the setup term at the output buffer's input, for every clock kind. Setup of both is
+  optimistic, and hold pessimistic, by the buffer delay, and each delay warns so.
 - An input whose buffer feeds only IO logic (ILOGIC, IDDR, IDELAY) reaches no timed endpoint, and is
   warned as timing nothing.
 - A path that starts at an input delay or ends at an output delay is reported as its own `Max delay`

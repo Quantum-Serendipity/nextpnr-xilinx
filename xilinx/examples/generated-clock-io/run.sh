@@ -181,6 +181,19 @@ else
     report "FAIL insertion warning: no warning that din_a's hold check omits the insertion delay of clk_i"
 fi
 
+if grep -q "create_generated_clock 'sck' (.*): the source latency of net 'sd_clk' passes .*, which has no timing arc here and is counted as zero, so the latency is understated by that cell delay: hold checks from the source clock's domain into this one, setup checks from this domain into the source's" "$OUT/full.log"; then
+    report "PASS latency warning: the forwarded clock's arc-less output buffer is a warning naming the checks it makes optimistic"
+else
+    report "FAIL latency warning: no warning that sck's source latency counts its output buffer as zero"
+fi
+
+if grep -q "set_input_delay on port 'din_a' (.*): the input buffer has no timing arc in this arch, so the path starts at .* without the buffer's own delay, and its setup check is optimistic" "$OUT/full.log" &&
+        grep -q "set_output_delay on port 'dout' (.*): the output buffer has no timing arc in this arch, so the path ends at .* without the buffer's own delay, and its setup check is optimistic" "$OUT/full.log"; then
+    report "PASS IO buffer warning: each input and output delay names the buffer delay it omits and the direction"
+else
+    report "FAIL IO buffer warning: no per-port warning for the arc-less input or output buffer"
+fi
+
 if pnr edges --xdc "$HERE/base.xdc" --xdc "$HERE/gen_edges.xdc" --xdc "$HERE/io.xdc" --json "$OUT/top.json" \
         --fasm "$OUT/edges.fasm" --timing-allow-fail; then
     pair_arm edges clk dclk 5

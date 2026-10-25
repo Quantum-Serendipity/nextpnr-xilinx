@@ -317,6 +317,11 @@ struct Timing
                      d.edge == FALLING_EDGE ? "negedge" : "posedge", r.clk->name.c_str(ctx), list.c_str(),
                      lat.generated ? "the generated clock's source latency is added at the pad"
                                    : "the clock's latency at the pad is taken as zero");
+            log_warning("%s on port '%s' (%s): the %s buffer has no timing arc in this arch, so the path %s %s "
+                        "without the buffer's own delay, and its setup check is optimistic and its hold check "
+                        "pessimistic by that delay\n",
+                        what, d.port.c_str(ctx), d.source.c_str(), d.input ? "input" : "output",
+                        d.input ? "starts at" : "ends at", list.c_str());
             if (!lat.generated)
                 log_warning("%s on port '%s' (%s): clock '%s' is not a generated clock, and the insertion delay "
                             "from its own source to net '%s' (pad, input buffer, clock buffer) is not modelled, so "
@@ -840,6 +845,10 @@ struct Timing
             return none;
         ClockLatency lat;
         const GeneratedClock *gc = nullptr;
+        const char *understated =
+                "hold checks from the source clock's domain into this one, setup checks from this domain into the "
+                "source's, and the setup of an input delay and the hold of an output delay referenced to this clock "
+                "are optimistic by that delay";
         for (auto &g : ctx->generated_clocks)
             if (g.target == net->name && net->clkconstr != nullptr && net->clkconstr->name == g.name) {
                 gc = &g;
@@ -853,9 +862,7 @@ struct Timing
             if (source != nullptr)
                 st = gen_walk(net, source, 0, seen);
             if (!st.found) {
-                if (update || crit_path == nullptr)
-                    ;
-                else
+                if (ctx->timing_latency_warned.insert(net->name).second)
                     log_warning("create_generated_clock '%s' (%s): no path from source net '%s' to target net '%s' "
                                 "was found through the netlist, so its source latency is taken as zero\n",
                                 gc->name.c_str(), gc->origin.c_str(), gc->source.c_str(ctx), net->name.c_str(ctx));
@@ -865,10 +872,12 @@ struct Timing
                 lat.anchor_cell = st.anchor_cell;
                 lat.anchor_port = st.anchor_port;
                 lat.anchor_net = st.anchor_net;
-                if (st.approximate && crit_path != nullptr && !update)
-                    log_info("create_generated_clock '%s': the source latency path passes %s, whose arc is not "
-                             "modelled and is taken as zero\n",
-                             gc->name.c_str(), st.approx_cells.c_str());
+                if (st.approximate && ctx->timing_latency_warned.insert(net->name).second)
+                    log_warning("create_generated_clock '%s' (%s): the source latency of net '%s' passes %s, which has "
+                                "no timing arc here and is counted as zero, so the latency is understated by that "
+                                "cell delay: %s\n",
+                                gc->name.c_str(), gc->origin.c_str(), net->name.c_str(ctx), st.approx_cells.c_str(),
+                                understated);
             }
         } else {
             auto srcs = ctx->getClockSources(net, false);
@@ -886,6 +895,12 @@ struct Timing
                             lat.anchor_cell = drv;
                             lat.anchor_port = port.first;
                             lat.anchor_net = srcs.front();
+                            if (!has_arc && ctx->timing_latency_warned.insert(net->name).second)
+                                log_warning("clock net '%s' takes the generated-clock source latency of net '%s' "
+                                            "through %s '%s', which has no timing arc here and is counted as zero, "
+                                            "so the latency is understated by that cell delay: %s\n",
+                                            net->name.c_str(ctx), srcs.front()->name.c_str(ctx), drv->type.c_str(ctx),
+                                            drv->name.c_str(ctx), understated);
                             break;
                         }
                 }
