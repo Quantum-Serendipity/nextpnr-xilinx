@@ -1398,25 +1398,6 @@ void Arch::fixupPlacement()
                             getBelName(ci->bel).c_str(this));
             }
         }
-        std::vector<CellInfo *> invalid_after;
-        for (auto &cp : cells) {
-            CellInfo *ci = cp.second.get();
-            if (ci->bel == BelId() || ci->attrs.count(id_BEL))
-                continue;
-            if (usp_bel_hard_unavail(ci->bel) || (roi_active() && is_rm_cell(ci) && bel_outside_roi(ci->bel)))
-                invalid_after.push_back(ci);
-        }
-        if (!invalid_after.empty()) {
-            std::sort(invalid_after.begin(), invalid_after.end(),
-                      [&](const CellInfo *a, const CellInfo *b) { return a->name.str(this) < b->name.str(this); });
-            for (size_t i = 0; i < invalid_after.size() && i < 20; i++)
-                log_warning("post-place check: '%s' (%s) is on a forbidden bel %s\n", invalid_after[i]->name.c_str(this),
-                            invalid_after[i]->type.c_str(this), nameOfBel(invalid_after[i]->bel));
-            log_error("post-place check: %d cell(s) without a BEL attribute sit on a blacklisted or unusable bel, or "
-                      "an RM cell sits outside the partition rectangle, after the repair pass (the first 20 are "
-                      "listed above); the repair pass skips CARRY4 trees\n",
-                      int(invalid_after.size()));
-        }
     }
     auto snapshot_orig_ports = [&](CellInfo *c, std::unordered_map<IdString, std::string> &out) {
         if (c == nullptr)
@@ -1795,6 +1776,41 @@ void Arch::fixupPlacement()
     // BRAM cascade repair: before anything downstream commits to a cascade pair
     // being unroutable (see fixupBramCascades() below).
     fixupBramCascades();
+    {
+        std::vector<CellInfo *> invalid_after;
+        int checked = 0, in_carry_tree = 0, stamped = 0;
+        for (auto &cp : cells) {
+            CellInfo *ci = cp.second.get();
+            if (ci->bel == BelId())
+                continue;
+            ++checked;
+            const CellInfo *root = ci;
+            while (root->constr_parent != nullptr)
+                root = root->constr_parent;
+            if (root->type == id_CARRY4)
+                ++in_carry_tree;
+            if (ci->attrs.count(id_BEL))
+                ++stamped;
+            if (!isValidBelForCell(ci, ci->bel))
+                invalid_after.push_back(ci);
+        }
+        if (!invalid_after.empty()) {
+            std::sort(invalid_after.begin(), invalid_after.end(),
+                      [&](const CellInfo *a, const CellInfo *b) { return a->name.str(this) < b->name.str(this); });
+            for (size_t i = 0; i < invalid_after.size() && i < 20; i++)
+                log_warning("post-place check: '%s' (%s, strength %d%s) is not valid at its bel %s\n",
+                            invalid_after[i]->name.c_str(this), invalid_after[i]->type.c_str(this),
+                            int(invalid_after[i]->belStrength),
+                            invalid_after[i]->attrs.count(id_BEL) ? ", BEL attribute" : "",
+                            nameOfBel(invalid_after[i]->bel));
+            log_error("post-place check: %d placed cell(s) fail isValidBelForCell at their own bel after the repair "
+                      "pass and the LUT pin fixup (the first 20 are listed above)\n",
+                      int(invalid_after.size()));
+        }
+        log_info("post-place check: all %d placed cell(s) pass isValidBelForCell at their own bel, %d of them in "
+                 "carry trees and %d with a BEL attribute\n",
+                 checked, in_carry_tree, stamped);
+    }
 }
 
 // The RAMB36E1 data cascade is a dedicated route: a CASCADEOUT{A,B} bel pin
