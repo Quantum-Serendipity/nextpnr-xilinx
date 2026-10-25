@@ -21,14 +21,14 @@ default).
 | `mmcm_d1_p0`, `mmcm_d1_p45`, `mmcm_d1_p180` | at divide 1, `NO_COUNT` with `PHASE_MUX[2:0]` `3'b000`, `3'b001`, `3'b100`; `POWER_REG` is `16'h9900` only at 45 degrees, where `PHASE_MUX` is not a multiple of 4 |
 | `pll_d1_p90` | the PLL writer at divide 1: `NO_COUNT`, `PHASE_MUX[2:0] = 3'b010`, `DELAY_TIME[5:0] = 6'b000000` |
 | `mmcm_mult_default`, `pll_mult_default` | an unset `CLKFBOUT_MULT_F`/`CLKFBOUT_MULT` is 5: `CLKFBOUT` high 2, low 3, no `NO_COUNT`, and the log's VCO is five times the input; for the PLL, `LKTABLE` and `TABLE` are the multiply-5 rows (`40'h73BE8FA401`, `10'h1EC`) |
-| `dsp_pattern` | `PATTERN=48'h000000000001` and `MASK=48'hC00000000002` are written bit for bit, `MASK[47:46]` included |
+| `dsp_pattern` | `PATTERN=48'h000000000001` and `MASK=48'hC00000000002` are written bit for bit, `MASK[47:46]` included, and no `SEL_PATTERN` line |
 | `dsp_default` | no `PATTERN` line, and `MASK[47:0]` is the primitive default `48'h3FFFFFFFFFFF` |
 | `dsp_autoreset_match` | `AUTORESET_PATDET="RESET_MATCH"` writes `AUTORESET_PATDET_RESET` alone |
 | `dsp_autoreset_not_match` | `AUTORESET_PATDET="RESET_NOT_MATCH"` writes both `AUTORESET_PATDET_RESET` and `AUTORESET_PATDET_RESET_NOT_MATCH`, as prjxray's 100-dsp-mskpat fuzzer tags them |
 | `dsp_areg3`, `dsp_areg0_acascreg1`, `dsp_breg1_bcascreg2` | refused, naming the illegal `AREG`/`ACASCREG` or `BREG`/`BCASCREG` pair |
 | `dsp_simd_bogus` | refused, naming `USE_SIMD` and its legal values |
 | `dsp_simd_four12` | `USE_SIMD_FOUR12` and `USE_SIMD_FOUR12_TWO24` |
-| `dsp_sel_pattern_c` | refused with a message that says `SEL_PATTERN=C` is legal and names the missing prjxray-db change |
+| `dsp_sel_pattern_c` | `SEL_PATTERN="C"` writes `DSP48.DSP_0.SEL_PATTERN_C`, and that feature has a row in the `segbits_dsp_l.db` or `segbits_dsp_r.db` of `$PRJXRAY_DB/artix7` (default: the vendored `xilinx/external/prjxray-db`) |
 | `bram_sdp` | no `EN_ECC` line |
 | `bram_ecc` | `RAMB36.EN_ECC_READ` and `RAMB36.EN_ECC_WRITE` |
 | `bram_w1` | `RAMB36.BRAM36_READ_WIDTH_A_1` written once |
