@@ -73,6 +73,7 @@ enum PartitionKeepoutVerdict
 int partition_keepout_rect(const PartitionRouteCfg &cfg, Loc l);
 PartitionKeepoutLicence partition_keepout_licence(const Context *ctx, const PartitionRouteCfg &cfg, const NetInfo *ni);
 PartitionKeepoutVerdict partition_keepout_verdict(const PartitionKeepoutLicence &lic, PipId pip, int kr);
+int partition_keepout_self_test(Context *ctx);
 
 struct Router2Cfg : PartitionRouteCfg
 {
