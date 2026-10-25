@@ -43,10 +43,11 @@ struct ClockEvent
     IdString clock;
     ClockEdge edge;
     int tag = 0;
+    bool io = false;
 
     bool operator==(const ClockEvent &other) const
     {
-        return clock == other.clock && edge == other.edge && tag == other.tag;
+        return clock == other.clock && edge == other.edge && tag == other.tag && io == other.io;
     }
 };
 
@@ -108,6 +109,8 @@ template <> struct hash<NEXTPNR_NAMESPACE_PREFIX ClockEvent>
         boost::hash_combine(seed, hash<int>()(int(obj.edge)));
         if (obj.tag != 0)
             boost::hash_combine(seed, hash<int>()(obj.tag));
+        if (obj.io)
+            boost::hash_combine(seed, hash<int>()(1));
         return seed;
     }
 };
@@ -173,6 +176,155 @@ struct Timing
     std::ofstream hold_export;
     std::vector<std::pair<delay_t, std::string>> hold_rows;
     std::unordered_map<std::string, size_t> hold_row_index;
+
+    struct IoStart
+    {
+        IdString clock;
+        ClockEdge edge;
+        delay_t max_arrival, min_arrival;
+        const CellInfo *exc_cell;
+    };
+    struct IoEnd
+    {
+        IdString clock;
+        ClockEdge edge;
+        delay_t setup;
+        bool has_hold;
+        delay_t hold;
+        const CellInfo *exc_cell;
+    };
+    std::unordered_map<const NetInfo *, std::vector<IoStart>> io_starts;
+    std::unordered_map<const PortInfo *, std::vector<IoEnd>> io_ends;
+
+    const std::vector<IoEnd> *io_end_at(const PortRef &usr) const
+    {
+        if (io_ends.empty())
+            return nullptr;
+        auto port = usr.cell->ports.find(usr.port);
+        if (port == usr.cell->ports.end())
+            return nullptr;
+        auto fnd = io_ends.find(&port->second);
+        return fnd == io_ends.end() ? nullptr : &fnd->second;
+    }
+
+    bool reaches_endpoint(const NetInfo *start) const
+    {
+        std::vector<const NetInfo *> queue{start};
+        std::unordered_set<const NetInfo *> seen{start};
+        while (!queue.empty()) {
+            const NetInfo *net = queue.back();
+            queue.pop_back();
+            for (auto &usr : net->users) {
+                if (io_end_at(usr) != nullptr)
+                    return true;
+                int clocks = 0;
+                TimingPortClass cls = ctx->getPortTimingClass(usr.cell, usr.port, clocks);
+                if (cls == TMG_REGISTER_INPUT || cls == TMG_ENDPOINT)
+                    return true;
+                if (cls != TMG_COMB_INPUT)
+                    continue;
+                for (auto &port : usr.cell->ports) {
+                    if (port.second.type != PORT_OUT || port.second.net == nullptr)
+                        continue;
+                    DelayInfo comb;
+                    if (!ctx->getCellDelay(usr.cell, usr.port, port.first, comb))
+                        continue;
+                    if (seen.insert(port.second.net).second)
+                        queue.push_back(port.second.net);
+                }
+            }
+        }
+        return false;
+    }
+
+    void resolve_io_delays()
+    {
+        struct Resolved
+        {
+            TimingIoDelay *delay;
+            const NetInfo *pad, *clk;
+            std::vector<std::string> pins;
+            std::vector<const NetInfo *> starts;
+        };
+        std::vector<Resolved> resolved;
+        for (auto &d : ctx->timing_io_delays) {
+            NetInfo *pad = ctx->getNetByAlias(d.port);
+            NetInfo *clk = ctx->getNetByAlias(d.clock);
+            Resolved r{&d, pad, clk, {}, {}};
+            auto pad_cell = ctx->cells.find(d.port);
+            auto exc_cell = [&](const CellInfo *buffer, IdString attr) {
+                if (attr == IdString() || buffer->attrs.count(attr) || pad_cell == ctx->cells.end())
+                    return buffer;
+                return (const CellInfo *)pad_cell->second.get();
+            };
+            if (pad != nullptr && clk != nullptr) {
+                if (d.input) {
+                    for (auto &usr : pad->users)
+                        for (auto &port : usr.cell->ports) {
+                            if (port.second.type != PORT_OUT || port.second.net == nullptr || port.second.net == pad)
+                                continue;
+                            io_starts[port.second.net].push_back(IoStart{
+                                    clk->name, d.edge, d.max_delay,
+                                    d.has_min ? d.min_delay : std::numeric_limits<delay_t>::max() / 4,
+                                    exc_cell(usr.cell, texc_from_attr)});
+                            r.pins.push_back(usr.cell->name.str(ctx) + "." + port.first.str(ctx));
+                            r.starts.push_back(port.second.net);
+                        }
+                } else if (pad->driver.cell != nullptr) {
+                    for (auto &port : pad->driver.cell->ports) {
+                        if (port.second.type != PORT_IN || port.second.net == nullptr ||
+                            ctx->isConstantNet(port.second.net))
+                            continue;
+                        io_ends[&port.second].push_back(IoEnd{clk->name, d.edge, d.max_delay, d.has_min,
+                                                              -d.min_delay,
+                                                              exc_cell(pad->driver.cell, texc_to_attr)});
+                        r.pins.push_back(pad->driver.cell->name.str(ctx) + "." + port.first.str(ctx));
+                    }
+                }
+            }
+            resolved.push_back(std::move(r));
+        }
+        for (auto &r : resolved) {
+            TimingIoDelay &d = *r.delay;
+            if (d.reported)
+                continue;
+            d.reported = true;
+            const char *what = d.input ? "set_input_delay" : "set_output_delay";
+            if (r.pins.empty()) {
+                log_warning("%s on port '%s' (%s) is not applied: %s\n", what, d.port.c_str(ctx), d.source.c_str(),
+                            r.pad == nullptr  ? "no net carries the port's name"
+                            : r.clk == nullptr ? "its clock net no longer exists"
+                            : d.input          ? "nothing buffers the pad into the fabric"
+                                               : "nothing but a constant drives the pad");
+                continue;
+            }
+            std::string list;
+            for (auto &p : r.pins)
+                list += (list.empty() ? "" : ", ") + p;
+            if (d.input && std::none_of(r.starts.begin(), r.starts.end(),
+                                        [&](const NetInfo *n) { return reaches_endpoint(n); })) {
+                log_warning("%s on port '%s' (%s) times nothing: no timed endpoint is reachable from %s (an input "
+                            "that feeds only IO logic, a clock buffer or an untimed output has no setup check)\n",
+                            what, d.port.c_str(ctx), d.source.c_str(), list.c_str());
+                continue;
+            }
+            const ClockLatency &lat = clock_latency(r.clk);
+            log_info("%s on port '%s': %s, relative to %s %s, timed at %s; %s\n", what, d.port.c_str(ctx),
+                     (d.has_min ? stringf("max %.3f ns, min %.3f ns", ctx->getDelayNS(d.max_delay),
+                                          ctx->getDelayNS(d.min_delay))
+                                : stringf("max %.3f ns", ctx->getDelayNS(d.max_delay)))
+                             .c_str(),
+                     d.edge == FALLING_EDGE ? "negedge" : "posedge", r.clk->name.c_str(ctx), list.c_str(),
+                     lat.generated ? "the generated clock's source latency is added at the pad"
+                                   : "the clock's latency at the pad is taken as zero");
+            if (!lat.generated)
+                log_warning("%s on port '%s' (%s): clock '%s' is not a generated clock, and the insertion delay "
+                            "from its own source to net '%s' (pad, input buffer, clock buffer) is not modelled, so "
+                            "%s check of this delay is optimistic by that insertion\n",
+                            what, d.port.c_str(ctx), d.source.c_str(), r.clk->name.c_str(ctx),
+                            r.clk->name.c_str(ctx), d.input ? "the hold" : "the setup");
+        }
+    }
 
     struct ExceptionResult
     {
@@ -533,6 +685,12 @@ struct Timing
 
     delay_t clock_pin_delay(const CellInfo *cell, IdString clock_port)
     {
+        const NetInfo *clk = get_net_or_empty(cell, clock_port);
+        return clock_route_delay(cell, clock_port) + clock_latency(clk).max;
+    }
+
+    delay_t clock_route_delay(const CellInfo *cell, IdString clock_port)
+    {
         delay_t d = 0;
         if (!net_delays)
             return d;
@@ -549,6 +707,192 @@ struct Timing
         }
         auto pin = fnd->second.find(std::make_pair(cell, clock_port));
         return pin == fnd->second.end() ? d : pin->second;
+    }
+
+    struct ClockLatency
+    {
+        bool generated = false;
+        delay_t max = 0, min = 0;
+        const CellInfo *anchor_cell = nullptr;
+        IdString anchor_port;
+        const NetInfo *anchor_net = nullptr;
+    };
+    std::unordered_map<const NetInfo *, ClockLatency> clock_latencies;
+    std::unordered_set<const NetInfo *> latency_visiting;
+
+    struct GenStep
+    {
+        bool found = false, approximate = false;
+        delay_t max = 0, min = 0;
+        const CellInfo *anchor_cell = nullptr;
+        IdString anchor_port;
+        const NetInfo *anchor_net = nullptr;
+        std::string approx_cells;
+    };
+
+    bool on_source(const NetInfo *net, const NetInfo *source) const
+    {
+        const NetInfo *cur = net;
+        for (int depth = 0; cur != nullptr && depth < 16; depth++) {
+            if (cur == source)
+                return true;
+            auto srcs = ctx->getClockSources(cur, false);
+            if (srcs.size() != 1)
+                return false;
+            cur = srcs.front();
+        }
+        return false;
+    }
+
+    GenStep gen_pin_step(const CellInfo *cell, IdString port, const NetInfo *source, int depth,
+                         std::unordered_set<const NetInfo *> &seen)
+    {
+        GenStep st;
+        const NetInfo *net = get_net_or_empty(cell, port);
+        if (net == nullptr || ctx->isConstantNet(net))
+            return st;
+        if (on_source(net, source)) {
+            st.found = true;
+            st.anchor_cell = cell;
+            st.anchor_port = port;
+            st.anchor_net = net;
+            return st;
+        }
+        st = gen_walk(net, source, depth + 1, seen);
+        if (st.found && net_delays && !net->wires.empty())
+            for (auto &usr : net->users)
+                if (usr.cell == cell && usr.port == port) {
+                    st.max += ctx->getNetinfoRouteDelay(net, usr);
+                    st.min += ctx->getNetinfoRouteDelay(net, usr, true);
+                    break;
+                }
+        return st;
+    }
+
+    GenStep gen_walk(const NetInfo *net, const NetInfo *source, int depth, std::unordered_set<const NetInfo *> &seen)
+    {
+        GenStep best;
+        const CellInfo *drv = net->driver.cell;
+        if (drv == nullptr || depth > 32 || !seen.insert(net).second)
+            return best;
+        IdString out = net->driver.port;
+        auto consider = [&](GenStep st, delay_t add_max, delay_t add_min) {
+            if (!st.found)
+                return;
+            st.max += add_max;
+            st.min += add_min;
+            if (!best.found || st.max > best.max) {
+                delay_t keep_min = best.found ? std::min(best.min, st.min) : st.min;
+                bool approx = best.approximate || st.approximate;
+                std::string cells = best.approx_cells;
+                if (!st.approx_cells.empty() && cells.find(st.approx_cells) == std::string::npos)
+                    cells += (cells.empty() ? "" : ", ") + st.approx_cells;
+                best = st;
+                best.min = keep_min;
+                best.approximate = approx;
+                best.approx_cells = cells;
+            } else {
+                best.min = std::min(best.min, st.min);
+            }
+        };
+        int clocks = 0;
+        TimingPortClass cls = ctx->getPortTimingClass(drv, out, clocks);
+        if (cls == TMG_REGISTER_OUTPUT || (cls == TMG_COMB_OUTPUT && clocks > 0))
+            for (int i = 0; i < clocks; i++) {
+                TimingClockingInfo ci = ctx->getPortClockingInfo(drv, out, i);
+                consider(gen_pin_step(drv, ci.clock_port, source, depth, seen), ci.clockToQ.maxDelay(),
+                         ci.clockToQ.minDelay());
+            }
+        for (auto &port : drv->ports) {
+            if (port.second.type != PORT_IN || port.second.net == nullptr || port.second.net == net)
+                continue;
+            DelayInfo comb;
+            if (!ctx->getCellDelay(drv, port.first, out, comb))
+                continue;
+            consider(gen_pin_step(drv, port.first, source, depth, seen), comb.maxDelay(), comb.minDelay());
+        }
+        if (!best.found)
+            for (auto &port : drv->ports) {
+                if (port.second.type != PORT_IN || port.second.net == nullptr || port.second.net == net)
+                    continue;
+                GenStep st = gen_pin_step(drv, port.first, source, depth, seen);
+                if (!st.found)
+                    continue;
+                st.approximate = true;
+                std::string here = drv->type.str(ctx) + " '" + drv->name.str(ctx) + "'";
+                if (st.approx_cells.find(here) == std::string::npos)
+                    st.approx_cells = here + (st.approx_cells.empty() ? "" : ", " + st.approx_cells);
+                consider(st, 0, 0);
+            }
+        seen.erase(net);
+        return best;
+    }
+
+    const ClockLatency &clock_latency(const NetInfo *net)
+    {
+        static const ClockLatency none;
+        if (net == nullptr || ctx->generated_clocks.empty())
+            return none;
+        auto fnd = clock_latencies.find(net);
+        if (fnd != clock_latencies.end())
+            return fnd->second;
+        if (!latency_visiting.insert(net).second)
+            return none;
+        ClockLatency lat;
+        const GeneratedClock *gc = nullptr;
+        for (auto &g : ctx->generated_clocks)
+            if (g.target == net->name && net->clkconstr != nullptr && net->clkconstr->name == g.name) {
+                gc = &g;
+                break;
+            }
+        if (gc != nullptr) {
+            lat.generated = true;
+            const NetInfo *source = ctx->getNetByAlias(gc->source);
+            std::unordered_set<const NetInfo *> seen;
+            GenStep st;
+            if (source != nullptr)
+                st = gen_walk(net, source, 0, seen);
+            if (!st.found) {
+                if (update || crit_path == nullptr)
+                    ;
+                else
+                    log_warning("create_generated_clock '%s' (%s): no path from source net '%s' to target net '%s' "
+                                "was found through the netlist, so its source latency is taken as zero\n",
+                                gc->name.c_str(), gc->origin.c_str(), gc->source.c_str(ctx), net->name.c_str(ctx));
+            } else {
+                lat.max = clock_pin_delay(st.anchor_cell, st.anchor_port) + st.max;
+                lat.min = clock_pin_delay_min(st.anchor_cell, st.anchor_port) + st.min;
+                lat.anchor_cell = st.anchor_cell;
+                lat.anchor_port = st.anchor_port;
+                lat.anchor_net = st.anchor_net;
+                if (st.approximate && crit_path != nullptr && !update)
+                    log_info("create_generated_clock '%s': the source latency path passes %s, whose arc is not "
+                             "modelled and is taken as zero\n",
+                             gc->name.c_str(), st.approx_cells.c_str());
+            }
+        } else {
+            auto srcs = ctx->getClockSources(net, false);
+            if (srcs.size() == 1 && net->driver.cell != nullptr) {
+                const ClockLatency &up = clock_latency(srcs.front());
+                if (up.generated) {
+                    const CellInfo *drv = net->driver.cell;
+                    for (auto &port : drv->ports)
+                        if (port.second.type == PORT_IN && port.second.net == srcs.front()) {
+                            DelayInfo arc;
+                            bool has_arc = ctx->getCellDelay(drv, port.first, net->driver.port, arc);
+                            lat.generated = true;
+                            lat.max = clock_pin_delay(drv, port.first) + (has_arc ? arc.maxDelay() : 0);
+                            lat.min = clock_pin_delay_min(drv, port.first) + (has_arc ? arc.minDelay() : 0);
+                            lat.anchor_cell = drv;
+                            lat.anchor_port = port.first;
+                            lat.anchor_net = srcs.front();
+                            break;
+                        }
+                }
+            }
+        }
+        latency_visiting.erase(net);
+        return clock_latencies.emplace(net, lat).first->second;
     }
 
     static constexpr float clock_network_min_scale = 0.9f;
@@ -636,8 +980,51 @@ struct Timing
         return path;
     }
 
+    struct ClockPin
+    {
+        const CellInfo *cell;
+        IdString port;
+        const NetInfo *net;
+    };
+
+    std::vector<ClockPin> clock_chain(const CellInfo *cell, IdString port, const NetInfo *net)
+    {
+        std::vector<ClockPin> chain;
+        if (cell != nullptr)
+            net = get_net_or_empty(cell, port);
+        if (net == nullptr)
+            return chain;
+        chain.push_back(ClockPin{cell, port, net});
+        for (int depth = 0; depth < 16; depth++) {
+            const ClockLatency &lat = clock_latency(chain.back().net);
+            if (!lat.generated || lat.anchor_cell == nullptr || lat.anchor_net == nullptr)
+                break;
+            chain.push_back(ClockPin{lat.anchor_cell, lat.anchor_port, lat.anchor_net});
+        }
+        return chain;
+    }
+
     delay_t clock_pessimism_removal(const CellInfo *launch_cell, IdString launch_port, const CellInfo *capture_cell,
-                                    IdString capture_port)
+                                    IdString capture_port, const NetInfo *launch_net = nullptr,
+                                    const NetInfo *capture_net = nullptr)
+    {
+        if ((launch_cell == nullptr && launch_net == nullptr) || (capture_cell == nullptr && capture_net == nullptr))
+            return 0;
+        if (ctx->generated_clocks.empty())
+            return route_pessimism(launch_cell, launch_port, capture_cell, capture_port);
+        auto lc = clock_chain(launch_cell, launch_port, launch_net);
+        auto cc = clock_chain(capture_cell, capture_port, capture_net);
+        for (auto &l : lc)
+            for (auto &c : cc)
+                if (l.net == c.net) {
+                    const ClockLatency &shared = clock_latency(l.net);
+                    return route_pessimism(l.cell, l.port, c.cell, c.port) + (shared.max - shared.min);
+                }
+        return 0;
+    }
+
+    delay_t route_pessimism(const CellInfo *launch_cell, IdString launch_port, const CellInfo *capture_cell,
+                            IdString capture_port)
     {
         if (launch_cell == nullptr || capture_cell == nullptr)
             return 0;
@@ -659,7 +1046,8 @@ struct Timing
     delay_t clock_pin_delay_min(const CellInfo *cell, IdString clock_port)
     {
         const auto &p = clock_path(cell, clock_port);
-        return p.empty() ? clock_pin_delay(cell, clock_port) : p.front().min_up;
+        return (p.empty() ? clock_route_delay(cell, clock_port) : p.front().min_up) +
+               clock_latency(get_net_or_empty(cell, clock_port)).min;
     }
 
     delay_t clock_period_of(IdString clk, delay_t clk_period) const
@@ -701,6 +1089,7 @@ struct Timing
         delay_t max_data_arrival = 0;
         const CellInfo *min_launch_cell = nullptr;
         IdString min_launch_port;
+        const NetInfo *min_launch_net = nullptr;
         std::vector<delay_t> min_required;
         std::unordered_map<ClockEvent, delay_t> arrival_time;
     };
@@ -720,6 +1109,8 @@ struct Timing
             ignore_attr = ctx->id("NEXTPNR_TIMING_IGNORE");
         if (getenv("NEXTPNR_ASYNC_GROUPS"))
             log_error("NEXTPNR_ASYNC_GROUPS is no longer read; declare the crossing with set_clock_groups in an XDC\n");
+        if (!ctx->timing_io_delays.empty())
+            resolve_io_delays();
         if (export_setup) {
             if (const char *sf = getenv("NEXTPNR_SETUP_EXPORT")) {
                 setup_export.open(sf);
@@ -766,6 +1157,25 @@ struct Timing
             }
 
             for (auto o : output_ports) {
+                if (!io_starts.empty()) {
+                    auto io = io_starts.find(o->net);
+                    if (io != io_starts.end()) {
+                        topographical_order.emplace_back(o->net);
+                        for (auto &st : io->second) {
+                            const ClockLatency &lat = clock_latency(ctx->nets.at(st.clock).get());
+                            auto &sd = net_data[o->net][ClockEvent{st.clock, st.edge, start_tag(st.exc_cell), true}];
+                            sd = TimingData{st.max_arrival + lat.max};
+                            sd.min_arrival = st.min_arrival < std::numeric_limits<delay_t>::max() / 8
+                                                     ? st.min_arrival + lat.min
+                                                     : st.min_arrival;
+                            sd.launch_delay = lat.max;
+                            sd.min_launch_delay = lat.min;
+                            sd.min_launch_net = ctx->nets.at(st.clock).get();
+                            sd.max_data_arrival = st.max_arrival;
+                        }
+                        continue;
+                    }
+                }
                 int clocks = 0;
                 TimingPortClass portClass = ctx->getPortTimingClass(cell.second.get(), o->name, clocks);
                 // If output port is influenced by a clock (e.g. FF output) then add it to the ordering as a timing
@@ -1135,6 +1545,7 @@ struct Timing
                                 data.min_launch_delay = nd.min_launch_delay;
                                 data.min_launch_cell = nd.min_launch_cell;
                                 data.min_launch_port = nd.min_launch_port;
+                                data.min_launch_net = nd.min_launch_net;
                             }
                             if (!budget_override) { // Do not increment path length if budget overriden since it doesn't
                                 // require a share of the slack
@@ -1170,7 +1581,8 @@ struct Timing
                     auto budget_override = ctx->getBudgetOverride(net, usr, net_delay);
                     int port_clocks;
                     TimingPortClass portClass = ctx->getPortTimingClass(usr.cell, usr.port, port_clocks);
-                    if (portClass == TMG_REGISTER_INPUT || portClass == TMG_ENDPOINT) {
+                    const std::vector<IoEnd> *io_end = io_end_at(usr);
+                    if (io_end != nullptr || portClass == TMG_REGISTER_INPUT || portClass == TMG_ENDPOINT) {
                         auto process_endpoint = [&](IdString clksig, ClockEdge edge, delay_t setup,
                                                     const ExceptionResult &exc, delay_t capture_delay) {
                             if (exc.skip_setup) {
@@ -1237,7 +1649,7 @@ struct Timing
                                     setup_rows.at(fnd->second) = std::make_pair(path_budget, row.str());
                                 }
                             }
-                            ClockEvent dest_ev{clksig, edge, startdomain.first.tag};
+                            ClockEvent dest_ev{clksig, edge, startdomain.first.tag, io_end != nullptr};
                             ClockPair clockPair{startdomain.first, dest_ev};
                             nd.arrival_time[dest_ev] = std::max(nd.arrival_time[dest_ev], endpoint_arrival);
 
@@ -1268,7 +1680,61 @@ struct Timing
                                 }
                             }
                         };
-                        if (portClass == TMG_REGISTER_INPUT) {
+                        auto export_hold = [&](delay_t hold_slack, delay_t hold_term, delay_t hold_req, delay_t capture,
+                                               IdString clksig, ClockEdge edge, const ExceptionResult &exc,
+                                               delay_t cppr) {
+                            std::ostringstream row;
+                            row << usr.cell->name.c_str(ctx) << '\t' << usr.port.c_str(ctx) << '\t'
+                                << ctx->getDelayNS(hold_slack) << '\t' << net->name.c_str(ctx) << '\t'
+                                << ctx->getDelayNS(net_delay_min) << '\t' << ctx->getDelayNS(nd.min_arrival) << '\t'
+                                << ctx->getDelayNS(hold_term) << '\t' << ctx->getDelayNS(hold_req) << '\t'
+                                << ctx->getDelayNS(capture) << '\t' << startdomain.first.clock.c_str(ctx) << '\t'
+                                << clksig.c_str(ctx) << '\t'
+                                << ((nd.estimated || (net_delays && net->wires.empty())) ? "estimate" : "routed")
+                                << '\t' << ctx->getDelayNS(nd.min_launch_delay) << '\t'
+                                << hold_source(exc, base_requirement_source(startdomain.first, clksig, edge)) << '\t'
+                                << ctx->getDelayNS(cppr) << '\n';
+                            std::string key = std::string(usr.cell->name.c_str(ctx)) + '\t' + usr.port.c_str(ctx) +
+                                              '\t' + startdomain.first.clock.c_str(ctx) + '\t' +
+                                              std::to_string(int(startdomain.first.edge)) + '\t' + clksig.c_str(ctx) +
+                                              '\t' + std::to_string(int(edge));
+                            auto fnd = hold_row_index.find(key);
+                            if (fnd == hold_row_index.end()) {
+                                hold_row_index.emplace(key, hold_rows.size());
+                                hold_rows.emplace_back(hold_slack, row.str());
+                            } else if (hold_slack < hold_rows.at(fnd->second).first) {
+                                hold_rows.at(fnd->second) = std::make_pair(hold_slack, row.str());
+                            }
+                        };
+                        if (io_end != nullptr) {
+                            for (auto &e : *io_end) {
+                                if (startdomain.first.clock == async_clock)
+                                    break;
+                                const NetInfo *eclk = ctx->nets.at(e.clock).get();
+                                const delay_t capture = clock_latency(eclk).max;
+                                ExceptionResult exc = match_exceptions(startdomain.first, e.clock, e.exc_cell, usr.port);
+                                process_endpoint(e.clock, e.edge, e.setup, exc, capture);
+                                if (exc.skip_hold && crit_path && !update)
+                                    ++exc_hold_skipped;
+                                if (!exc.skip_hold && e.has_hold &&
+                                    nd.min_arrival < (std::numeric_limits<delay_t>::max() / 8)) {
+                                    delay_t hold_req;
+                                    setup_requirement(startdomain.first, e.clock, e.edge, clk_period, &hold_req);
+                                    apply_multicycle(exc, startdomain.first.clock, e.clock, clk_period, nullptr,
+                                                     &hold_req);
+                                    const delay_t cppr =
+                                            clock_pessimism_removal(nd.min_launch_cell, nd.min_launch_port, nullptr,
+                                                                    IdString(), nd.min_launch_net, eclk);
+                                    delay_t hold_slack =
+                                            nd.min_arrival + net_delay_min - e.hold - hold_req - capture + cppr;
+                                    worst_hold_slack = std::min(worst_hold_slack, hold_slack);
+                                    if (crit_path)
+                                        hold_endpoints.push_back({usr.cell->name, usr.port, hold_slack});
+                                    if (hold_export.is_open())
+                                        export_hold(hold_slack, e.hold, hold_req, capture, e.clock, e.edge, exc, cppr);
+                                }
+                            }
+                        } else if (portClass == TMG_REGISTER_INPUT) {
                             for (int i = 0; i < port_clocks; i++) {
                                 TimingClockingInfo clkInfo = ctx->getPortClockingInfo(usr.cell, usr.port, i);
                                 const NetInfo *clknet = get_net_or_empty(usr.cell, clkInfo.clock_port);
@@ -1285,43 +1751,17 @@ struct Timing
                                                       clk_period, &hold_req);
                                     apply_multicycle(exc, startdomain.first.clock, clksig, clk_period, nullptr,
                                                      &hold_req);
-                                    const delay_t cppr = clock_pessimism_removal(
-                                            nd.min_launch_cell, nd.min_launch_port, usr.cell, clkInfo.clock_port);
+                                    const delay_t cppr =
+                                            clock_pessimism_removal(nd.min_launch_cell, nd.min_launch_port, usr.cell,
+                                                                    clkInfo.clock_port, nd.min_launch_net);
                                     delay_t hold_slack = nd.min_arrival + net_delay_min - clkInfo.hold.maxDelay() -
                                                          hold_req - capture + cppr;
                                     worst_hold_slack = std::min(worst_hold_slack, hold_slack);
                                     if (crit_path)
                                         hold_endpoints.push_back({usr.cell->name, usr.port, hold_slack});
-                                    if (hold_export.is_open()) {
-                                        std::ostringstream row;
-                                        row << usr.cell->name.c_str(ctx) << '\t' << usr.port.c_str(ctx) << '\t'
-                                            << ctx->getDelayNS(hold_slack) << '\t' << net->name.c_str(ctx) << '\t'
-                                            << ctx->getDelayNS(net_delay_min) << '\t'
-                                            << ctx->getDelayNS(nd.min_arrival) << '\t'
-                                            << ctx->getDelayNS(clkInfo.hold.maxDelay()) << '\t'
-                                            << ctx->getDelayNS(hold_req) << '\t' << ctx->getDelayNS(capture) << '\t'
-                                            << startdomain.first.clock.c_str(ctx) << '\t' << clksig.c_str(ctx)
-                                            << '\t'
-                                            << ((nd.estimated || (net_delays && net->wires.empty())) ? "estimate"
-                                                                                                     : "routed")
-                                            << '\t' << ctx->getDelayNS(nd.min_launch_delay) << '\t'
-                                            << hold_source(exc, base_requirement_source(
-                                                                        startdomain.first, clksig,
-                                                                        clknet ? clkInfo.edge : RISING_EDGE))
-                                            << '\t' << ctx->getDelayNS(cppr) << '\n';
-                                        std::string key = std::string(usr.cell->name.c_str(ctx)) + '\t' +
-                                                          usr.port.c_str(ctx) + '\t' +
-                                                          startdomain.first.clock.c_str(ctx) + '\t' +
-                                                          std::to_string(int(startdomain.first.edge)) + '\t' +
-                                                          clksig.c_str(ctx) + '\t' + std::to_string(int(clkInfo.edge));
-                                        auto fnd = hold_row_index.find(key);
-                                        if (fnd == hold_row_index.end()) {
-                                            hold_row_index.emplace(key, hold_rows.size());
-                                            hold_rows.emplace_back(hold_slack, row.str());
-                                        } else if (hold_slack < hold_rows.at(fnd->second).first) {
-                                            hold_rows.at(fnd->second) = std::make_pair(hold_slack, row.str());
-                                        }
-                                    }
+                                    if (hold_export.is_open())
+                                        export_hold(hold_slack, clkInfo.hold.maxDelay(), hold_req, capture, clksig,
+                                                    clknet ? clkInfo.edge : RISING_EDGE, exc, cppr);
                                 }
                             }
                         } else {
@@ -1456,10 +1896,11 @@ struct Timing
                             continue;
                         int port_clocks;
                         TimingPortClass portClass = ctx->getPortTimingClass(usr.cell, usr.port, port_clocks);
-                        if (portClass == TMG_REGISTER_INPUT || portClass == TMG_ENDPOINT) {
+                        const std::vector<IoEnd> *io_end = io_end_at(usr);
+                        if (io_end != nullptr || portClass == TMG_REGISTER_INPUT || portClass == TMG_ENDPOINT) {
                             auto process_endpoint = [&](IdString clksig, ClockEdge edge, delay_t setup,
-                                                        delay_t capture) {
-                                ExceptionResult exc = match_exceptions(startdomain.first, clksig, usr.cell, usr.port);
+                                                        delay_t capture, const CellInfo *endcell) {
+                                ExceptionResult exc = match_exceptions(startdomain.first, clksig, endcell, usr.port);
                                 if (exc.skip_setup)
                                     return;
                                 delay_t period = setup_requirement(startdomain.first, clksig, edge, clk_period);
@@ -1472,17 +1913,22 @@ struct Timing
                                                      nullptr);
                                 nd.min_required.at(i) = std::min(period - setup, nd.min_required.at(i));
                             };
-                            if (portClass == TMG_REGISTER_INPUT) {
+                            if (io_end != nullptr) {
+                                for (auto &e : *io_end) {
+                                    const delay_t capture = clock_latency(ctx->nets.at(e.clock).get()).max;
+                                    process_endpoint(e.clock, e.edge, e.setup - capture, capture, e.exc_cell);
+                                }
+                            } else if (portClass == TMG_REGISTER_INPUT) {
                                 for (int j = 0; j < port_clocks; j++) {
                                     TimingClockingInfo clkInfo = ctx->getPortClockingInfo(usr.cell, usr.port, j);
                                     const NetInfo *clknet = get_net_or_empty(usr.cell, clkInfo.clock_port);
                                     IdString clksig = clknet ? clknet->name : async_clock;
                                     const delay_t capture = clock_pin_delay(usr.cell, clkInfo.clock_port);
                                     process_endpoint(clksig, clknet ? clkInfo.edge : RISING_EDGE,
-                                                     clkInfo.setup.maxDelay() - capture, capture);
+                                                     clkInfo.setup.maxDelay() - capture, capture, usr.cell);
                                 }
                             } else {
-                                process_endpoint(async_clock, RISING_EDGE, 0, 0);
+                                process_endpoint(async_clock, RISING_EDGE, 0, 0, usr.cell);
                             }
                         }
                         net_min_required = std::min(net_min_required, nd.min_required.at(i) - net_delay);
@@ -1715,7 +2161,7 @@ std::map<std::string, std::pair<double, double>> compute_clock_fmax(Context *ctx
         for (auto &path : crit_paths) {
             const ClockEvent &a = path.first.start;
             const ClockEvent &b = path.first.end;
-            if (a.clock != b.clock || a.clock == ctx->id("$async$"))
+            if (a.clock != b.clock || a.clock == ctx->id("$async$") || a.io || b.io)
                 continue;
             double Fmax = path.second.mcp * 1000 * edge_fraction(ctx, a, b) / ctx->getDelayNS(path.second.path_delay);
             if (!clock_fmax.count(a.clock) || Fmax < clock_fmax.at(a.clock))
@@ -1843,12 +2289,14 @@ void timing_analysis(Context *ctx, bool print_histogram, bool print_fmax, bool p
 {
     if (const char *af = getenv("NEXTPNR_ARC_EXPORT"))
         export_cell_arcs(ctx, af);
-    auto format_event = [ctx](const ClockEvent &e, int field_width = 0) {
+    auto format_event = [ctx](const ClockEvent &e, bool is_end, int field_width = 0) {
         std::string value;
         if (e.clock == ctx->id("$async$"))
             value = std::string("<async>");
         else
             value = (e.edge == FALLING_EDGE ? std::string("negedge ") : std::string("posedge ")) + e.clock.str(ctx);
+        if (e.io)
+            value += is_end ? " (output delay)" : " (input delay)";
         if (int(value.length()) < field_width)
             value.insert(value.length(), field_width - int(value.length()), ' ');
         return value;
@@ -1908,7 +2356,7 @@ void timing_analysis(Context *ctx, bool print_histogram, bool print_fmax, bool p
         for (auto path : crit_paths) {
             const ClockEvent &a = path.first.start;
             const ClockEvent &b = path.first.end;
-            if (a.clock != b.clock || a.clock == ctx->id("$async$"))
+            if (a.clock != b.clock || a.clock == ctx->id("$async$") || a.io || b.io)
                 continue;
             double Fmax;
             empty_clocks.erase(a.clock);
@@ -1925,7 +2373,7 @@ void timing_analysis(Context *ctx, bool print_histogram, bool print_fmax, bool p
         for (auto &path : crit_paths) {
             const ClockEvent &a = path.first.start;
             const ClockEvent &b = path.first.end;
-            if (a.clock == b.clock && a.clock != ctx->id("$async$"))
+            if (a.clock == b.clock && a.clock != ctx->id("$async$") && !a.io && !b.io)
                 continue;
             xclock_paths.push_back(path.first);
         }
@@ -1947,9 +2395,11 @@ void timing_analysis(Context *ctx, bool print_histogram, bool print_fmax, bool p
                 return true;
             if (a.end.clock.str(ctx) > b.end.clock.str(ctx))
                 return false;
-            if (a.end.edge < b.end.edge)
-                return true;
-            return false;
+            if (a.end.edge != b.end.edge)
+                return a.end.edge < b.end.edge;
+            if (a.start.io != b.start.io)
+                return b.start.io;
+            return !a.end.io && b.end.io;
         });
     }
 
@@ -1959,6 +2409,26 @@ void timing_analysis(Context *ctx, bool print_histogram, bool print_fmax, bool p
             auto &front = crit_path.front();
             auto &front_port = front->cell->ports.at(front->port);
             auto &front_driver = front_port.net->driver;
+            if (clocks.start.io) {
+                auto io_start = timing.io_starts.find(front_port.net);
+                if (io_start != timing.io_starts.end())
+                    for (auto &st : io_start->second)
+                        if (st.clock == clocks.start.clock && st.edge == clocks.start.edge) {
+                            delay_t lat = timing.clock_latency(ctx->nets.at(st.clock).get()).max;
+                            if (lat != 0) {
+                                total += lat;
+                                route_total += lat;
+                                log_info("%4.1f %4.1f  Launch clock latency %s\n", ctx->getDelayNS(lat),
+                                         ctx->getDelayNS(total), st.clock.c_str(ctx));
+                            }
+                            total += st.max_arrival;
+                            logic_total += st.max_arrival;
+                            log_info("%4.1f %4.1f  Input delay %s.%s\n", ctx->getDelayNS(st.max_arrival),
+                                     ctx->getDelayNS(total), front_driver.cell->name.c_str(ctx),
+                                     front_driver.port.c_str(ctx));
+                            break;
+                        }
+            }
 
             int port_clocks = 0;
             auto portClass = ctx->getPortTimingClass(front_driver.cell, front_driver.port, port_clocks);
@@ -2049,7 +2519,24 @@ void timing_analysis(Context *ctx, bool print_histogram, bool print_fmax, bool p
             }
             int clockCount = 0;
             auto sinkClass = ctx->getPortTimingClass(crit_path.back()->cell, crit_path.back()->port, clockCount);
-            if (sinkClass == TMG_REGISTER_INPUT && clockCount > 0) {
+            const auto *io_end = clocks.end.io ? timing.io_end_at(*crit_path.back()) : nullptr;
+            if (io_end != nullptr) {
+                for (auto &e : *io_end)
+                    if (e.clock == clocks.end.clock && e.edge == clocks.end.edge) {
+                        total += e.setup;
+                        logic_total += e.setup;
+                        log_info("%4.1f %4.1f  Output delay %s.%s\n", ctx->getDelayNS(e.setup), ctx->getDelayNS(total),
+                                 crit_path.back()->cell->name.c_str(ctx), crit_path.back()->port.c_str(ctx));
+                        delay_t lat = timing.clock_latency(ctx->nets.at(e.clock).get()).max;
+                        if (lat != 0) {
+                            total -= lat;
+                            route_total -= lat;
+                            log_info("%4.1f %4.1f  Capture clock latency %s\n", -ctx->getDelayNS(lat),
+                                     ctx->getDelayNS(total), e.clock.c_str(ctx));
+                        }
+                        break;
+                    }
+            } else if (sinkClass == TMG_REGISTER_INPUT && clockCount > 0) {
                 auto sinkClockInfo = ctx->getPortClockingInfo(crit_path.back()->cell, crit_path.back()->port, 0);
                 delay_t setup = sinkClockInfo.setup.maxDelay();
                 total += setup;
@@ -2083,8 +2570,8 @@ void timing_analysis(Context *ctx, bool print_histogram, bool print_fmax, bool p
 
         for (auto &xclock : xclock_paths) {
             log_break();
-            std::string start = format_event(xclock.start);
-            std::string end = format_event(xclock.end);
+            std::string start = format_event(xclock.start, false);
+            std::string end = format_event(xclock.end, true);
             log_info("Critical path report for cross-domain path '%s' -> '%s':\n", start.c_str(), end.c_str());
             auto &crit_path = crit_paths.at(xclock).ports;
             print_path_report(xclock, crit_path);
@@ -2156,20 +2643,27 @@ void timing_analysis(Context *ctx, bool print_histogram, bool print_fmax, bool p
 
         int start_field_width = 0, end_field_width = 0;
         for (auto &xclock : xclock_paths) {
-            start_field_width = std::max((int)format_event(xclock.start).length(), start_field_width);
-            end_field_width = std::max((int)format_event(xclock.end).length(), end_field_width);
+            start_field_width = std::max((int)format_event(xclock.start, false).length(), start_field_width);
+            end_field_width = std::max((int)format_event(xclock.end, true).length(), end_field_width);
         }
 
         for (auto &xclock : xclock_paths) {
             const ClockEvent &a = xclock.start;
             const ClockEvent &b = xclock.end;
             auto &path = crit_paths.at(xclock);
-            auto ev_a = format_event(a, start_field_width), ev_b = format_event(b, end_field_width);
+            auto ev_a = format_event(a, false, start_field_width), ev_b = format_event(b, true, end_field_width);
             delay_t sep, hold_sep;
             IdString source;
             std::string msg;
             bool passed = path.path_delay <= path.path_period;
-            if (timing.related_requirement(a.clock, a.edge, b.clock, b.edge, sep, hold_sep, &source)) {
+            if (a.clock == b.clock && (a.io || b.io) && a.clock != ctx->id("$async$")) {
+                std::string what = path.by_exception    ? "requirement set by a timing exception"
+                                   : (a.edge == b.edge) ? "period of the clock"
+                                                        : "half-cycle of the clock";
+                msg = stringf("Max delay %s -> %s: %0.02f ns (%s against a %0.02f ns %s)\n", ev_a.c_str(),
+                              ev_b.c_str(), ctx->getDelayNS(path.path_delay), passed ? "PASS" : "FAIL",
+                              ctx->getDelayNS(path.path_period), what.c_str());
+            } else if (timing.related_requirement(a.clock, a.edge, b.clock, b.edge, sep, hold_sep, &source)) {
                 std::string what = path.by_exception ? "requirement set by a timing exception" : "edge separation";
                 msg = stringf("Max delay %s -> %s: %0.02f ns (%s against a %0.02f ns %s; related through '%s')\n",
                               ev_a.c_str(), ev_b.c_str(), ctx->getDelayNS(path.path_delay), passed ? "PASS" : "FAIL",

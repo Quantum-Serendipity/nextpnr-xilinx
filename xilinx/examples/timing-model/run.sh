@@ -132,7 +132,7 @@ lenient_arm() {
     report "FAIL $name: refused without --xdc-strict: $(grep -m1 '^ERROR' "$OUT/$name.log")"
     return 1
 }
-strict_arm strict_unsupported unsupported "unsupported XDC command 'set_input_delay'"
+strict_arm strict_unsupported unsupported "unsupported XDC command 'set_clock_uncertainty'"
 lenient_arm lenient_unsupported unsupported
 strict_arm strict_virtual virtual "a virtual clock has no target"
 strict_arm strict_waveform waveform_bad "-waveform '{0}' is not two edge times"

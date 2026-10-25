@@ -17,6 +17,8 @@
  *
  */
 
+#include <cmath>
+#include <cstring>
 #include <functional>
 #include <numeric>
 #include "log.h"
@@ -236,6 +238,9 @@ void Arch::parseXdc(std::istream &in)
             if (ni->clkconstr != nullptr && !ni->clkconstr->name.empty() && glob_match(ni->clkconstr->name, pat))
                 return true;
         }
+        for (auto &gc : generated_clocks)
+            if (glob_match(gc.name, pat) || glob_match(gc.target.str(this), pat))
+                return true;
         return false;
     };
 
@@ -437,12 +442,24 @@ void Arch::parseXdc(std::istream &in)
         }
     };
 
+    int refused = 0;
+    auto refuse_at = [&](const std::string &where, const std::string &what, const std::string &why) {
+        if (xdc_strict)
+            xdc_dropped.push_back(
+                    stringf("%s: %s: %s (constraint not applied)", where.c_str(), what.c_str(), why.c_str()));
+        else {
+            ++refused;
+            log_warning("%s: %s, constraint not applied (%s)\n", what.c_str(), why.c_str(), where.c_str());
+        }
+    };
     auto refuse = [&](const std::string &what, const std::string &why) {
         if (xdc_strict)
             xdc_dropped.push_back(stringf("%s line %d: %s: %s (constraint not applied)", xdc_file.c_str(), lineno,
                                           what.c_str(), why.c_str()));
-        else
+        else {
+            ++refused;
             log_warning("%s: %s, constraint not applied (on line %d)\n", what.c_str(), why.c_str(), lineno);
+        }
     };
 
     auto stamp = [&](CellInfo *ci, const char *attr, const std::string &entry) {
@@ -634,6 +651,418 @@ void Arch::parseXdc(std::istream &in)
         timing_clock_groups.push_back(grp);
     };
 
+    auto parse_number = [](const std::string &str, double &out) {
+        try {
+            size_t used = 0;
+            out = std::stod(str, &used);
+            return used == str.size() && std::isfinite(out);
+        } catch (std::exception &) {
+            return false;
+        }
+    };
+
+    auto parse_count = [](const std::string &str, int64_t &out) {
+        if (str.empty() || str.size() > 9 || !std::all_of(str.begin(), str.end(), ::isdigit))
+            return false;
+        out = std::stoll(str);
+        return out > 0;
+    };
+
+    auto is_port = [&](IdString name) {
+        if (ports.count(name))
+            return true;
+        auto pad = cells.find(name);
+        return pad != cells.end() && pad->second->type == id_PAD && getNetByAlias(name) != nullptr;
+    };
+
+    auto port_type = [&](IdString name) {
+        auto fnd = ports.find(name);
+        if (fnd != ports.end())
+            return fnd->second.type;
+        const NetInfo *pn = getNetByAlias(name);
+        const CellInfo *pad = cells.at(name).get();
+        bool out = pn->driver.cell != nullptr && pn->driver.cell != pad;
+        bool in = std::any_of(pn->users.begin(), pn->users.end(), [&](const PortRef &u) { return u.cell != pad; });
+        return out && in ? PORT_INOUT : out ? PORT_OUT : PORT_IN;
+    };
+
+    auto object_net = [&](const std::string &arg, NetInfo *&out, std::string &err) {
+        out = nullptr;
+        if (arg.size() < 2 || arg.front() != '[' || arg.back() != ']') {
+            err = "'" + arg + "' is not an object query";
+            return false;
+        }
+        std::vector<std::string> toks = split_to_args(arg.substr(1, arg.size() - 2), true);
+        if (toks.empty()) {
+            err = "empty object query";
+            return false;
+        }
+        const std::string q = toks.front();
+        if (q != "get_ports" && q != "get_nets" && q != "get_pins") {
+            err = "'" + q + "' is not read here (get_ports, get_nets or get_pins)";
+            return false;
+        }
+        std::vector<std::string> pats;
+        for (size_t i = 1; i < toks.size(); i++) {
+            if (toks.at(i) == "-quiet")
+                continue;
+            if (!toks.at(i).empty() && toks.at(i).front() == '-') {
+                err = "unsupported option '" + toks.at(i) + "' to " + q;
+                return false;
+            }
+            for (auto &p : expand_list(toks.at(i)))
+                pats.push_back(p);
+        }
+        if (pats.size() != 1) {
+            err = q + " must name exactly one object";
+            return false;
+        }
+        const std::string &p = pats.front();
+        if (q == "get_pins") {
+            size_t slash = p.find_last_of('/');
+            if (slash == std::string::npos || slash == 0 || slash + 1 == p.size()) {
+                err = "get_pins pattern '" + p + "' has no <cell>/<pin> separator";
+                return false;
+            }
+            std::string cname = p.substr(0, slash), pname = p.substr(slash + 1);
+            std::vector<CellInfo *> found;
+            for (auto &c : cells)
+                for (auto &n : cell_names(c.second.get()))
+                    if (name_matches(n, cname, false)) {
+                        add_cell(found, c.second.get());
+                        break;
+                    }
+            if (found.size() != 1) {
+                err = "get_pins '" + p + "' matched " + std::to_string(found.size()) + " cells, not one";
+                return false;
+            }
+            auto port = found.front()->ports.find(id_if_interned(pname));
+            if (port == found.front()->ports.end() || port->second.net == nullptr) {
+                err = "pin '" + p + "' does not exist or is unconnected";
+                return false;
+            }
+            out = port->second.net;
+            return true;
+        }
+        std::string name = p;
+        if (q == "get_ports" && !is_port(id_if_interned(name)) && !debus_zero(name).empty() &&
+            is_port(id_if_interned(debus_zero(name))))
+            name = debus_zero(name);
+        if (q == "get_ports" && !is_port(id_if_interned(name))) {
+            err = "no port named '" + p + "'";
+            return false;
+        }
+        out = getNetByAlias(id_if_interned(name));
+        if (out == nullptr && q == "get_nets" && !debus_zero(name).empty())
+            out = getNetByAlias(id_if_interned(debus_zero(name)));
+        if (out == nullptr) {
+            err = "no net named '" + p + "'";
+            return false;
+        }
+        return true;
+    };
+
+    auto drives_clock = [&](const NetInfo *ni) {
+        if (ni->clkconstr != nullptr)
+            return true;
+        if (ni->driver.cell == nullptr)
+            return false;
+        const std::string &dt = ni->driver.cell->type.str(this);
+        for (const char *pre : {"BUFG", "BUFH", "BUFR", "BUFIO", "BUFMR"})
+            if (dt.compare(0, std::strlen(pre), pre) == 0)
+                return true;
+        return dt.find("PLL") != std::string::npos || dt.find("MMCM") != std::string::npos;
+    };
+
+    auto resolve_clock = [&](const std::string &arg, IdString &out, std::string &err) {
+        std::string pat;
+        if (!arg.empty() && arg.front() == '[') {
+            Selection sel;
+            select(arg, sel);
+            if (!sel.ok) {
+                err = sel.error;
+                return false;
+            }
+            if (sel.has_cells || sel.has_nets || sel.clocks.size() != 1) {
+                err = "-clock takes exactly one clock";
+                return false;
+            }
+            pat = sel.clocks.front();
+        } else {
+            std::vector<std::string> l = expand_list(arg);
+            if (l.size() != 1) {
+                err = "-clock takes exactly one clock";
+                return false;
+            }
+            pat = l.front();
+        }
+        std::vector<IdString> found;
+        auto add = [&](IdString n) {
+            if (std::find(found.begin(), found.end(), n) == found.end())
+                found.push_back(n);
+        };
+        for (auto &gc : generated_clocks)
+            if (glob_match(gc.name, pat))
+                add(gc.target);
+        for (auto &n : nets)
+            if (n.second->clkconstr != nullptr && !n.second->clkconstr->name.empty() &&
+                glob_match(n.second->clkconstr->name, pat))
+                add(n.first);
+        if (found.empty()) {
+            for (auto &n : nets)
+                if (drives_clock(n.second.get()) && glob_match(n.first.str(this), pat))
+                    add(n.first);
+            for (auto &gc : generated_clocks)
+                if (glob_match(gc.target.str(this), pat))
+                    add(gc.target);
+        }
+        if (found.size() != 1) {
+            err = found.empty() ? "clock '" + pat + "' matched no clock"
+                                : "clock '" + pat + "' matched " + std::to_string(found.size()) + " clocks";
+            return false;
+        }
+        out = found.front();
+        return true;
+    };
+
+    auto parse_generated_clock = [&](const std::vector<std::string> &args) {
+        const std::string &what = args.front();
+        GeneratedClock gc;
+        gc.origin = stringf("%s line %d", xdc_file.c_str(), lineno);
+        std::string source_arg, target_arg;
+        int64_t divide = 0, multiply = 0;
+        std::vector<int64_t> edges;
+        bool got_edges = false;
+        for (size_t i = 1; i < args.size(); i++) {
+            const std::string &a = args.at(i);
+            bool valued = a == "-name" || a == "-source" || a == "-divide_by" || a == "-multiply_by" || a == "-edges";
+            if (valued && i + 1 >= args.size())
+                return refuse(what, a + " has no value");
+            if (a == "-name")
+                gc.name = strip_quotes(args.at(++i));
+            else if (a == "-source")
+                source_arg = args.at(++i);
+            else if (a == "-divide_by" || a == "-multiply_by") {
+                int64_t &v = a == "-divide_by" ? divide : multiply;
+                if (!parse_count(strip_quotes(args.at(++i)), v))
+                    return refuse(what, a + " '" + args.at(i) + "' is not a positive integer");
+            } else if (a == "-edges") {
+                got_edges = true;
+                for (auto &t : expand_list(args.at(++i))) {
+                    int64_t e;
+                    if (!parse_count(t, e))
+                        return refuse(what, "-edges entry '" + t + "' is not a positive integer");
+                    edges.push_back(e);
+                }
+            } else if (a == "-quiet")
+                ;
+            else if (!a.empty() && a.front() == '-')
+                return refuse(what, "unsupported argument '" + a + "'");
+            else if (target_arg.empty())
+                target_arg = a;
+            else
+                return refuse(what, "more than one target object");
+        }
+        if (source_arg.empty())
+            return refuse(what, "no -source");
+        if (target_arg.empty())
+            return refuse(what, "no target object");
+        if (got_edges && (divide != 0 || multiply != 0))
+            return refuse(what, "-edges is not read together with -divide_by or -multiply_by");
+        if (got_edges) {
+            if (edges.size() != 3 || edges.at(0) >= edges.at(1) || edges.at(1) >= edges.at(2))
+                return refuse(what, "-edges must list three increasing source edges");
+            gc.edges = edges;
+        } else if (divide == 0 && multiply == 0) {
+            return refuse(what, "no -divide_by, -multiply_by or -edges");
+        } else if (divide > 1 && multiply > 1) {
+            return refuse(what, "-divide_by and -multiply_by together are not read; the duty cycle of the "
+                                "combination is not established here");
+        } else if (divide > 1) {
+            gc.edges = {1, divide + 1, 2 * divide + 1};
+        } else {
+            gc.multiply = multiply == 0 ? 1 : multiply;
+        }
+        NetInfo *src = nullptr, *tgt = nullptr;
+        std::string err;
+        if (!object_net(source_arg, src, err))
+            return refuse(what, "-source: " + err);
+        if (!object_net(target_arg, tgt, err)) {
+            if (err.compare(0, 3, "no ") == 0) {
+                missing_targets++;
+                if (xdc_strict)
+                    xdc_dropped.push_back(stringf("%s line %d: %s: %s", xdc_file.c_str(), lineno, what.c_str(),
+                                                  err.c_str()));
+                else if (getCtx()->verbose)
+                    log_info("%s: %s (on line %d) - this target is ignored\n", what.c_str(), err.c_str(), lineno);
+                return;
+            }
+            return refuse(what, "target: " + err);
+        }
+        if (src == tgt)
+            return refuse(what, "the target is the source net '" + src->name.str(this) + "'");
+        if (tgt->clkconstr != nullptr)
+            return refuse(what, "net '" + tgt->name.str(this) + "' already carries a create_clock");
+        if (gc.name.empty())
+            gc.name = tgt->name.str(this);
+        for (auto &other : generated_clocks) {
+            if (other.name == gc.name)
+                return refuse(what, "a generated clock named '" + gc.name + "' already exists (" + other.origin + ")");
+            if (other.target == tgt->name)
+                return refuse(what, "net '" + tgt->name.str(this) + "' is already the target of generated clock '" +
+                                            other.name + "'");
+        }
+        for (auto &n : nets)
+            if (n.second->clkconstr != nullptr && n.second->clkconstr->name == gc.name)
+                return refuse(what, "a create_clock is already named '" + gc.name + "'");
+        gc.source = src->name;
+        gc.target = tgt->name;
+        log_info("%s: '%s' on net '%s' from net '%s', %s (on line %d)\n", what.c_str(), gc.name.c_str(),
+                 tgt->name.c_str(this), src->name.c_str(this),
+                 gc.edges.empty() ? stringf("multiplied by %lld", (long long)gc.multiply).c_str()
+                                  : stringf("edges {%lld %lld %lld} of the source", (long long)gc.edges.at(0),
+                                            (long long)gc.edges.at(1), (long long)gc.edges.at(2))
+                                            .c_str(),
+                 lineno);
+        generated_clocks.push_back(gc);
+    };
+
+    auto parse_io_delay = [&](const std::vector<std::string> &args, bool input) {
+        const std::string &what = args.front();
+        std::string clock_arg, port_arg;
+        bool got_value = false, want_max = false, want_min = false, fall = false, add = false;
+        double ns = 0;
+        for (size_t i = 1; i < args.size(); i++) {
+            const std::string &a = args.at(i);
+            double v;
+            if (a == "-clock") {
+                if (i + 1 >= args.size())
+                    return refuse(what, "-clock has no value");
+                clock_arg = args.at(++i);
+            } else if (a == "-max")
+                want_max = true;
+            else if (a == "-min")
+                want_min = true;
+            else if (a == "-clock_fall")
+                fall = true;
+            else if (a == "-add_delay")
+                add = true;
+            else if (a == "-quiet")
+                ;
+            else if (parse_number(a, v)) {
+                if (got_value)
+                    return refuse(what, "more than one delay value");
+                ns = v;
+                got_value = true;
+            } else if (!a.empty() && a.front() == '[') {
+                if (!port_arg.empty())
+                    return refuse(what, "more than one target object");
+                port_arg = a;
+            } else
+                return refuse(what, "unsupported argument '" + a + "'");
+        }
+        if (clock_arg.empty())
+            return refuse(what, "no -clock (a delay relative to no clock is not read)");
+        if (!got_value)
+            return refuse(what, "no delay value");
+        if (port_arg.empty())
+            return refuse(what, "no target port");
+        std::vector<std::string> toks = split_to_args(port_arg.substr(1, port_arg.size() - 2), true);
+        if (toks.empty() || toks.front() != "get_ports")
+            return refuse(what, "the target must be get_ports");
+        std::vector<std::string> pats;
+        for (size_t i = 1; i < toks.size(); i++) {
+            if (toks.at(i) == "-quiet")
+                continue;
+            if (!toks.at(i).empty() && toks.at(i).front() == '-')
+                return refuse(what, "unsupported option '" + toks.at(i) + "' to get_ports");
+            for (auto &p : expand_list(toks.at(i)))
+                pats.push_back(p);
+        }
+        if (pats.empty())
+            return refuse(what, "get_ports with no pattern");
+        IdString clock;
+        std::string err;
+        if (!resolve_clock(clock_arg, clock, err))
+            return refuse(what, "-clock: " + err);
+        std::vector<IdString> matched;
+        for (auto &p : pats) {
+            size_t before = matched.size();
+            auto consider = [&](IdString name) {
+                const std::string pn = name.str(this);
+                if (!glob_match(pn, p) && !(!debus_zero(p).empty() && glob_match(pn, debus_zero(p))))
+                    return;
+                if (std::find(matched.begin(), matched.end(), name) == matched.end())
+                    matched.push_back(name);
+            };
+            for (auto &port : ports)
+                consider(port.first);
+            for (auto &c : cells)
+                if (c.second->type == id_PAD && is_port(c.first))
+                    consider(c.first);
+            if (matched.size() == before) {
+                missing_targets++;
+                if (xdc_strict)
+                    xdc_dropped.push_back(stringf("%s line %d: %s: no port named '%s'", xdc_file.c_str(), lineno,
+                                                  what.c_str(), p.c_str()));
+                else if (getCtx()->verbose)
+                    log_info("%s: no port named '%s' (on line %d) - this target is ignored\n", what.c_str(), p.c_str(),
+                             lineno);
+            }
+        }
+        std::sort(matched.begin(), matched.end(),
+                  [&](IdString a, IdString b) { return a.str(this) < b.str(this); });
+        for (auto pn : matched) {
+            PortType t = port_type(pn);
+            if ((input && t == PORT_OUT) || (!input && t == PORT_IN))
+                return refuse(what, "port '" + pn.str(this) + "' is an " + (t == PORT_OUT ? "output" : "input"));
+        }
+        bool set_max = want_max || !want_min, set_min = want_min || !want_max;
+        ClockEdge edge = fall ? FALLING_EDGE : RISING_EDGE;
+        delay_t value = getDelayFromNS(ns).maxDelay();
+        std::string where = stringf("%s line %d", xdc_file.c_str(), lineno);
+        for (auto pn : matched) {
+            auto &v = timing_io_delays;
+            if (!add) {
+                for (auto &d : v)
+                    if (d.port == pn && d.input == input && (d.clock != clock || d.edge != edge)) {
+                        d.has_max = d.has_max && !set_max;
+                        d.has_min = d.has_min && !set_min;
+                    }
+                v.erase(std::remove_if(v.begin(), v.end(),
+                                       [&](const TimingIoDelay &d) {
+                                           return d.port == pn && d.input == input && !d.has_max && !d.has_min;
+                                       }),
+                        v.end());
+            }
+            auto fnd = std::find_if(v.begin(), v.end(), [&](const TimingIoDelay &d) {
+                return d.port == pn && d.input == input && d.clock == clock && d.edge == edge;
+            });
+            if (fnd == v.end()) {
+                TimingIoDelay d;
+                d.port = pn;
+                d.input = input;
+                d.clock = clock;
+                d.edge = edge;
+                v.push_back(d);
+                fnd = std::prev(v.end());
+            }
+            if (set_max) {
+                fnd->max_delay = (add && fnd->has_max) ? std::max(fnd->max_delay, value) : value;
+                fnd->has_max = true;
+            }
+            if (set_min) {
+                fnd->min_delay = (add && fnd->has_min) ? std::min(fnd->min_delay, value) : value;
+                fnd->has_min = true;
+            }
+            fnd->source = where;
+        }
+        if (!matched.empty())
+            log_info("%s: %s%s%.3f ns on %d port(s) relative to %s of clock net '%s' (on line %d)\n", what.c_str(),
+                     set_max ? "max " : "", set_min ? "min " : "", ns, int(matched.size()),
+                     fall ? "the falling edge" : "the rising edge", clock.c_str(this), lineno);
+    };
+
     while (std::getline(in, line)) {
         ++lineno;
         // Trim comments, from # until end of the line
@@ -787,6 +1216,10 @@ void Arch::parseXdc(std::istream &in)
                                                               : TimingException::FALSE_PATH);
         } else if (cmd == "set_clock_groups") {
             parse_clock_groups(arguments);
+        } else if (cmd == "create_generated_clock") {
+            parse_generated_clock(arguments);
+        } else if (cmd == "set_input_delay" || cmd == "set_output_delay") {
+            parse_io_delay(arguments, cmd == "set_input_delay");
         } else if (xdc_strict) {
             xdc_dropped.push_back(
                     stringf("%s line %d: unsupported XDC command '%s' (not applied)", xdc_file.c_str(), lineno, cmd.c_str()));
@@ -796,6 +1229,19 @@ void Arch::parseXdc(std::istream &in)
     }
     if (!isempty(linebuf))
         log_error("unexpected end of XDC file\n");
+    for (auto it = timing_io_delays.begin(); it != timing_io_delays.end();) {
+        if (it->has_max) {
+            ++it;
+            continue;
+        }
+        refuse_at(it->source, it->input ? "set_input_delay" : "set_output_delay",
+                  "port '" + it->port.str(this) + "' has a -min delay and no -max delay for the same clock edge");
+        it = timing_io_delays.erase(it);
+    }
+    if (refused > 0)
+        log_warning("%d XDC constraint(s) in '%s' were refused and not applied, each warned about above "
+                    "(--xdc-strict makes this an error)\n",
+                    refused, xdc_file.c_str());
     if (missing_targets > 0 && !xdc_strict)
         log_warning("%d XDC constraint target(s) reference ports or nets that are not in this design and were "
                     "ignored, counting any create_clock target warned about above (a board-level XDC normally "
