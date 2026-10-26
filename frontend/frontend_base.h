@@ -431,8 +431,14 @@ template <typename FrontendType> struct GenericFrontend
                         if (name == "NEXTPNR_NET_ALIASES") {
                             std::istringstream names(value.is_string ? value.as_string() : value.to_string());
                             std::string alias;
-                            while (names >> alias)
-                                ctx->written_net_aliases.emplace(alias, ni->name);
+                            while (names >> alias) {
+                                auto bound = ctx->written_net_aliases.emplace(alias, ni->name);
+                                if (!bound.second && bound.first->second != ni->name)
+                                    log_error("NEXTPNR_NET_ALIASES names '%s' as an alias of both net '%s' and net "
+                                              "'%s'; an alias must name one net, so this netlist is refused rather "
+                                              "than bound by the order its nets are read\n",
+                                              alias.c_str(), bound.first->second.c_str(ctx), ni->name.c_str(ctx));
+                            }
                             return;
                         }
                         ni->attrs[ctx->id(name)] = value;

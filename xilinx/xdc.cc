@@ -234,7 +234,31 @@ void Arch::parseXdc(std::istream &in)
         return false;
     };
 
-    auto clock_known = [&](const std::string &pat) {
+    auto drives_clock = [&](const NetInfo *ni) {
+        if (ni->clkconstr != nullptr)
+            return true;
+        if (ni->driver.cell == nullptr)
+            return false;
+        const std::string &dt = ni->driver.cell->type.str(this);
+        for (const char *pre : {"BUFG", "BUFH", "BUFR", "BUFIO", "BUFMR"})
+            if (dt.compare(0, std::strlen(pre), pre) == 0)
+                return true;
+        return dt.find("PLL") != std::string::npos || dt.find("MMCM") != std::string::npos;
+    };
+
+    auto alias_clock = [&](const std::string &pat) -> NetInfo * {
+        NetInfo *aliased = getNetByAliasName(pat);
+        if (aliased == nullptr)
+            return nullptr;
+        if (drives_clock(aliased))
+            return aliased;
+        for (auto &gc : generated_clocks)
+            if (gc.target == aliased->name)
+                return aliased;
+        return nullptr;
+    };
+
+    auto clock_known = [&](std::string &pat) {
         for (auto &n : nets) {
             const NetInfo *ni = n.second.get();
             if (!isClockNet(ni))
@@ -247,6 +271,10 @@ void Arch::parseXdc(std::istream &in)
         for (auto &gc : generated_clocks)
             if (glob_match(gc.name, pat) || glob_match(gc.target.str(this), pat))
                 return true;
+        if (NetInfo *aliased = alias_clock(pat)) {
+            pat = aliased->name.str(this);
+            return true;
+        }
         return false;
     };
 
@@ -768,18 +796,6 @@ void Arch::parseXdc(std::istream &in)
         return true;
     };
 
-    auto drives_clock = [&](const NetInfo *ni) {
-        if (ni->clkconstr != nullptr)
-            return true;
-        if (ni->driver.cell == nullptr)
-            return false;
-        const std::string &dt = ni->driver.cell->type.str(this);
-        for (const char *pre : {"BUFG", "BUFH", "BUFR", "BUFIO", "BUFMR"})
-            if (dt.compare(0, std::strlen(pre), pre) == 0)
-                return true;
-        return dt.find("PLL") != std::string::npos || dt.find("MMCM") != std::string::npos;
-    };
-
     auto resolve_clock = [&](const std::string &arg, IdString &out, std::string &err) {
         std::string pat;
         if (!arg.empty() && arg.front() == '[') {
@@ -822,15 +838,9 @@ void Arch::parseXdc(std::istream &in)
                 if (glob_match(gc.target.str(this), pat))
                     add(gc.target);
         }
-        if (found.empty()) {
-            NetInfo *aliased = getNetByAliasName(pat);
-            if (aliased != nullptr && (drives_clock(aliased) || std::any_of(generated_clocks.begin(),
-                                                                            generated_clocks.end(),
-                                                                            [&](const GeneratedClock &gc) {
-                                                                                return gc.target == aliased->name;
-                                                                            })))
+        if (found.empty())
+            if (NetInfo *aliased = alias_clock(pat))
                 add(aliased->name);
-        }
         if (found.size() != 1) {
             err = found.empty() ? "clock '" + pat + "' matched no clock"
                                 : "clock '" + pat + "' matched " + std::to_string(found.size()) + " clocks";

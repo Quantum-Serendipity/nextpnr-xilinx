@@ -109,6 +109,43 @@ else
     report "FAIL set_input_delay -clock on an alias absent from the written net names: $(grep -m1 -E '^ERROR|dropped|set_input_delay' "$OUT/io-alias.log")"
 fi
 
+if replay "$OUT/routed.json" io-nonclock-alias.xdc "$OUT/io-nonclock-alias.log" --xdc-strict; then
+    report "FAIL set_input_delay -clock on an alias of a non-clock net: u_ddr3.clk_in (clk_ibuf, an input buffer's output) was accepted as a clock"
+elif grep -q "set_input_delay: -clock: clock 'u_ddr3.clk_in' matched no clock" "$OUT/io-nonclock-alias.log"; then
+    report "PASS set_input_delay -clock on an alias of a non-clock net: u_ddr3.clk_in refused, matched no clock"
+else
+    report "FAIL set_input_delay -clock on an alias of a non-clock net: $(grep -m1 -E '^ERROR|dropped|set_input_delay' "$OUT/io-nonclock-alias.log")"
+fi
+
+if replay "$OUT/routed.json" clocks-alias.xdc "$OUT/clocks-alias.log" --xdc-strict \
+        && grep -qE 'Timing exceptions: 1 path exception\(s\), 0 clock group set\(s\); [1-9][0-9]* endpoint check\(s\) excluded from setup' "$OUT/clocks-alias.log"; then
+    report "PASS get_clocks on an alias in set_false_path: the ddr_sys_clk paths are excluded from setup"
+else
+    report "FAIL get_clocks on an alias in set_false_path: $(grep -m1 -E '^ERROR|dropped|Timing exceptions' "$OUT/clocks-alias.log")"
+fi
+
+if replay "$OUT/routed.json" groups-alias.xdc "$OUT/groups-alias.log" --xdc-strict \
+        && grep -q 'Timing exceptions: 0 path exception(s), 1 clock group set(s)' "$OUT/groups-alias.log"; then
+    report "PASS get_clocks on an alias in set_clock_groups -group: the group set is applied"
+else
+    report "FAIL get_clocks on an alias in set_clock_groups -group: $(grep -m1 -E '^ERROR|dropped|Timing exceptions' "$OUT/groups-alias.log")"
+fi
+
+"$PYTHON" - "$OUT/routed.json" "$OUT/dup-alias.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+for m in d["modules"].values():
+    m["netnames"]["clk_ibuf"]["attributes"]["NEXTPNR_NET_ALIASES"] = "u_ddr3.clk_in u_ddr3.sys_clk"
+json.dump(d, open(sys.argv[2], "w"))
+PY
+replay "$OUT/dup-alias.json" alias-only.xdc "$OUT/dup-alias.log"
+rc=$?
+if [ "$rc" -ne 0 ] && grep -q "NEXTPNR_NET_ALIASES names 'u_ddr3.sys_clk' as an alias of both net" "$OUT/dup-alias.log"; then
+    report "PASS one written alias naming two nets: the netlist is refused at rc $rc, u_ddr3.sys_clk named"
+else
+    report "FAIL one written alias naming two nets: rc $rc, $(grep -m1 -E '^ERROR|Max frequency for clock' "$OUT/dup-alias.log")"
+fi
+
 refused() {
     [ "$1" -ne 0 ] && grep -q "member 'ddr_sys_clkx' of '{u_ddr3.sys_clk ddr_sys_clkx}' names no net or port" "$2" \
         && grep -q '^ERROR: create_clock: 1 of the members' "$2"

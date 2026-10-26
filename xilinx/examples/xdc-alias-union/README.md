@@ -18,5 +18,9 @@ CHIPDB=/path/to/xc7a100tfgg484.bin YOSYS=yosys NEXTPNR=/path/to/nextpnr-xilinx .
 | aliases survive a second write | the replay's own written JSON carries the same aliases and grades `alias-only.xdc` |
 | create_generated_clock -source on an alias absent from the written net names | a strict replay of the written JSON with `gen-alias.xdc` (`-source [get_nets u_ddr3.sys_clk]`) derives `g` at 50 MHz from `ddr_sys_clk` |
 | set_input_delay -clock on an alias absent from the written net names | a strict replay with `io-alias.xdc` (`-clock u_ddr3.sys_clk`) times `btn` against `ddr_sys_clk` |
+| set_input_delay -clock on an alias of a non-clock net | a strict replay with `io-nonclock-alias.xdc` (`-clock u_ddr3.clk_in`, an alias of the input buffer's output `clk_ibuf`) is refused, matched no clock |
+| get_clocks on an alias in set_false_path | a strict replay with `clocks-alias.xdc` (`-from/-to [get_clocks u_ddr3.sys_clk]`) excludes the `ddr_sys_clk` endpoints from setup |
+| get_clocks on an alias in set_clock_groups -group | a strict replay with `groups-alias.xdc` (`-group [get_clocks u_ddr3.sys_clk] -group [get_clocks g]`) applies one clock group set |
+| one written alias naming two nets | a copy of the written JSON whose `clk_ibuf` also claims `u_ddr3.sys_clk` is refused on read, naming the alias |
 | misspelt union member on the synthesised netlist | `misspelt.xdc` (`{u_ddr3.sys_clk ddr_sys_clkx}`) stops the run, naming `ddr_sys_clkx` |
 | misspelt union member on the written netlist | the same file stops the replay of the written JSON |
