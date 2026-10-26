@@ -18,7 +18,9 @@ CHIPDB=/path/to/xc7a100tcsg324.bin YOSYS=yosys NEXTPNR=/path/to/nextpnr-xilinx .
 | `bufgmux_async` | both `IGNORE` bits, with the same enables and selects: `CLK_SEL_TYPE = "ASYNC"` ties both `IGNORE` pins high |
 | `bufgmux_1` | neither `IGNORE` bit, `INIT_OUT`, and the BUFGMUX enables and selects: a BUFGMUX_1 idles high |
 | `bufgmux_ctrl` | `ZINV_CE0 ZINV_CE1 ZINV_S1`: a BUFGMUX_CTRL switches on the selects, `S1 = S` and `S0 = S` through the inverter, with both enables high |
-| `bufgmux_ctrl_async` | both `IGNORE` bits and the BUFGMUX_CTRL enables and selects; yosys does not carry `CLK_SEL_TYPE` on a BUFGMUX_CTRL, so `run.sh` adds it to the `bufgmux_ctrl` netlist with `$PYTHON` |
+| `bufgmux_ctrl_async` | refused: `CLK_SEL_TYPE` added to the `bufgmux_ctrl` netlist with `$PYTHON` (yosys gives a BUFGMUX_CTRL no such parameter, and UG953 lists none), naming it a BUFGMUX and BUFGMUX_1 parameter |
+| `bufgmux_nos`, `bufgmux_ctrl_nos` | refused, naming the cell: the mux has no `S` connection at all |
+| `bufgmux_undrv`, `bufgmux_selx` | built, with a warning naming the cell and its `S`: yosys turns both the undriven wire and `1'bx` into an `x` bit, which the JSON frontend reads as the undriven net `g.S$const`, so the select never switches |
 | `bufgmux_clksel_bogus` | refused, naming `CLK_SEL_TYPE` and its two legal values |
 | `bufgctrl_clksel` | refused: `CLK_SEL_TYPE` added to the `bufgctrl_tie0` netlist the same way, and a BUFGCTRL has no such parameter |
 | `bufgctrl_tie0` | neither bit: `IGNORE0`/`IGNORE1` tied to 0 |

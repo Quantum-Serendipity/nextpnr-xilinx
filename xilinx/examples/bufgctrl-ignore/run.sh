@@ -118,14 +118,26 @@ ignore_bits bufgmux_1 '' && site_bits bufgmux_1 'INIT_OUT ZINV_CE1 ZINV_S0 ZINV_
 ignore_bits bufgmux_ctrl '' && site_bits bufgmux_ctrl 'ZINV_CE0 ZINV_CE1 ZINV_S1'
 refuses bufgmux_clksel_bogus 'CLK_SEL_TYPE must be "SYNC" or "ASYNC", not "SOMETIMES"'
 if with_param bufgmux_ctrl_async bufgmux_ctrl BUFGMUX_CTRL CLK_SEL_TYPE ASYNC; then
-    ignore_bits bufgmux_ctrl_async 'IS_IGNORE0_INVERTED IS_IGNORE1_INVERTED' &&
-        site_bits bufgmux_ctrl_async 'IS_IGNORE0_INVERTED IS_IGNORE1_INVERTED ZINV_CE0 ZINV_CE1 ZINV_S1'
+    refuses bufgmux_ctrl_async "BUFGMUX_CTRL 'g' sets CLK_SEL_TYPE, which is a BUFGMUX and BUFGMUX_1 parameter"
 else
     report FAIL "bufgmux_ctrl_async: could not add CLK_SEL_TYPE to the bufgmux_ctrl netlist"
 fi
+refuses bufgmux_nos "BUFGMUX 'g' has no S port in the netlist"
+refuses bufgmux_ctrl_nos "BUFGMUX_CTRL 'g' has no S port in the netlist"
+warns_select() {
+    local v=$1 want=$2 rc
+    rc=$(pnr "$v")
+    if [ "$rc" = 0 ] && grep -qF -- "$want" "$OUT/$v.npnr.log"; then
+        report PASS "$v: built (rc 0) with the warning '$want'"
+    else
+        report FAIL "$v: rc $rc, want rc 0 and a warning naming '$want'"
+    fi
+}
+warns_select bufgmux_undrv "BUFGMUX 'g': S is the undriven net 'g.S\$const', so this mux is built with a select that never switches"
+warns_select bufgmux_selx "BUFGMUX 'g': S is the undriven net 'g.S\$const', so this mux is built with a select that never switches"
 ignore_bits bufgctrl_tie0 ''
 if with_param bufgctrl_clksel bufgctrl_tie0 BUFGCTRL CLK_SEL_TYPE ASYNC; then
-    refuses bufgctrl_clksel 'sets CLK_SEL_TYPE'
+    refuses bufgctrl_clksel 'sets CLK_SEL_TYPE, which is a BUFGMUX and BUFGMUX_1 parameter; a BUFGCTRL switches asynchronously'
 else
     report FAIL "bufgctrl_clksel: could not add CLK_SEL_TYPE to the bufgctrl_tie0 netlist"
 fi

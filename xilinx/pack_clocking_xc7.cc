@@ -149,8 +149,24 @@ void XC7Packer::prepare_clocking()
             if (!sel_is_async && sel != "SYNC")
                 log_error("%s '%s': CLK_SEL_TYPE must be \"SYNC\" or \"ASYNC\", not \"%s\"\n", orig_type.c_str(),
                           ctx->nameOf(ci), sel.c_str());
-            ci->params.erase(clk_sel_type);
             const bool switches_on_selects = orig_type == "BUFGMUX_CTRL";
+            if (switches_on_selects && ci->params.count(clk_sel_type))
+                log_error("BUFGMUX_CTRL '%s' sets CLK_SEL_TYPE, which is a BUFGMUX and BUFGMUX_1 parameter; a "
+                          "BUFGMUX_CTRL always switches synchronously, and an asynchronous switch is a BUFGCTRL with "
+                          "IGNORE0/IGNORE1 high\n",
+                          ctx->nameOf(ci));
+            ci->params.erase(clk_sel_type);
+            if (!ci->ports.count(ctx->id("S")))
+                log_error("%s '%s' has no S port in the netlist; its select must be connected, to a signal or to a "
+                          "constant\n",
+                          orig_type.c_str(), ctx->nameOf(ci));
+            NetInfo *s_in = ci->ports.at(ctx->id("S")).net;
+            if (s_in == nullptr || s_in->driver.cell == nullptr) {
+                const std::string s_what =
+                        s_in == nullptr ? "unconnected or 1'bx" : "the undriven net '" + s_in->name.str(ctx) + "'";
+                log_warning("%s '%s': S is %s, so this mux is built with a select that never switches\n",
+                            orig_type.c_str(), ctx->nameOf(ci), s_what.c_str());
+            }
             const char *on = switches_on_selects ? "S1" : "CE1";
             const char *off = switches_on_selects ? "S0" : "CE0";
             save_orig_port("I0", "I0");
@@ -179,7 +195,7 @@ void XC7Packer::prepare_clocking()
             if (orig_type == "BUFGMUX_1")
                 ci->params[ctx->id("INIT_OUT")] = Property(1);
         } else if (ci->type == ctx->id("BUFGCTRL") && ci->params.count(ctx->id("CLK_SEL_TYPE"))) {
-            log_error("BUFGCTRL '%s' sets CLK_SEL_TYPE, which is a BUFGMUX, BUFGMUX_1 and BUFGMUX_CTRL parameter; a "
+            log_error("BUFGCTRL '%s' sets CLK_SEL_TYPE, which is a BUFGMUX and BUFGMUX_1 parameter; a "
                       "BUFGCTRL switches asynchronously when its IGNORE0/IGNORE1 pins are high\n",
                       ctx->nameOf(ci));
         } else if (ci->type == id_BUFH || ci->type == id_BUFHCE) {
