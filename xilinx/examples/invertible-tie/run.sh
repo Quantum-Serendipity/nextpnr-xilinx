@@ -148,10 +148,10 @@ else
 fi
 
 if build bufgmux_undrv; then
-    s0=$(count bufgmux_undrv ZINV_S0)
-    s1=$(count bufgmux_undrv ZINV_S1)
-    [ "$s0" = 2 ] && [ "$s1" = 0 ] && v=PASS || v=FAIL
-    report "$v" "bufgmux_undrv: ZINV_S0 count $s0 want 2, ZINV_S1 count $s1 want 0 (I0 selected)"
+    ce0=$(count bufgmux_undrv ZINV_CE0)
+    ce1=$(count bufgmux_undrv ZINV_CE1)
+    [ "$ce0" = 2 ] && [ "$ce1" = 0 ] && v=PASS || v=FAIL
+    report "$v" "bufgmux_undrv: ZINV_CE0 count $ce0 want 2, ZINV_CE1 count $ce1 want 0 (I0 enabled)"
 else
     rc_total=1
 fi

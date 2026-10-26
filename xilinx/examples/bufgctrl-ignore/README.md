@@ -14,6 +14,13 @@ CHIPDB=/path/to/xc7a100tcsg324.bin YOSYS=yosys NEXTPNR=/path/to/nextpnr-xilinx .
 |---|---|
 | `bufg`, `bufgce` | only `IS_IGNORE1_INVERTED`: `IGNORE0` low, `IGNORE1` high |
 | `bufgmux_sel` | neither bit, and no `GFAN.GND_WIRE` pip: both `IGNORE` pins tied low as VCC through the site inverter |
+| `bufgmux_sel` site bits | `ZINV_CE1 ZINV_S0 ZINV_S1`: a BUFGMUX switches on the clock enables, `CE1 = S` and `CE0 = S` through the inverter, with both selects high |
+| `bufgmux_async` | both `IGNORE` bits, with the same enables and selects: `CLK_SEL_TYPE = "ASYNC"` ties both `IGNORE` pins high |
+| `bufgmux_1` | neither `IGNORE` bit, `INIT_OUT`, and the BUFGMUX enables and selects: a BUFGMUX_1 idles high |
+| `bufgmux_ctrl` | `ZINV_CE0 ZINV_CE1 ZINV_S1`: a BUFGMUX_CTRL switches on the selects, `S1 = S` and `S0 = S` through the inverter, with both enables high |
+| `bufgmux_ctrl_async` | both `IGNORE` bits and the BUFGMUX_CTRL enables and selects; yosys does not carry `CLK_SEL_TYPE` on a BUFGMUX_CTRL, so `run.sh` adds it to the `bufgmux_ctrl` netlist with `$PYTHON` |
+| `bufgmux_clksel_bogus` | refused, naming `CLK_SEL_TYPE` and its two legal values |
+| `bufgctrl_clksel` | refused: `CLK_SEL_TYPE` added to the `bufgctrl_tie0` netlist the same way, and a BUFGCTRL has no such parameter |
 | `bufgctrl_tie0` | neither bit: `IGNORE0`/`IGNORE1` tied to 0 |
 | `bufgctrl_tie1` | both bits: tied to 1 |
 | `bufgctrl_tie1inv` | neither bit: tied to 1 with `IS_IGNORE*_INVERTED = 1` |
