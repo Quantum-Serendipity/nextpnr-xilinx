@@ -1594,6 +1594,7 @@ bool Arch::pack()
         // PLLE2_*, MMCME2_*) are what the propagation recognises.
         packer.apply_cmt_multiplier_defaults();
         packer.propagate_clock_constraints();
+        check_io_delay_clocks();
         packer.pack_constants();
         packer.pack_inverters();
         packer.pack_io();
@@ -1642,6 +1643,7 @@ bool Arch::pack()
                 packer.constrain_regional_clock_sinks(ci);
         }
     } else {
+        apply_generated_clocks();
         USPacker packer;
         packer.ctx = getCtx();
         packer.pack_constants();

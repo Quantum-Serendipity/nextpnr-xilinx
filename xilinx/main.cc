@@ -143,6 +143,8 @@ void UspCommandHandler::customAfterLoad(Context *ctx)
             log_error("%d XDC constraint(s) or target(s) were not applied, listed above [--xdc-strict]\n",
                       int(ctx->xdc_dropped.size()));
         }
+        if (vm.count("no-pack"))
+            ctx->apply_generated_clocks();
     }
     ctx->snapshot_rm_cells();
     if (vm.count("no-pack") && !vm.count("pack-only"))

@@ -1916,6 +1916,9 @@ struct Arch : BaseCtx
     bool xdc_strict = false;
     std::string xdc_file;
     std::vector<std::string> xdc_dropped;
+    void apply_generated_clocks();
+    void report_unapplied_generated_clocks(const std::vector<bool> &applied);
+    void check_io_delay_clocks();
     void routeConstants(std::function<void()> reroute);
     int insertConstDrivers(const std::vector<ConstHoldout> &holdouts, std::vector<ConstHoldout> &unplaced);
     void ripupConstNets();

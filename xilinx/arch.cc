@@ -3847,6 +3847,14 @@ bool Arch::isClockNet(const NetInfo *net) const
 std::vector<const NetInfo *> Arch::getClockSources(const NetInfo *net, bool include_generated) const
 {
     std::vector<const NetInfo *> sources;
+    if (include_generated)
+        for (auto &gc : generated_clocks)
+            if (gc.target == net->name) {
+                const NetInfo *src = getNetByAlias(gc.source);
+                if (src != nullptr)
+                    sources.push_back(src);
+                return sources;
+            }
     const CellInfo *drv = net->driver.cell;
     if (drv == nullptr)
         return sources;

@@ -1,1 +1,1 @@
-set_input_delay -clock [get_clocks sysclk] 1.0 [get_ports btn]
+set_clock_uncertainty 0.100 [get_clocks sysclk]
