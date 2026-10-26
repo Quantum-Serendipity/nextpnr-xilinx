@@ -16,5 +16,7 @@ CHIPDB=/path/to/xc7a100tfgg484.bin YOSYS=yosys NEXTPNR=/path/to/nextpnr-xilinx .
 | create_clock on an alias absent from the written net names | a timing replay of the written JSON with `alias-only.xdc` (`[get_nets u_ddr3.sys_clk]`) grades the clock at 100 MHz with no dropped constraint |
 | alias union on the written netlist | the same replay with `union.xdc` grades the clock and refuses no member |
 | aliases survive a second write | the replay's own written JSON carries the same aliases and grades `alias-only.xdc` |
+| create_generated_clock -source on an alias absent from the written net names | a strict replay of the written JSON with `gen-alias.xdc` (`-source [get_nets u_ddr3.sys_clk]`) derives `g` at 50 MHz from `ddr_sys_clk` |
+| set_input_delay -clock on an alias absent from the written net names | a strict replay with `io-alias.xdc` (`-clock u_ddr3.sys_clk`) times `btn` against `ddr_sys_clk` |
 | misspelt union member on the synthesised netlist | `misspelt.xdc` (`{u_ddr3.sys_clk ddr_sys_clkx}`) stops the run, naming `ddr_sys_clkx` |
 | misspelt union member on the written netlist | the same file stops the replay of the written JSON |

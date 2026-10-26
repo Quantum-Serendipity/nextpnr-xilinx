@@ -758,9 +758,9 @@ void Arch::parseXdc(std::istream &in)
             err = "no port named '" + p + "'";
             return false;
         }
-        out = getNetByAlias(id_if_interned(name));
+        out = getNetByAliasName(name);
         if (out == nullptr && q == "get_nets" && !debus_zero(name).empty())
-            out = getNetByAlias(id_if_interned(debus_zero(name)));
+            out = getNetByAliasName(debus_zero(name));
         if (out == nullptr) {
             err = "no net named '" + p + "'";
             return false;
@@ -821,6 +821,15 @@ void Arch::parseXdc(std::istream &in)
             for (auto &gc : generated_clocks)
                 if (glob_match(gc.target.str(this), pat))
                     add(gc.target);
+        }
+        if (found.empty()) {
+            NetInfo *aliased = getNetByAliasName(pat);
+            if (aliased != nullptr && (drives_clock(aliased) || std::any_of(generated_clocks.begin(),
+                                                                            generated_clocks.end(),
+                                                                            [&](const GeneratedClock &gc) {
+                                                                                return gc.target == aliased->name;
+                                                                            })))
+                add(aliased->name);
         }
         if (found.size() != 1) {
             err = found.empty() ? "clock '" + pat + "' matched no clock"

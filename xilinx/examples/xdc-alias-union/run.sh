@@ -95,6 +95,20 @@ else
     report "FAIL aliases survive a second write: '$(aliases_of "$OUT/rewritten.json" 2>/dev/null)', $(grep -m1 -E '^ERROR|dropped|Max frequency for clock .ddr_sys_clk' "$OUT/rewrite-alias.log" 2>/dev/null)"
 fi
 
+if replay "$OUT/routed.json" gen-alias.xdc "$OUT/gen-alias.log" --xdc-strict \
+        && grep -q "create_generated_clock 'g': 50.0 MHz on net 'r\[0\]' from net 'ddr_sys_clk'" "$OUT/gen-alias.log"; then
+    report "PASS create_generated_clock -source on an alias absent from the written net names: g is 50 MHz from ddr_sys_clk"
+else
+    report "FAIL create_generated_clock -source on an alias absent from the written net names: $(grep -m1 -E '^ERROR|dropped|create_generated_clock' "$OUT/gen-alias.log")"
+fi
+
+if replay "$OUT/routed.json" io-alias.xdc "$OUT/io-alias.log" --xdc-strict \
+        && grep -q "set_input_delay on port 'btn': max 2.000 ns, relative to posedge ddr_sys_clk" "$OUT/io-alias.log"; then
+    report "PASS set_input_delay -clock on an alias absent from the written net names: btn timed against ddr_sys_clk"
+else
+    report "FAIL set_input_delay -clock on an alias absent from the written net names: $(grep -m1 -E '^ERROR|dropped|set_input_delay' "$OUT/io-alias.log")"
+fi
+
 refused() {
     [ "$1" -ne 0 ] && grep -q "member 'ddr_sys_clkx' of '{u_ddr3.sys_clk ddr_sys_clkx}' names no net or port" "$2" \
         && grep -q '^ERROR: create_clock: 1 of the members' "$2"
