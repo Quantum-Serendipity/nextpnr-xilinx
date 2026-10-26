@@ -139,29 +139,49 @@ void XC7Packer::prepare_clocking()
             tie_port(ci, "S1", false, true);
             tie_port(ci, "IGNORE0", false, true);
             bufgs_ignoring_i1.push_back(ci);
-        } else if (ci->type == ctx->id("BUFGMUX") || ci->type == ctx->id("BUFGMUX_CTRL")) {
+        } else if (ci->type == ctx->id("BUFGMUX") || ci->type == ctx->id("BUFGMUX_1") ||
+                   ci->type == ctx->id("BUFGMUX_CTRL")) {
+            const std::string orig_type = ci->type.str(ctx);
             save_orig_type();
-            // I0/I1 unchanged; S → S1 direct and S → S0 inverted (one
-            // source feeding two ports).
+            IdString clk_sel_type = ctx->id("CLK_SEL_TYPE");
+            const std::string sel = str_or_default(ci->params, clk_sel_type, "SYNC");
+            const bool sel_is_async = sel == "ASYNC";
+            if (!sel_is_async && sel != "SYNC")
+                log_error("%s '%s': CLK_SEL_TYPE must be \"SYNC\" or \"ASYNC\", not \"%s\"\n", orig_type.c_str(),
+                          ctx->nameOf(ci), sel.c_str());
+            ci->params.erase(clk_sel_type);
+            const bool switches_on_selects = orig_type == "BUFGMUX_CTRL";
+            const char *on = switches_on_selects ? "S1" : "CE1";
+            const char *off = switches_on_selects ? "S0" : "CE0";
             save_orig_port("I0", "I0");
             save_orig_port("I1", "I1");
-            save_orig_port("S1", "S");
-            save_orig_port("S0", "S");
-            save_orig_port("O",  "O");
-            // I same, S->S1 direct, S->S0 inverted, CE to VCC, IGNORE to GND
+            save_orig_port(on, "S");
+            save_orig_port(off, "S");
+            save_orig_port("O", "O");
             ci->type = ctx->id("BUFGCTRL");
-            rename_port(ctx, ci, ctx->id("S"), ctx->id("S1"));
-            NetInfo *s_net = ci->ports.at(ctx->id("S1")).net;
+            rename_port(ctx, ci, ctx->id("S"), ctx->id(on));
+            NetInfo *s_net = ci->ports.at(ctx->id(on)).net;
             if (s_net != nullptr) {
-                ci->ports[ctx->id("S0")].name = ctx->id("S0");
-                ci->ports[ctx->id("S0")].type = PORT_IN;
-                connect_port(ctx, s_net, ci, ctx->id("S0"));
-                ci->params[ctx->id("IS_S0_INVERTED")] = Property(1);
+                ci->ports[ctx->id(off)].name = ctx->id(off);
+                ci->ports[ctx->id(off)].type = PORT_IN;
+                connect_port(ctx, s_net, ci, ctx->id(off));
             }
-            tie_port(ci, "CE0", true, true);
-            tie_port(ci, "CE1", true, true);
-            tie_port(ci, "IGNORE0", false, true);
-            tie_port(ci, "IGNORE1", false, true);
+            ci->params[ctx->id(std::string("IS_") + off + "_INVERTED")] = Property(1);
+            if (switches_on_selects) {
+                tie_port(ci, "CE0", true, true);
+                tie_port(ci, "CE1", true, true);
+            } else {
+                tie_port(ci, "S0", true, true);
+                tie_port(ci, "S1", true, true);
+            }
+            tie_port(ci, "IGNORE0", sel_is_async, true);
+            tie_port(ci, "IGNORE1", sel_is_async, true);
+            if (orig_type == "BUFGMUX_1")
+                ci->params[ctx->id("INIT_OUT")] = Property(1);
+        } else if (ci->type == ctx->id("BUFGCTRL") && ci->params.count(ctx->id("CLK_SEL_TYPE"))) {
+            log_error("BUFGCTRL '%s' sets CLK_SEL_TYPE, which is a BUFGMUX, BUFGMUX_1 and BUFGMUX_CTRL parameter; a "
+                      "BUFGCTRL switches asynchronously when its IGNORE0/IGNORE1 pins are high\n",
+                      ctx->nameOf(ci));
         } else if (ci->type == id_BUFH || ci->type == id_BUFHCE) {
             ci->type = id_BUFHCE_BUFHCE;
             tie_port(ci, "CE", true, true);
