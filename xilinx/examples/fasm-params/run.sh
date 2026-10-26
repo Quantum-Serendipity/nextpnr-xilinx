@@ -20,6 +20,7 @@ YOSYS=$(resolve_tool "${YOSYS:-yosys}")
 NEXTPNR=$(resolve_tool "${NEXTPNR:-$HERE/../../../build/nextpnr-xilinx}")
 CHIPDB=$(abspath "${CHIPDB:?set CHIPDB to an xc7a100tcsg324.bin}")
 OUT=$(abspath "${OUT:-$(mktemp -d)}")
+PRJXRAY_DB=$(abspath "${PRJXRAY_DB:-$HERE/../../external/prjxray-db}")
 mkdir -p "$OUT" || exit 1
 cd "$HERE" || exit 1
 
@@ -81,6 +82,19 @@ log_has() {
         report FAIL "$v: log does not say '$want'"
 }
 
+segbits_row() {
+    local v=$1 feat=$2 line tile ttype db
+    line=$(grep -m1 -E -- "\.$feat\$" "$OUT/$v.fasm")
+    tile=${line%%.*}
+    ttype=${tile%_X*}
+    db=$PRJXRAY_DB/artix7/segbits_$(printf '%s' "$ttype" | tr 'A-Z' 'a-z').db
+    if [ -n "$line" ] && grep -qE -- "^$ttype\.${line#*.} [0-9]" "$db"; then
+        report PASS "$v: $ttype.${line#*.} has a row in $(basename "$db")"
+    else
+        report FAIL "$v: '${line:-no $feat line}' has no row in $db"
+    fi
+}
+
 lines() {
     local v=$1 pattern=$2 want=$3 got
     got=$(grep -cE -- "$pattern" "$OUT/$v.fasm")
@@ -137,6 +151,7 @@ fi
 if builds dsp_pattern; then
     feature dsp_pattern '\.PATTERN\[' "DSP48.DSP_0.PATTERN[47:0] = 48'b$(printf '0%.0s' $(seq 47))1"
     feature dsp_pattern '\.MASK\[' "DSP48.DSP_0.MASK[47:0] = 48'b11$(printf '0%.0s' $(seq 44))10"
+    lines dsp_pattern 'SEL_PATTERN' 0
 fi
 if builds dsp_default; then
     lines dsp_default '\.PATTERN\[' 0
@@ -155,7 +170,10 @@ refuses dsp_simd_bogus 'USE_SIMD=FOUR'
 if builds dsp_simd_four12; then
     feature dsp_simd_four12 'USE_SIMD' 'DSP48.DSP_0.USE_SIMD_FOUR12 DSP48.DSP_0.USE_SIMD_FOUR12_TWO24'
 fi
-refuses dsp_sel_pattern_c 'SEL_PATTERN=C. That is a legal DSP48E1 value'
+if builds dsp_sel_pattern_c; then
+    feature dsp_sel_pattern_c 'SEL_PATTERN' 'DSP48.DSP_0.SEL_PATTERN_C'
+    segbits_row dsp_sel_pattern_c 'SEL_PATTERN_C'
+fi
 
 if builds bram_sdp; then
     lines bram_sdp 'EN_ECC' 0

@@ -56,6 +56,20 @@ void XC7Packer::apply_cmt_multiplier_defaults()
     }
 }
 
+void XC7Packer::raise_bufg_ignore1()
+{
+    IdString vcc = ctx->id("$PACKER_VCC_NET");
+    for (CellInfo *ci : bufgs_ignoring_i1) {
+        NetInfo *ignore1 = get_net_or_empty(ci, ctx->id("IGNORE1"));
+        if (ignore1 == nullptr || ignore1->name != vcc ||
+            !bool_or_default(ci->params, ctx->id("IS_IGNORE1_INVERTED"), false))
+            log_error("%s '%s': IGNORE1 is not the VCC net with IS_IGNORE1_INVERTED after pack_constants, so it "
+                      "cannot be raised by clearing the inversion\n",
+                      str_or_default(ci->attrs, ctx->id("X_ORIG_TYPE"), "BUFGCTRL").c_str(), ctx->nameOf(ci));
+        ci->params[ctx->id("IS_IGNORE1_INVERTED")] = Property(0);
+    }
+}
+
 void XC7Packer::prepare_clocking()
 {
     log_info("Preparing clocking...\n");
@@ -90,7 +104,8 @@ void XC7Packer::prepare_clocking()
             tie_port(ci, "CE0", true, true);
             tie_port(ci, "S0", true, true);
             tie_port(ci, "S1", false, true);
-            tie_port(ci, "IGNORE0", true, true);
+            tie_port(ci, "IGNORE0", false, true);
+            bufgs_ignoring_i1.push_back(ci);
         } else if (ci->type == ctx->id("BUFGCE")) {
             save_orig_type();
             ci->type = ctx->id("BUFGCTRL");
@@ -122,7 +137,8 @@ void XC7Packer::prepare_clocking()
             save_orig_port("O",   "O");
             tie_port(ci, "S0", true, true);
             tie_port(ci, "S1", false, true);
-            tie_port(ci, "IGNORE0", true, true);
+            tie_port(ci, "IGNORE0", false, true);
+            bufgs_ignoring_i1.push_back(ci);
         } else if (ci->type == ctx->id("BUFGMUX") || ci->type == ctx->id("BUFGMUX_CTRL")) {
             save_orig_type();
             // I0/I1 unchanged; S → S1 direct and S → S0 inverted (one
@@ -144,8 +160,8 @@ void XC7Packer::prepare_clocking()
             }
             tie_port(ci, "CE0", true, true);
             tie_port(ci, "CE1", true, true);
-            tie_port(ci, "IGNORE0", false, false);
-            tie_port(ci, "IGNORE1", false, false);
+            tie_port(ci, "IGNORE0", false, true);
+            tie_port(ci, "IGNORE1", false, true);
         } else if (ci->type == id_BUFH || ci->type == id_BUFHCE) {
             ci->type = id_BUFHCE_BUFHCE;
             tie_port(ci, "CE", true, true);

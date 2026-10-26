@@ -490,6 +490,14 @@ struct FasmBackend
                     if (site_has_tristate_register)
                         continue;
                 }
+                const bool is_zinv_t1 = boost::ends_with(c, ".ZINV_T1");
+                if (is_zinv_t1) {
+                    auto dot = c.find('.');
+                    const bool site_has_t1_tied_low =
+                            dot != std::string::npos && ologic_t1_low.count(tile_name + "/" + c.substr(0, dot));
+                    if (site_has_t1_tied_low)
+                        continue;
+                }
                 // Phantom-BUFGCTRL guard: this pseudo-pip's feature list
                 // includes BUFGCTRL.BUFGCTRL_X0Y<n>.* bits whenever the
                 // router crosses the matching CLK_BUFG_BUFGCTRL<n>_O→I0/I1
@@ -1708,6 +1716,7 @@ struct FasmBackend
     }
 
     std::set<std::string> ologic_t_registered;
+    std::set<std::string> ologic_t1_low;
 
     void write_iol_config(CellInfo *ci)
     {
@@ -1723,6 +1732,13 @@ struct FasmBackend
         push(site_y);
         if (ci->type == ctx->id("OLOGICE2_TFF") || ci->type == ctx->id("OLOGICE3_TFF"))
             ologic_t_registered.insert(tile + "/" + site_y);
+        if (ci->type == ctx->id("OSERDESE2_OSERDESE2")) {
+            NetInfo *t1 = get_net_or_empty(ci, ctx->id("T1"));
+            const bool inverted = bool_or_default(ci->params, ctx->id("IS_T1_INVERTED"), false);
+            const bool tied_to_inverted_vcc = t1 != nullptr && t1->name == ctx->id("$PACKER_VCC_NET") && inverted;
+            if (tied_to_inverted_vcc)
+                ologic_t1_low.insert(tile + "/" + site_y);
+        }
         auto site_bel_is_bound = [&](const char *bel_name) {
             BelId bel = ctx->getBelByName(ctx->id(site + "/" + bel_name));
             return bel != BelId() && ctx->getBoundBelCell(bel) != nullptr;
@@ -2252,8 +2268,8 @@ struct FasmBackend
                                   ctx->nameOf(ci), get_tile_name(ci->bel.tile).c_str(), pin, pin);
                 write_bit("IN_USE");
                 write_bit("INIT_OUT", bool_or_default(ci->params, ctx->id("INIT_OUT")));
-                write_bit("IS_IGNORE0_INVERTED", bool_or_default(ci->params, ctx->id("IS_IGNORE0_INVERTED")));
-                write_bit("IS_IGNORE1_INVERTED", bool_or_default(ci->params, ctx->id("IS_IGNORE1_INVERTED")));
+                write_bit("IS_IGNORE0_INVERTED", !bool_or_default(ci->params, ctx->id("IS_IGNORE0_INVERTED")));
+                write_bit("IS_IGNORE1_INVERTED", !bool_or_default(ci->params, ctx->id("IS_IGNORE1_INVERTED")));
                 write_bit("ZINV_CE0", !bool_or_default(ci->params, ctx->id("IS_CE0_INVERTED")));
                 write_bit("ZINV_CE1", !bool_or_default(ci->params, ctx->id("IS_CE1_INVERTED")));
                 write_bit("ZINV_S0", !bool_or_default(ci->params, ctx->id("IS_S0_INVERTED")));
@@ -5583,11 +5599,15 @@ void write_gtx_channel(CellInfo *ci)
         if (sel_mask == "ROUNDING_MODE1") write_bit("SEL_MASK_ROUNDING_MODE1");
         if (sel_mask == "ROUNDING_MODE2") write_bit("SEL_MASK_ROUNDING_MODE2");
 
-        if (param_choice(ci, "SEL_PATTERN", {"PATTERN", "C"}) == "C")
-            log_error("DSP48E1 '%s' at %s has SEL_PATTERN=C. That is a legal DSP48E1 value, but this flow cannot "
-                      "emit it yet: the pinned prjxray-db carries the SEL_PATTERN_C row (d3405db), and the writer "
-                      "change from openXC7 cdd36a11a that emits it is not carried. Use SEL_PATTERN=PATTERN.\n",
-                      ctx->nameOf(ci), get_tile_name(ci->bel.tile).c_str());
+        const bool sel_pattern_is_c = param_choice(ci, "SEL_PATTERN", {"PATTERN", "C"}) == "C";
+        const bool part_has_sel_pattern_c_row = !boost::starts_with(ctx->getChipName(), "xc7v");
+        if (sel_pattern_is_c && !part_has_sel_pattern_c_row)
+            log_error("DSP48E1 '%s' at %s has SEL_PATTERN=C, which needs the DSP_L/DSP_R SEL_PATTERN_C row of "
+                      "prjxray-db, and %s is a Virtex-7 part: the virtex7 database has no SEL_PATTERN_C row. Use "
+                      "SEL_PATTERN=PATTERN.\n",
+                      ctx->nameOf(ci), tile_name.c_str(), ctx->getChipName().c_str());
+        if (sel_pattern_is_c)
+            write_bit("SEL_PATTERN_C");
 
         const bool dport_used =
                 use_dport && param_choice(ci, "USE_MULT", {"MULTIPLY", "DYNAMIC", "NONE"}) != "NONE";
