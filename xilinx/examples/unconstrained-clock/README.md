@@ -18,5 +18,5 @@ default).
 | create_clock run | the full run, constrained by `clock.xdc`, still grades `clk` at 100 MHz |
 | --freq run | a full run with no `create_clock` and `--freq 50` still grades `clk` at 50 MHz |
 | replay of the --freq 50 run | that run's written JSON, replayed with no `--freq`, still grades `clk` at 50 MHz |
-| create_clock on a union naming one absent and one present net | `clock-union.xdc` (`[get_nets {no_such_net clk}]`) grades `clk` at 100 MHz, logs no dropped constraint, and names `no_such_net` as the member that matched nothing |
+| create_clock on a union naming one absent and one present net is refused | `clock-union.xdc` (`[get_nets {no_such_net clk}]`) stops the replay, naming `no_such_net` as a member that names no net or port |
 | create_clock on a union naming no present net | `clock-union-none.xdc` leaves `clk` UNCONSTRAINED and logs one dropped-constraint warning |
