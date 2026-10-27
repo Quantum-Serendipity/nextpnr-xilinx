@@ -18,6 +18,7 @@ resolve_tool() {
 HERE=$(cd "$(dirname "$0")" && pwd) || exit 1
 YOSYS=$(resolve_tool "${YOSYS:-yosys}")
 NEXTPNR=$(resolve_tool "${NEXTPNR:-$HERE/../../../build/nextpnr-xilinx}")
+PYTHON=$(resolve_tool "${PYTHON:-python3}")
 CHIPDB=$(abspath "${CHIPDB:?set CHIPDB to an xc7a100tfgg484.bin}")
 OUT=$(abspath "${OUT:-$(mktemp -d)}")
 mkdir -p "$OUT" || exit 1
@@ -33,6 +34,11 @@ if ! "$YOSYS" -q -l "$OUT/yosys.log" \
         -p "read_verilog \"$HERE/top.v\"; synth_xilinx -flatten -abc9 -arch xc7 -top top; write_json \"$OUT/top.json\"" \
         >/dev/null 2>&1; then
     echo "FAIL yosys"
+    exit 1
+fi
+
+if ! msg=$("$PYTHON" "$HERE/ionets.py" "$OUT/top.json" din_a din_b sd_do dout sd_di 2>&1 >"$OUT/ionets.tsv"); then
+    echo "FAIL io nets: $msg"
     exit 1
 fi
 
@@ -54,7 +60,7 @@ periods() {
 }
 
 rows() {
-    awk -F'\t' -v col="$2" -v pat="$3" 'NR > 1 && index($col, pat) > 0' "$OUT/$1.tsv"
+    awk -F'\t' -v p="$2" 'FNR == NR { if ($1 == p) n[$2] = 1; next } FNR > 1 && ($4 in n)' "$OUT/ionets.tsv" "$OUT/$1"
 }
 
 pair_arm() {
@@ -108,14 +114,14 @@ else
 fi
 
 io_row_arm() {
-    local name=$1 run=$2 col=$3 pat=$4 launch=$5 capture=$6 field=$7 want=$8 slack=$9 r
-    r=$(rows "$run" "$col" "$pat")
+    local name=$1 run=$2 port=$3 launch=$4 capture=$5 field=$6 want=$7 slack=$8 r
+    r=$(rows "$run.tsv" "$port")
     if [ -z "$r" ]; then
-        report "FAIL $name: no setup row for '$pat' (the constraint is not timed)"
+        report "FAIL $name: no setup row for port '$port' (the constraint is not timed)"
         return
     fi
     if [ "$(printf '%s\n' "$r" | wc -l)" -ne 1 ]; then
-        report "FAIL $name: more than one setup row for '$pat'"
+        report "FAIL $name: more than one setup row for port '$port'"
         return
     fi
     if printf '%s\n' "$r" | awk -F'\t' -v l="$launch" -v c="$capture" -v f="$field" -v w="$want" -v s="$slack" '
@@ -131,17 +137,17 @@ io_row_arm() {
     fi
 }
 
-io_row_arm "input max delay fails setup" full 4 'iopadmap$din_b' clk_i clk 6 10.5 neg
-io_row_arm "input max delay control" full 4 'iopadmap$din_a' clk_i clk 6 2.5 pos
-io_row_arm "output max delay fails setup" full 1 'dout$intcell$OBUF' clk clk_i 7 9 neg
-io_row_arm "input delay on a falling generated clock" full 4 'iopadmap$sd_do' sd_clk clk 6 3 lat
-io_row_arm "output max delay to a generated clock at a port" full 1 'sd_di$intcell$OBUF' clk sd_clk 7 6 lat
+io_row_arm "input max delay fails setup" full din_b clk_i clk 6 10.5 neg
+io_row_arm "input max delay control" full din_a clk_i clk 6 2.5 pos
+io_row_arm "output max delay fails setup" full dout clk clk_i 7 9 neg
+io_row_arm "input delay on a falling generated clock" full sd_do sd_clk clk 6 3 lat
+io_row_arm "output max delay to a generated clock at a port" full sd_di clk sd_clk 7 6 lat
 
 hold_row_arm() {
-    local name=$1 col=$2 pat=$3 launch=$4 capture=$5 field=$6 want=$7 slack=$8 r
-    r=$(awk -F'\t' -v col="$col" -v pat="$pat" 'NR > 1 && index($col, pat) > 0' "$OUT/full.hold.tsv")
+    local name=$1 port=$2 launch=$3 capture=$4 field=$5 want=$6 slack=$7 r
+    r=$(rows full.hold.tsv "$port")
     if [ -z "$r" ] || [ "$(printf '%s\n' "$r" | wc -l)" -ne 1 ]; then
-        report "FAIL $name: $(printf '%s\n' "$r" | grep -c .) hold row(s) for '$pat', expected one"
+        report "FAIL $name: $(printf '%s\n' "$r" | grep -c .) hold row(s) for port '$port', expected one"
         return
     fi
     if printf '%s\n' "$r" | awk -F'\t' -v l="$launch" -v c="$capture" -v f="$field" -v w="$want" -v s="$slack" '
@@ -158,10 +164,10 @@ hold_row_arm() {
     fi
 }
 
-hold_row_arm "input min delay control" 4 'iopadmap$din_a' clk_i clk 6 2 pos
-hold_row_arm "input min delay fails hold" 4 'iopadmap$din_b' clk_i clk 6 -3 neg
-hold_row_arm "output min delay fails hold" 1 'dout$intcell$OBUF' clk clk_i 7 5 neg
-hold_row_arm "output min delay to a generated clock at a port" 1 'sd_di$intcell$OBUF' clk sd_clk 7 2 lat
+hold_row_arm "input min delay control" din_a clk_i clk 6 2 pos
+hold_row_arm "input min delay fails hold" din_b clk_i clk 6 -3 neg
+hold_row_arm "output min delay fails hold" dout clk clk_i 7 5 neg
+hold_row_arm "output min delay to a generated clock at a port" sd_di clk sd_clk 7 2 lat
 
 line=$(grep -m1 'Max delay posedge clk_i (input delay) *-> posedge clk *:' "$OUT/full.log")
 case $line in
@@ -214,8 +220,8 @@ fi
 
 if NEXTPNR_TIMING_ONLY=1 pnr replay --xdc "$HERE/base.xdc" --xdc "$HERE/replay.xdc" --xdc "$HERE/gen.xdc" \
         --xdc "$HERE/io.xdc" --json "$OUT/routed.json" --no-pack --no-place --no-route; then
-    r=$(rows replay 4 'iopadmap$din_b' | awk -F'\t' '$6 + 0 == 10.5 && $9 == "clk_i" && $10 == "clk"')
-    s=$(rows replay 4 'iopadmap$sd_do' | awk -F'\t' '$9 == "sd_clk" && $10 == "clk" && $8 == 10')
+    r=$(rows replay.tsv din_b | awk -F'\t' '$6 + 0 == 10.5 && $9 == "clk_i" && $10 == "clk"')
+    s=$(rows replay.tsv sd_do | awk -F'\t' '$9 == "sd_clk" && $10 == "clk" && $8 == 10')
     if [ -n "$r" ] && [ -n "$s" ]; then
         report "PASS replay: under --no-pack the input delays are timed and the generated clock is related to clk"
     else
@@ -227,14 +233,15 @@ fi
 
 if pnr false_path --xdc "$HERE/base.xdc" --xdc "$HERE/gen.xdc" --xdc "$HERE/io.xdc" \
         --xdc "$HERE/xdc/ports_false_path.xdc" --json "$OUT/top.json" --fasm "$OUT/false_path.fasm" --timing-allow-fail; then
-    b=$(rows false_path 4 'iopadmap$din_b')
-    o=$(rows false_path 1 'dout$intcell$OBUF')
-    a=$(rows false_path 4 'iopadmap$din_a')
-    hb=$(awk -F'\t' 'NR > 1 && (index($4, "iopadmap$din_b") || index($1, "dout$intcell$OBUF"))' "$OUT/false_path.hold.tsv")
-    if [ -z "$b" ] && [ -z "$o" ] && [ -z "$hb" ] && [ -n "$a" ]; then
+    b=$(rows false_path.tsv din_b)
+    o=$(rows false_path.tsv dout)
+    a=$(rows false_path.tsv din_a)
+    hb=$(rows false_path.hold.tsv din_b; rows false_path.hold.tsv dout)
+    ha=$(rows false_path.hold.tsv din_a)
+    if [ -z "$b" ] && [ -z "$o" ] && [ -z "$hb" ] && [ -n "$a" ] && [ -n "$ha" ]; then
         report "PASS false path: set_false_path -from/-to [get_ports ...] removes the din_b and dout setup and hold checks and keeps din_a"
     else
-        report "FAIL false path: din_b row [$b], dout row [$o], hold rows [$hb], din_a row [$a]"
+        report "FAIL false path: din_b row [$b], dout row [$o], hold rows [$hb], din_a row [$a], din_a hold row [$ha]"
     fi
 else
     report "FAIL false path: nextpnr exited non-zero: $(grep -m1 '^ERROR' "$OUT/false_path.log")"

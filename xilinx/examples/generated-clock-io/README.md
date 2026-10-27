@@ -12,12 +12,15 @@ min -3 ns) and `sd_do` (max 3, min 0 ns after the falling edge of `sck`), and ou
 `dout` (max 9, min -5 ns) and `sd_di` (max 6, min -2 ns against the rising edge of `sck`).
 
 ```
-CHIPDB=/path/to/xc7a100tfgg484.bin YOSYS=yosys NEXTPNR=/path/to/nextpnr-xilinx ./run.sh
+CHIPDB=/path/to/xc7a100tfgg484.bin YOSYS=yosys NEXTPNR=/path/to/nextpnr-xilinx PYTHON=python3 ./run.sh
 ```
 
 `run.sh` exits non-zero if any arm fails and leaves its outputs in `$OUT` (a fresh `mktemp -d` by
 default). Every arm reads the `NEXTPNR_SETUP_EXPORT` table, the `NEXTPNR_HOLD_EXPORT` table or the
-log.
+log. A row for an IO delay is the one whose `net` is the net on the fabric side of that port's
+buffer: the `O` of the `IBUF` whose `I` is the input port, or the `I` of the `OBUF` whose `O` is the
+output port. `ionets.py` finds those nets by connectivity in the synthesised netlist, so the arms do
+not depend on the names synthesis gives to buffers or their nets.
 
 | arm | passes when |
 |---|---|
