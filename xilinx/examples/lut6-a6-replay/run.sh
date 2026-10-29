@@ -55,7 +55,7 @@ replay() {
         --write "$OUT/$1.placed.json" --log "$OUT/$1.log" -q --seed 1 >/dev/null 2>&1
 }
 
-for mode in strip narrow; do
+for mode in strip narrow labelled; do
     replay "$mode"
     rc=$?
     if [ "$rc" -ne 0 ]; then
@@ -67,6 +67,12 @@ for mode in strip narrow; do
     else
         report "FAIL replay-$mode: $(tail -1 "$OUT/$mode.grade"), first: $(head -1 "$OUT/$mode.grade")"
     fi
+    case $mode in narrow) continue ;; esac
+    if "$PYTHON" "$HERE/replay.py" func "$OUT/$mode.json" "$OUT/$mode.placed.json" >"$OUT/$mode.func" 2>&1; then
+        report "PASS replay-$mode-function: $(tail -1 "$OUT/$mode.func")"
+    else
+        report "FAIL replay-$mode-function: $(tail -1 "$OUT/$mode.func"), first: $(head -1 "$OUT/$mode.func")"
+    fi
 done
 
 replay wide
@@ -75,6 +81,14 @@ if [ "$rc" -ne 0 ] && grep -q 'Unable to find legal placement' "$OUT/wide.log"; 
     report "PASS replay-wide: six distinct A1..A5 nets per pair are refused: $(grep -m1 '^ERROR' "$OUT/wide.log")"
 else
     report "FAIL replay-wide: rc $rc, expected a refusal naming no legal placement"
+fi
+
+replay real6
+rc=$?
+if [ "$rc" -ne 0 ] && grep -q 'Unable to find legal placement' "$OUT/real6.log"; then
+    report "PASS replay-real6: a LUT6 using A6 as a signal is not paired: $(grep -m1 '^ERROR' "$OUT/real6.log")"
+else
+    report "FAIL replay-real6: rc $rc, expected a refusal naming no legal placement"
 fi
 
 echo "artefacts kept in $OUT"

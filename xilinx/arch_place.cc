@@ -1534,6 +1534,13 @@ void Arch::fixupPlacement()
                 if (it->second != ordinal)
                     ++relabel_wrong;
             };
+            std::string lut6_a6_tie_label;
+            if (lut6) {
+                NetInfo *a6 = get_net_or_empty(lut6, id_A6);
+                auto a6_attr = lut6->attrs.find(id("X_ORIG_PORT_A6"));
+                if (a6 != nullptr && a6->name == id("$PACKER_VCC_NET") && a6_attr != lut6->attrs.end())
+                    lut6_a6_tie_label = a6_attr->second.as_string();
+            }
             // Disconnect LUT inputs, and re-connect them to not overlap
             IdString ports[6] = {id_A1, id_A2, id_A3, id_A4, id_A5, id_A6};
             for (auto p : ports) {
@@ -1576,8 +1583,11 @@ void Arch::fixupPlacement()
                 // Only tie A6 to VCC when still floating: the input de-dup above
                 // may already have routed a shared input onto A6 (connect_port
                 // asserts on an already-driven port -- same guard as the SRL A6 tie).
-                if (lut6->ports.at(id_A6).net == nullptr)
+                if (lut6->ports.at(id_A6).net == nullptr) {
                     connect_port(getCtx(), nets[id("$PACKER_VCC_NET")].get(), lut6, id_A6);
+                    if (!lut6_a6_tie_label.empty())
+                        lut6->attrs[id("X_ORIG_PORT_A6")] = lut6_a6_tie_label;
+                }
             }
         }
     }
