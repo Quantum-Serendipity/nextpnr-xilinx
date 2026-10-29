@@ -1680,17 +1680,13 @@ bool Arch::pack()
 void Arch::assignCellInfo(CellInfo *cell)
 {
     if (cell->type == id_SLICE_LUTX) {
-        // input_count = number of connected input PORTS (NOT distinct nets):
-        // physical pin usage decides bel legality -- a LUT6 with I5 connected
-        // drives A6 and needs a 6LUT bel even if I5 duplicates another net.
-        // (The imported-6LUT+5LUT shared-input case that once motivated a
-        // distinct-net count is now handled by the fully-frozen-tile fast
-        // path in xc7_logic_tile_valid, so no dedup is needed here.)
         cell->lutInfo.input_count = 0;
+        const IdString vcc_net = id("$PACKER_VCC_NET");
         for (IdString a : {id_A1, id_A2, id_A3, id_A4, id_A5, id_A6}) {
             NetInfo *pn = get_net_or_empty(cell, a);
-            if (pn != nullptr)
-                cell->lutInfo.input_sigs[cell->lutInfo.input_count++] = pn;
+            if (pn == nullptr || (a == id_A6 && pn->name == vcc_net))
+                continue;
+            cell->lutInfo.input_sigs[cell->lutInfo.input_count++] = pn;
         }
         cell->lutInfo.output_count = 0;
         for (IdString o : {id_O6, id_O5}) {
