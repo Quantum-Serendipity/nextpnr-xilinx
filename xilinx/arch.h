@@ -332,7 +332,14 @@ NPNR_PACKED_STRUCT(struct ChipInfoPOD {
 
     int32_t num_speed_grades;
     RelPtr<TimingDataPOD> timing_data;
+    int32_t hold_corner;
 });
+
+enum : int32_t
+{
+    CHIPDB_VERSION = 2,
+    CHIPDB_HOLD_CORNER_FAST = 1,
+};
 
 /************************ End of chipdb section. ************************/
 

@@ -5,6 +5,40 @@ import bels, constid
 from nextpnr_structs import *
 import os
 
+HOLD_CHECK_RE = re.compile(r"\((HOLD|REMOVAL)\s+(\S+)\s+\((posedge|negedge)\s+(\S+)\)\s+\(([^:()]*)::([^:()]*)\)\)")
+
+def hold_checks(path):
+	with open(path) as f:
+		return [(m.group(1), m.group(2), m.group(3), m.group(4), m.group(5)) for m in HOLD_CHECK_RE.finditer(f.read())]
+
+def hold_min_corner(xraydb_root):
+	speed_dir = os.path.join(xraydb_root, "speed")
+	base_dir = os.path.join(xraydb_root, "timings")
+	if not os.path.isdir(speed_dir):
+		return False, "{} has no speed-graded overlay to compare against".format(xraydb_root)
+	paired = 0
+	overlays = []
+	for grade in sorted(os.listdir(speed_dir)):
+		grade_dir = os.path.join(speed_dir, grade, "timings")
+		if not os.path.isdir(grade_dir):
+			continue
+		overlays.append(grade)
+		for name in sorted(os.listdir(grade_dir)):
+			base_sdf = os.path.join(base_dir, name)
+			if not name.endswith(".sdf") or not os.path.exists(base_sdf):
+				continue
+			base = hold_checks(base_sdf)
+			graded = hold_checks(os.path.join(grade_dir, name))
+			if [c[:4] for c in base] != [c[:4] for c in graded]:
+				return False, "{} and speed/{}/timings/{} list different HOLD/REMOVAL checks".format(base_sdf, grade, name)
+			for b, g in zip(base, graded):
+				if float(b[4]) != float(g[4]):
+					return False, "{} {} {} has minimum {} in {} and {} in speed/{}".format(b[0], b[1], b[3], b[4], base_sdf, g[4], grade)
+			paired += len(base)
+	if paired == 0:
+		return False, "no HOLD/REMOVAL check of {} pairs with one in a speed-graded overlay".format(base_dir)
+	return True, "{} HOLD/REMOVAL minima in {} equal those of speed/{}".format(paired, base_dir, ", speed/".join(overlays))
+
 def main():
 
 	rwbase = os.path.join(os.path.dirname(os.path.realpath(__file__)), "..")
@@ -48,6 +82,8 @@ def main():
 			raise RuntimeError("no speed-graded timing directory {}".format(speed_root))
 		print("bbaexport: speed-graded timing from {}".format(speed_root), file=sys.stderr)
 	d = import_device(args.device, xraydb_root, metadata_root, speed_root)
+	hold_fast, hold_why = hold_min_corner(xraydb_root)
+	print("bbaexport: HOLD/REMOVAL minimum {} the fast corner: {}".format("attested as" if hold_fast else "NOT attested as", hold_why), file=sys.stderr)
 	# Import tile types
 	seen_tiletypes = set()
 	tile_types = []
@@ -359,7 +395,7 @@ def main():
 		bba.label("chip_info")
 		bba.str(d.name) # device name char*
 		bba.str("prjxray") # generator name char*
-		bba.u32(1) # version
+		bba.u32(2) # version
 		bba.u32(d.width) # tile grid width
 		bba.u32(d.height) # tile grid height
 		bba.u32(len(tile_insts)) # number of tiles
@@ -371,6 +407,7 @@ def main():
 		bba.ref("extra_constids") # reference to list of constid strings (extra to baked-in ones)
 		bba.u32(1) # only one speed grade currently
 		bba.ref("timing") # timing data
+		bba.u32(1 if hold_fast else 0)
 		bba.pop()
 if __name__ == '__main__':
 	main()

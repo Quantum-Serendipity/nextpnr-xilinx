@@ -90,6 +90,20 @@ Arch::Arch(ArchArgs args) : args(args)
         log_error("Unable to read chipdb %s\n", args.chipdb.c_str());
     }
 
+    if (chip_info->version != CHIPDB_VERSION)
+        log_error("chipdb %s (%s) is format version %d and this nextpnr reads only version %d: a chipdb before "
+                  "version 2 does not record which timing corner its HOLD and REMOVAL checks came from, and one "
+                  "exported from a prjxray-db before dd4c5c3d carries the slow corner's minimum (SLOW_MIN) there, "
+                  "which every hold and removal requirement would read as the fast corner. Re-export it with this "
+                  "nextpnr's bbaexport.py\n",
+                  args.chipdb.c_str(), chip_info->name.get(), chip_info->version, int(CHIPDB_VERSION));
+    if (chip_info->hold_corner != CHIPDB_HOLD_CORNER_FAST)
+        log_error("chipdb %s (%s) was exported from a prjxray-db whose HOLD and REMOVAL minimum bbaexport.py could "
+                  "not attest as the fast corner (no speed/<part>-<grade> overlay whose check minima all equal the "
+                  "base grade's), so every hold and removal requirement would be read from a minimum that may be "
+                  "the slow corner's. Export it from a database whose SDFs prjxray makesdf e9d3a6b7 or later wrote\n",
+                  args.chipdb.c_str(), chip_info->name.get());
+
     for (int i = 0; i < chip_info->extra_constids->bba_id_count; i++) {
         // log_info("%s %d\n", chip_info->extra_constids->bba_ids[i].get(), int(idstring_idx_to_str->size()));
         IdString::initialize_add(this, chip_info->extra_constids->bba_ids[i].get(),

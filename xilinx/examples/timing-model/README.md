@@ -35,5 +35,7 @@ row per hold check: `cell`, `port`, `hold_slack_ns`, `net`, `net_delay_min_ns`,
 | `srl_fp` | `set_false_path -to [get_cells sreg]` | the replay grades no SRL row |
 | `strict_*` | `--xdc-strict` | an unsupported command, a virtual clock, an unreadable `-waveform`, a `-waveform` whose rising edge is not at 0, a multicycle path with no multiplier and one with `-setup -hold` are each refused, naming why |
 | `lenient_*` | no `--xdc-strict` | the unsupported command, the unreadable `-waveform`, the `-waveform {2 5}` and the `-setup -hold` multicycle are accepted; `{2 5}` warns that the offset is not read and keeps its 3 ns high time, and the `-setup -hold` multicycle warns and is dropped, leaving `d_q` at 10 ns |
+| `old_format` | `mutate_chipdb.py ... version` sets a copy's format version to 1 | nextpnr refuses the copy, naming the version |
+| `slow_hold` | `mutate_chipdb.py ... slowhold` clears a copy's fast-corner hold marker | nextpnr refuses the copy, naming the unattested fast corner |
 | `zero_checks` | `mutate_chipdb.py` clears every timing check in a copy of the chipdb | nextpnr refuses the copy |
 | `zero_min` | `mutate_chipdb.py ... min` zeroes every propagation delay's minimum in a copy | every LUT, CARRY4 and SELMUX2_1 arc of `top.v` placed on the copy exports a zero minimum, not its maximum |

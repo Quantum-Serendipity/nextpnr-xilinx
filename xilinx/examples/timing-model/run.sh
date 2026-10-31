@@ -169,6 +169,24 @@ else
 fi
 rm -f "$OUT/nochecks.bin"
 
+marker_arm() {
+    local name=$1 mode=$2 why=$3
+    "$PYTHON" "$HERE/mutate_chipdb.py" "$CHIPDB" "$OUT/$name.bin" "$mode" > "$OUT/$name.txt" 2>&1
+    if [ ! -s "$OUT/$name.bin" ]; then
+        report "FAIL $name: $(cat "$OUT/$name.txt")"
+    elif "$NEXTPNR" --chipdb "$OUT/$name.bin" --xdc "$HERE/base.xdc" --json "$OUT/top.json" --pack-only \
+            --log "$OUT/$name.log" -q >/dev/null 2>&1; then
+        report "FAIL $name: a chipdb after '$(cat "$OUT/$name.txt")' was accepted"
+    elif grep -qF -- "$why" "$OUT/$name.log"; then
+        report "PASS $name: a chipdb after '$(cat "$OUT/$name.txt")' is refused, naming '$why'"
+    else
+        report "FAIL $name: refused without naming '$why': $(grep -m1 '^ERROR' "$OUT/$name.log")"
+    fi
+    rm -f "$OUT/$name.bin"
+}
+marker_arm old_format version "is format version 1 and this nextpnr reads only version 2"
+marker_arm slow_hold slowhold "could not attest as the fast corner"
+
 "$PYTHON" "$HERE/mutate_chipdb.py" "$CHIPDB" "$OUT/zeromin.bin" min > "$OUT/zeromin.txt" 2>&1
 if [ ! -s "$OUT/zeromin.bin" ]; then
     report "FAIL zero_min: $(cat "$OUT/zeromin.txt")"
