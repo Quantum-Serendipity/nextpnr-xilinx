@@ -100,6 +100,14 @@ Arch::Arch(ArchArgs args) : args(args)
         xc7 = true;
     else
         xc7 = false;
+    {
+        std::string chip_name = chip_info->name.get();
+        speed_grade_2 = chip_name.size() > 2 && chip_name.compare(chip_name.size() - 2, 2, "-2") == 0;
+        if (speed_grade_2)
+            log_info("chipdb %s: DSP48E1, ICAPE2 and LUTRAM fallback clock-to-out and setup literals are the -2 "
+                     "grade's\n",
+                     chip_name.c_str());
+    }
 
     tileStatus.resize(chip_info->num_tiles);
     for (int i = 0; i < chip_info->num_tiles; i++) {
@@ -3344,20 +3352,20 @@ double Arch::dsp48e1CombInputDelayNS(IdString base) const
     // output: worst case over the prjxray DSP_R.sdf combinational variants
     // (all internal registers bypassed). 0.0 == not a combinational data input.
     const std::string &s = base.str(this);
-    if (s == "A") return 5.40;
-    if (s == "ACIN") return 5.20;
-    if (s == "INMODE") return 5.48;
-    if (s == "D") return 5.05;
-    if (s == "B") return 3.85;
-    if (s == "BCIN") return 3.61;
-    if (s == "OPMODE") return 2.52;
-    if (s == "ALUMODE") return 2.29;
-    if (s == "CARRYINSEL") return 2.11;
-    if (s == "C") return 2.02;
-    if (s == "MULTSIGNIN") return 1.71;
-    if (s == "PCIN") return 1.71;
-    if (s == "CARRYIN") return 1.61;
-    if (s == "CARRYCASCIN") return 1.34;
+    if (s == "A") return gradeNS(5.40, 4.53);
+    if (s == "ACIN") return gradeNS(5.20, 4.36);
+    if (s == "INMODE") return gradeNS(5.48, 4.60);
+    if (s == "D") return gradeNS(5.05, 4.24);
+    if (s == "B") return gradeNS(3.85, 3.24);
+    if (s == "BCIN") return gradeNS(3.61, 3.03);
+    if (s == "OPMODE") return gradeNS(2.52, 2.11);
+    if (s == "ALUMODE") return gradeNS(2.29, 1.95);
+    if (s == "CARRYINSEL") return gradeNS(2.11, 1.78);
+    if (s == "C") return gradeNS(2.02, 1.69);
+    if (s == "MULTSIGNIN") return gradeNS(1.71, 1.44);
+    if (s == "PCIN") return gradeNS(1.71, 1.44);
+    if (s == "CARRYIN") return gradeNS(1.61, 1.37);
+    if (s == "CARRYCASCIN") return gradeNS(1.34, 1.14);
     return 0.0;
 }
 
@@ -3463,17 +3471,17 @@ Arch::SyncPinTiming Arch::icapPinTiming(const CellInfo *cell, IdString port) con
         t.kind = SYNC_PIN_CLOCK;
     } else if (base == "O" && n < s.size()) {
         t.kind = SYNC_PIN_OUTPUT;
-        t.clk_to_q_max = 5.200;
+        t.clk_to_q_max = gradeNS(5.200, 4.680);
         t.clk_to_q_min = 3.616;
     } else if (base == "I" && n < s.size()) {
         t.kind = SYNC_PIN_INPUT;
-        t.setup = 2.574;
+        t.setup = gradeNS(2.574, 2.378);
     } else if (s == "CSIB") {
         t.kind = SYNC_PIN_INPUT;
-        t.setup = 3.900;
+        t.setup = gradeNS(3.900, 3.510);
     } else if (s == "RDWRB") {
         t.kind = SYNC_PIN_INPUT;
-        t.setup = 6.427;
+        t.setup = gradeNS(6.427, 5.356);
     }
     return t;
 }
@@ -3523,12 +3531,12 @@ Arch::Dsp48e1Stage Arch::dsp48e1InputStage(const Dsp48e1Config &c, const std::st
     int len = 0;
     auto add = [&](bool on, double setup, double hold, double launch_p) { path[len++] = {on, setup, hold, launch_p}; };
     if (b == "A" || b == "ACIN") {
-        add(c.areg, b == "A" ? 0.30 : 0.27, 0.13, m ? 4.51 : 2.215);
+        add(c.areg, b == "A" ? 0.30 : 0.27, 0.13, m ? 4.51 : gradeNS(2.215, 1.866));
         add(ad && c.adreg, 1.48, -0.02, 3.10);
         add(m && c.mreg, 2.76, -0.01, 1.93);
         add(c.preg, m ? 4.60 : 1.98, -0.28, 0);
     } else if (b == "B" || b == "BCIN") {
-        add(c.breg, b == "B" ? 0.38 : 0.29, 0.16, m ? 3.813 : 1.87);
+        add(c.breg, b == "B" ? 0.38 : 0.29, 0.16, m ? gradeNS(3.813, 3.213) : 1.87);
         add(m && c.mreg, 2.76, -0.01, 1.93);
         add(c.preg, m ? 4.60 : 1.98, -0.28, 0);
     } else if (b == "D") {
@@ -3536,34 +3544,35 @@ Arch::Dsp48e1Stage Arch::dsp48e1InputStage(const Dsp48e1Config &c, const std::st
             return Dsp48e1Stage();
         add(c.dreg, 0.32, 0.27, 4.48);
         add(c.adreg, 1.48, -0.02, 3.10);
-        add(c.mreg, 3.158, -0.249, 1.93);
+        add(c.mreg, gradeNS(3.158, 2.649), -0.249, 1.93);
         add(c.preg, 4.50, -0.73, 0);
     } else if (b == "INMODE") {
-        add(c.inmodereg, 0.449, 0.186, c.use_dport ? 5.47 : 4.111);
-        add(ad && c.adreg, 2.089, -0.036, 3.10);
-        add(m && c.mreg, c.use_dport ? 3.372 : 2.012, c.use_dport ? -0.236 : -0.245, 1.93);
-        add(c.preg, c.use_dport ? 5.557 : 4.196, c.use_dport ? -0.98 : -0.991, 0);
+        add(c.inmodereg, gradeNS(0.449, 0.380), 0.186, c.use_dport ? gradeNS(5.47, 4.598) : gradeNS(4.111, 3.464));
+        add(ad && c.adreg, gradeNS(2.089, 1.752), -0.036, 3.10);
+        add(m && c.mreg, c.use_dport ? gradeNS(3.372, 2.826) : gradeNS(2.012, 1.691), c.use_dport ? -0.236 : -0.245,
+            1.93);
+        add(c.preg, c.use_dport ? gradeNS(5.557, 4.669) : gradeNS(4.196, 3.534), c.use_dport ? -0.98 : -0.991, 0);
     } else if (b == "C") {
         add(c.creg, 0.20, 0.19, 1.93);
         add(c.preg, 1.76, -0.26, 0);
     } else if (b == "PCIN") {
         add(c.preg, 1.51, -0.15, 0);
     } else if (b == "CARRYCASCIN") {
-        add(c.preg, 1.42, -0.256, 0);
+        add(c.preg, gradeNS(1.42, 1.206), -0.256, 0);
     } else if (b == "MULTSIGNIN") {
-        add(c.preg, 1.792, -0.215, 0);
+        add(c.preg, gradeNS(1.792, 1.506), -0.215, 0);
     } else if (b == "OPMODE") {
-        add(c.opmodereg, 0.449, 0.223, 2.231);
-        add(c.preg, 2.6, -0.64, 0);
+        add(c.opmodereg, gradeNS(0.449, 0.354), 0.223, gradeNS(2.231, 1.902));
+        add(c.preg, gradeNS(2.6, 2.182), -0.64, 0);
     } else if (b == "ALUMODE") {
-        add(c.alumodereg, 0.246, 0.208, 2.054);
-        add(c.preg, 2.369, -0.566, 0);
+        add(c.alumodereg, gradeNS(0.246, 0.198), 0.208, gradeNS(2.054, 1.751));
+        add(c.preg, gradeNS(2.369, 2.013), -0.566, 0);
     } else if (b == "CARRYIN") {
-        add(c.carryinreg, 0.299, 0.151, 1.764);
-        add(c.preg, 1.69, -0.48, 0);
+        add(c.carryinreg, gradeNS(0.299, 0.204), 0.151, gradeNS(1.764, 1.494));
+        add(c.preg, gradeNS(1.69, 1.433), -0.48, 0);
     } else if (b == "CARRYINSEL") {
-        add(c.carryinselreg, 0.208, 0.174, 1.927);
-        add(c.preg, 2.184, -0.506, 0);
+        add(c.carryinselreg, gradeNS(0.208, 0.164), 0.174, gradeNS(1.927, 1.642));
+        add(c.preg, gradeNS(2.184, 1.847), -0.506, 0);
     } else {
         return Dsp48e1Stage();
     }
@@ -3747,21 +3756,21 @@ Arch::SyncPinTiming Arch::dsp48e1PinTiming(const CellInfo *cell, IdString port) 
             {"CED", ad && c.dreg, 0.43, -0.03},
             {"CEM", m && c.mreg, 0.21, 0.20},
             {"CEP", c.preg, 0.43, 0.01},
-            {"CEAD", ad && c.adreg, 0.426, -0.038},
-            {"CECTRL", c.opmodereg || c.carryinselreg, 0.421, 0.123},
-            {"CEALUMODE", c.alumodereg, 0.411, 0.121},
-            {"CEINMODE", c.inmodereg, 0.603, 0.205},
-            {"CECARRYIN", c.carryinreg, 0.665, -0.049},
+            {"CEAD", ad && c.adreg, gradeNS(0.426, 0.340), -0.038},
+            {"CECTRL", c.opmodereg || c.carryinselreg, gradeNS(0.421, 0.337), 0.123},
+            {"CEALUMODE", c.alumodereg, gradeNS(0.411, 0.324), 0.121},
+            {"CEINMODE", c.inmodereg, gradeNS(0.603, 0.490), 0.205},
+            {"CECARRYIN", c.carryinreg, gradeNS(0.665, 0.539), -0.049},
             {"RSTA", c.areg, 0.46, 0.13},
             {"RSTB", c.breg, 0.46, 0.13},
             {"RSTC", c.creg, 0.08, 0.11},
             {"RSTD", ad && (c.dreg || c.adreg), 0.50, 0.08},
             {"RSTM", m && c.mreg, 0.23, 0.24},
             {"RSTP", c.preg, 0.30, 0.01},
-            {"RSTCTRL", c.opmodereg || c.carryinselreg, 0.469, 0.076},
-            {"RSTALUMODE", c.alumodereg, 0.411, 0.074},
-            {"RSTINMODE", c.inmodereg, 0.686, 0.074},
-            {"RSTALLCARRYIN", c.carryinreg || (m && c.mreg), 0.287, 0.123},
+            {"RSTCTRL", c.opmodereg || c.carryinselreg, gradeNS(0.469, 0.398), 0.076},
+            {"RSTALUMODE", c.alumodereg, gradeNS(0.411, 0.350), 0.074},
+            {"RSTINMODE", c.inmodereg, gradeNS(0.686, 0.539), 0.074},
+            {"RSTALLCARRYIN", c.carryinreg || (m && c.mreg), gradeNS(0.287, 0.241), 0.123},
     };
     for (const auto &cp : ctrl) {
         if (b != cp.base)
@@ -3791,16 +3800,16 @@ Arch::SyncPinTiming Arch::dsp48e1PinTiming(const CellInfo *cell, IdString port) 
         double preg_max, preg_min, launch_offset;
         bool always_registered;
     };
-    static const OutPin outs[] = {
+    const OutPin outs[] = {
             {"P", 0.37, 0.126, 0.0, false},
-            {"CARRYCASCOUT", 0.59, 0.383, 0.33, false},
-            {"PCOUT", 0.478, 0.400, 0.20, false},
-            {"CARRYOUT", 0.415, 0.126, 0.0, false},
-            {"MULTSIGNOUT", 0.478, 0.356, 0.0, false},
-            {"PATTERNDETECT", 0.662, 0.132, 0.57, false},
-            {"PATTERNBDETECT", 0.662, 0.132, 0.57, false},
-            {"OVERFLOW", 0.700, 0.144, 0.0, true},
-            {"UNDERFLOW", 0.525, 0.136, 0.0, true},
+            {"CARRYCASCOUT", 0.59, 0.383, gradeNS(0.33, 0.28), false},
+            {"PCOUT", gradeNS(0.478, 0.451), 0.400, gradeNS(0.20, 0.17), false},
+            {"CARRYOUT", gradeNS(0.415, 0.354), 0.126, 0.0, false},
+            {"MULTSIGNOUT", gradeNS(0.478, 0.451), 0.356, 0.0, false},
+            {"PATTERNDETECT", gradeNS(0.662, 0.570), 0.132, gradeNS(0.57, 0.48), false},
+            {"PATTERNBDETECT", gradeNS(0.662, 0.570), 0.132, gradeNS(0.57, 0.48), false},
+            {"OVERFLOW", gradeNS(0.700, 0.601), 0.144, 0.0, true},
+            {"UNDERFLOW", gradeNS(0.525, 0.450), 0.136, 0.0, true},
     };
     for (const auto &o : outs) {
         if (b != o.base)
@@ -4218,7 +4227,7 @@ Arch::SyncPinTiming Arch::dramPinTiming(const CellInfo *cell, IdString port, boo
     if (is_out || (is_srl && port == id_MC31)) {
         if (port == id_MC31)
             t.kind = SYNC_PIN_OUTPUT;
-        t.clk_to_q_max = is_srl ? 1.481 : 1.190;
+        t.clk_to_q_max = is_srl ? gradeNS(1.481, 1.219) : gradeNS(1.190, 0.981);
         t.clk_to_q_min = is_srl ? 0.236 : 0.340;
         if (lookup)
             dramClockToOut(cell, port, t.clk_to_q_max, t.clk_to_q_min);
@@ -4229,7 +4238,7 @@ Arch::SyncPinTiming Arch::dramPinTiming(const CellInfo *cell, IdString port, boo
     if (std::find(std::begin(write_pins), std::end(write_pins), port) == std::end(write_pins))
         return t;
     t.kind = SYNC_PIN_INPUT;
-    t.setup = is_srl ? 0.638 : 0.654;
+    t.setup = is_srl ? gradeNS(0.638, 0.518) : gradeNS(0.654, 0.535);
     t.hold = is_srl ? 0.269 : 0.745;
     if (!lookup)
         return t;
@@ -4290,8 +4299,8 @@ bool Arch::dramCheck(const CellInfo *cell, IdString port, TimingCheckType type, 
                     "fixed %s %.3fns\n",
                     variant.c_str(this), port.c_str(this), tile_type.c_str(this), cell->name.c_str(this),
                     getBelName(cell->bel).c_str(this), type == TIMING_CHECK_SETUP ? "setup" : "hold",
-                    cell->lutInfo.is_srl ? (type == TIMING_CHECK_SETUP ? 0.638 : 0.269)
-                                         : (type == TIMING_CHECK_SETUP ? 0.654 : 0.745));
+                    cell->lutInfo.is_srl ? (type == TIMING_CHECK_SETUP ? gradeNS(0.638, 0.518) : 0.269)
+                                         : (type == TIMING_CHECK_SETUP ? gradeNS(0.654, 0.535) : 0.745));
     return false;
 }
 

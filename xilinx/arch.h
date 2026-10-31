@@ -763,6 +763,8 @@ struct Arch : BaseCtx
     Arch(ArchArgs args);
 
     bool xc7;
+    bool speed_grade_2 = false;
+    double gradeNS(double grade1, double grade2) const { return speed_grade_2 ? grade2 : grade1; }
 
     std::string getChipName() const;
     std::string chipdb_route_identity() const;
