@@ -159,6 +159,7 @@ struct Timing
     };
     std::vector<HoldEndpoint> hold_endpoints;
     std::ofstream setup_export;
+    bool setup_export_start = false;
     std::vector<std::pair<delay_t, std::string>> setup_rows;
     std::unordered_map<std::string, size_t> setup_row_index;
     CriticalPathMap *crit_path;
@@ -1104,6 +1105,7 @@ struct Timing
         delay_t launch_delay = 0, min_launch_delay = 0;
         delay_t max_data_arrival = 0;
         const CellInfo *min_launch_cell = nullptr;
+        const CellInfo *max_launch_cell = nullptr;
         IdString min_launch_port;
         const NetInfo *min_launch_net = nullptr;
         std::vector<delay_t> min_required;
@@ -1132,9 +1134,11 @@ struct Timing
                 setup_export.open(sf);
                 if (!setup_export)
                     log_error("cannot open NEXTPNR_SETUP_EXPORT file '%s' for writing\n", sf);
+                setup_export_start = knobs::is_set("NEXTPNR_SETUP_EXPORT_START");
                 setup_export << "cell\tport\tslack_ns\tnet\tnet_delay_ns\tdriver_arrival_ns\tsetup_ns\tperiod_ns\tlaunch_"
                                 "clk\tcapture_clk\tpath_len\tdelay_source\tlaunch_clk_delay_ns\tcapture_clk_delay_"
-                                "ns\trequirement_source\n";
+                                "ns\trequirement_source"
+                             << (setup_export_start ? "\tstart_cell\tstart_clk" : "") << '\n';
             }
             if (const char *hf = knobs::get("NEXTPNR_HOLD_EXPORT")) {
                 hold_export.open(hf);
@@ -1188,6 +1192,7 @@ struct Timing
                             sd.min_launch_delay = lat.min;
                             sd.min_launch_net = ctx->nets.at(st.clock).get();
                             sd.max_data_arrival = st.max_arrival;
+                            sd.max_launch_cell = cell.second.get();
                         }
                         continue;
                     }
@@ -1213,6 +1218,7 @@ struct Timing
                         sd.min_launch_cell = cell.second.get();
                         sd.min_launch_port = clkInfo.clock_port;
                         sd.max_data_arrival = clkInfo.clockToQ.maxDelay();
+                        sd.max_launch_cell = cell.second.get();
                     }
 
                 } else {
@@ -1221,6 +1227,7 @@ struct Timing
                         TimingData td;
                         td.false_startpoint = (portClass == TMG_GEN_CLOCK || portClass == TMG_IGNORE);
                         td.max_arrival = 0;
+                        td.max_launch_cell = cell.second.get();
                         net_data[o->net][ClockEvent{async_clock, RISING_EDGE, start_tag(cell.second.get())}] = td;
                     }
 
@@ -1270,6 +1277,7 @@ struct Timing
                             sd.min_launch_cell = cell.second.get();
                             sd.min_launch_port = clkInfo.clock_port;
                             sd.max_data_arrival = clkInfo.clockToQ.maxDelay();
+                            sd.max_launch_cell = cell.second.get();
                         }
                         if (!port_fanin.count(o))
                             topographical_order.emplace_back(o->net);
@@ -1552,6 +1560,7 @@ struct Timing
                             if (cand > arrival) {
                                 arrival = cand;
                                 data.launch_delay = nd.launch_delay;
+                                data.max_launch_cell = nd.max_launch_cell;
                             }
                             data.max_data_arrival =
                                     std::max(data.max_data_arrival, nd.max_data_arrival + net_delay + comb_delay.maxDelay());
@@ -1651,8 +1660,12 @@ struct Timing
                                     << ((nd.estimated || (net_delays && net->wires.empty())) ? "estimate" : "routed")
                                     << '\t' << ctx->getDelayNS(dp_only ? delay_t(0) : nd.launch_delay) << '\t'
                                     << ctx->getDelayNS(dp_only ? delay_t(0) : capture_delay) << '\t'
-                                    << setup_source(exc, base_requirement_source(startdomain.first, clksig, edge))
-                                    << '\n';
+                                    << setup_source(exc, base_requirement_source(startdomain.first, clksig, edge));
+                                if (setup_export_start)
+                                    row << '\t' << (nd.max_launch_cell ? nd.max_launch_cell->name.c_str(ctx) : "-")
+                                        << '\t' << startdomain.first.clock.c_str(ctx) << '/'
+                                        << (startdomain.first.edge == RISING_EDGE ? "rise" : "fall");
+                                row << '\n';
                                 std::string key = std::string(usr.cell->name.c_str(ctx)) + '\t' + usr.port.c_str(ctx) +
                                                   '\t' + startdomain.first.clock.c_str(ctx) + '\t' +
                                                   std::to_string(int(startdomain.first.edge)) + '\t' +

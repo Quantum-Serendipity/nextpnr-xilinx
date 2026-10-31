@@ -90,6 +90,7 @@ const KnobDef knob_table[] = {
         {"NEXTPNR_ROUTER2_MAX_STALL", nullptr, false},
         {"NEXTPNR_RX_PLAIN_LVCMOS", nullptr, false},
         {"NEXTPNR_SETUP_EXPORT", nullptr, true},
+        {"NEXTPNR_SETUP_EXPORT_START", nullptr, false},
         {"NEXTPNR_SKIP_FAILED_ARCS", nullptr, false},
         {"NEXTPNR_SPREAD_SCALE_X", "placerHeap/spreadScaleX", true},
         {"NEXTPNR_SPREAD_SCALE_Y", "placerHeap/spreadScaleY", true},
