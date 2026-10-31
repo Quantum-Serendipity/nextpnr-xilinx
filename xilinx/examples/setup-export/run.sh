@@ -55,7 +55,7 @@ column_values() {
                 c { print $c } END { if (!c) print "(no delay_source column)" }' "$1" | sort | uniq -c | tr -s ' \n' ' '
 }
 
-if ! NEXTPNR_SETUP_EXPORT="$OUT/routed.tsv" NEXTPNR_HOLD_EXPORT="$OUT/routed-hold.tsv" pnr full --write "$OUT/routed.json"; then
+if ! NEXTPNR_SETUP_EXPORT="$OUT/routed.tsv" pnr full --set knob/hold_export="$OUT/routed-hold.tsv" --write "$OUT/routed.json"; then
     echo "FAIL nextpnr place and route: $(grep -m1 '^ERROR' "$OUT/full.log")"
     exit 1
 fi
@@ -135,7 +135,7 @@ if ! "$YOSYS" -q -l "$OUT/fab-yosys.log" \
         -p "read_verilog \"$HERE/fabclk.v\"; synth_xilinx -flatten -abc9 -noclkbuf -arch xc7 -top top; write_json \"$OUT/fab.json\"" \
         >/dev/null 2>&1; then
     report "FAIL hold CPPR fabric: yosys"
-elif ! NEXTPNR_SETUP_EXPORT="$OUT/fab.tsv" NEXTPNR_HOLD_EXPORT="$OUT/fab-hold.tsv" "$NEXTPNR" --chipdb "$CHIPDB" \
+elif ! NEXTPNR_SETUP_EXPORT="$OUT/fab.tsv" "$NEXTPNR" --set knob/hold_export="$OUT/fab-hold.tsv" --chipdb "$CHIPDB" \
         --xdc "$HERE/pins.xdc" --xdc "$HERE/clock.xdc" --json "$OUT/fab.json" --write "$OUT/fab-routed.json" \
         --log "$OUT/fab.log" -q --seed 1 >/dev/null 2>&1; then
     report "FAIL hold CPPR fabric: nextpnr place and route: $(grep -m1 '^ERROR' "$OUT/fab.log")"

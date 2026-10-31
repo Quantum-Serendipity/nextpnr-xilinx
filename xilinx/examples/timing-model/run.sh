@@ -49,8 +49,8 @@ if ! synth top || ! synth duty; then
     exit 1
 fi
 
-if ! NEXTPNR_SETUP_EXPORT="$OUT/full.tsv" NEXTPNR_HOLD_EXPORT="$OUT/full.hold.tsv" NEXTPNR_ARC_EXPORT="$OUT/arcs.tsv" \
-        "$NEXTPNR" --chipdb "$CHIPDB" --xdc "$HERE/base.xdc" --json "$OUT/top.json" --write "$OUT/routed.json" --sdf "$OUT/full.sdf" \
+if ! NEXTPNR_SETUP_EXPORT="$OUT/full.tsv" \
+        "$NEXTPNR" --set knob/hold_export="$OUT/full.hold.tsv" --set knob/arc_export="$OUT/arcs.tsv" --chipdb "$CHIPDB" --xdc "$HERE/base.xdc" --json "$OUT/top.json" --write "$OUT/routed.json" --sdf "$OUT/full.sdf" \
         --log "$OUT/full.log" -q --seed 1 >/dev/null 2>&1; then
     echo "FAIL nextpnr place and route: $(grep -m1 '^ERROR' "$OUT/full.log")"
     exit 1
@@ -73,8 +73,8 @@ fi
 replay() {
     local name=$1
     shift
-    NEXTPNR_TIMING_ONLY=1 NEXTPNR_SETUP_EXPORT="$OUT/$name.tsv" NEXTPNR_HOLD_EXPORT="$OUT/$name.hold.tsv" \
-        "$NEXTPNR" --chipdb "$CHIPDB" --xdc "$HERE/base.xdc" --xdc "$HERE/replay.xdc" "$@" --json "$R" \
+    NEXTPNR_TIMING_ONLY=1 NEXTPNR_SETUP_EXPORT="$OUT/$name.tsv" \
+        "$NEXTPNR" --set knob/hold_export="$OUT/$name.hold.tsv" --chipdb "$CHIPDB" --xdc "$HERE/base.xdc" --xdc "$HERE/replay.xdc" "$@" --json "$R" \
         --no-pack --no-place --no-route --log "$OUT/$name.log" -q >/dev/null 2>&1
 }
 
@@ -172,7 +172,7 @@ rm -f "$OUT/nochecks.bin"
 "$PYTHON" "$HERE/mutate_chipdb.py" "$CHIPDB" "$OUT/zeromin.bin" min > "$OUT/zeromin.txt" 2>&1
 if [ ! -s "$OUT/zeromin.bin" ]; then
     report "FAIL zero_min: $(cat "$OUT/zeromin.txt")"
-elif NEXTPNR_ARC_EXPORT="$OUT/zeromin.arcs.tsv" "$NEXTPNR" --chipdb "$OUT/zeromin.bin" --xdc "$HERE/base.xdc" \
+elif "$NEXTPNR" --set knob/arc_export="$OUT/zeromin.arcs.tsv" --chipdb "$OUT/zeromin.bin" --xdc "$HERE/base.xdc" \
         --json "$OUT/top.json" --no-route --log "$OUT/zero_min.log" -q --seed 1 >/dev/null 2>&1; then
     grade zero_min "$OUT/zeromin.arcs.tsv" zero_min
 else
