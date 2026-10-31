@@ -1,6 +1,6 @@
 from xilinx_device import *
 from bba import BBAWriter
-import sys, argparse
+import sys, argparse, re
 import bels, constid
 from nextpnr_structs import *
 import os
@@ -15,6 +15,7 @@ def main():
 	parser.add_argument("--device", help="name of device to export", type=str, required=True)
 	parser.add_argument("--constids", help="name of nextpnr constids file to read", type=str, default=os.path.join(rwbase, "constids.inc"))
 	parser.add_argument("--bba", help="bba file to write", type=str, required=True)
+	parser.add_argument("--speed-grade", help="take routing and cell timing from <xray>/speed/<device>-<grade>; must match the --device suffix", type=str, default=None)
 	args = parser.parse_args()
 	# Read baked-in constids
 	with open(args.constids, "r") as cf:
@@ -34,7 +35,19 @@ def main():
 	if "xc7v" in args.device:
 		metadata_root = metadata_root.replace("artix7", "virtex7")
 		xraydb_root = xraydb_root.replace("artix7", "virtex7")
-	d = import_device(args.device, xraydb_root, metadata_root)
+	speed_root = None
+	if args.speed_grade is not None:
+		device_grade = args.device.rsplit("-", 1)[-1]
+		if device_grade != args.speed_grade:
+			raise RuntimeError("--speed-grade {} does not match the grade of --device {}".format(args.speed_grade, args.device))
+		match = re.search(r"^(xc7(?:[sakz]\d+t?|v[xh]?\d+t))\w+-\w+$", args.device)
+		if not match:
+			raise RuntimeError("{} is not known device name".format(args.device))
+		speed_root = os.path.join(xraydb_root, "speed", match.group(1) + "-" + args.speed_grade)
+		if not os.path.isdir(speed_root):
+			raise RuntimeError("no speed-graded timing directory {}".format(speed_root))
+		print("bbaexport: speed-graded timing from {}".format(speed_root), file=sys.stderr)
+	d = import_device(args.device, xraydb_root, metadata_root, speed_root)
 	# Import tile types
 	seen_tiletypes = set()
 	tile_types = []
