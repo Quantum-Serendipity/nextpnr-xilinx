@@ -1,6 +1,6 @@
 # Timing model
 
-Places and routes `top.v` on an `xc7a100tfgg484` with a 10 ns clock, places `duty.v`, replays timing
+Places and routes `top.v` and `holdside.v` on an `xc7a100tfgg484` with a 10 ns clock, places `duty.v`, replays timing
 on the routed netlist under the files in `xdc/`, and grades the exports with `grade.py`. The SDF
 values are read from `$PRJXRAY_DB/artix7/timings` and the site types from
 `$PRJXRAY_DB/artix7/xc7a100t/tilegrid.json`, not from the chipdb.
@@ -35,6 +35,7 @@ row per hold check: `cell`, `port`, `hold_slack_ns`, `net`, `net_delay_min_ns`,
 | `srl_fp` | `set_false_path -to [get_cells sreg]` | the replay grades no SRL row |
 | `strict_*` | `--xdc-strict` | an unsupported command, a virtual clock, an unreadable `-waveform`, a `-waveform` whose rising edge is not at 0, a multicycle path with no multiplier and one with `-setup -hold` are each refused, naming why |
 | `lenient_*` | no `--xdc-strict` | the unsupported command, the unreadable `-waveform`, the `-waveform {2 5}` and the `-setup -hold` multicycle are accepted; `{2 5}` warns that the offset is not read and keeps its 3 ns high time, and the `-setup -hold` multicycle warns and is dropped, leaving `d_q` at 10 ns |
+| `hold_side` | `holdside.v` routed | every flip-flop `D` hold row and every distributed-RAM `WA1`-`WA6` hold row has `hold_ns` equal to its site's SDF `HOLD` minimum (the fast corner), clamped at 0, plus the guard band the log states for that pin class (none for `WA1`, `WA2` and `WA6`), and at least one row of each kind has SDF fast and slow sides that differ, so a nextpnr reading the slow side turns it red |
 | `old_format` | `mutate_chipdb.py ... version` sets a copy's format version to 1 | nextpnr refuses the copy, naming the version |
 | `slow_hold` | `mutate_chipdb.py ... slowhold` clears a copy's fast-corner hold marker | nextpnr refuses the copy, naming the unattested fast corner |
 | `zero_checks` | `mutate_chipdb.py` clears every timing check in a copy of the chipdb | nextpnr refuses the copy |

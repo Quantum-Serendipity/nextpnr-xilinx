@@ -115,8 +115,25 @@ Arch::Arch(ArchArgs args) : args(args)
     else
         xc7 = false;
     {
+        static const HoldCalibration hold_calibrations[] = {
+                {1, 0.31f, 0.040, 0.022, 0.033, 0.057, 0.047, 0.056, 0.030},
+                {2, 0.38f, 0.040, 0.022, 0.033, 0.057, 0.047, 0.056, 0.030},
+        };
         std::string chip_name = chip_info->name.get();
-        speed_grade_2 = chip_name.size() > 2 && chip_name.compare(chip_name.size() - 2, 2, "-2") == 0;
+        size_t dash = chip_name.rfind('-');
+        std::string grade = dash == std::string::npos ? std::string() : chip_name.substr(dash + 1);
+        for (const HoldCalibration &c : hold_calibrations)
+            if (grade == std::to_string(c.grade))
+                hold_cal = &c;
+        if (hold_cal == nullptr)
+            log_error("chipdb %s has speed grade '%s', and only grades -1 and -2 have a hold calibration (fabric "
+                      "routing minimum as a fraction of the slow corner, and the site-pin hold guard band)\n",
+                      chip_name.c_str(), grade.c_str());
+        speed_grade_2 = hold_cal->grade == 2;
+        log_info("chipdb %s: speed grade -%d; hold-corner fabric routing is %.2f of the slow corner; hold guard "
+                 "band FF D %.3f, LUTRAM WA3 %.3f WA4 %.3f WA5 %.3f WE %.3f, SRL WE %.3f, LUTRAM/SRL DI %.3f ns\n",
+                 chip_name.c_str(), hold_cal->grade, hold_cal->route_scale, hold_cal->ff_d, hold_cal->lutram_wa3,
+                 hold_cal->lutram_wa4, hold_cal->lutram_wa5, hold_cal->lutram_we, hold_cal->srl_we, hold_cal->dram_di);
         if (speed_grade_2)
             log_info("chipdb %s: DSP48E1, ICAPE2 and LUTRAM fallback clock-to-out and setup literals are the -2 "
                      "grade's\n",
@@ -4217,7 +4234,7 @@ TimingClockingInfo Arch::getPortClockingInfo(const CellInfo *cell, IdString port
     else
         xc7FFTimingFallback(cell, variant, port, TIMING_CHECK_SETUP, expected, 0.05);
     if (xc7_cell_timing_check_lookup(tt_id, inst_id, variant, TIMING_CHECK_HOLD, sig, id_CLK, v))
-        info.hold.delay = std::max<delay_t>(v, 0);
+        info.hold.delay = std::max<delay_t>(v, 0) + getDelayFromNS(holdGuardBand(cell, port)).maxDelay();
     else
         xc7FFTimingFallback(cell, variant, port, TIMING_CHECK_HOLD, expected, 0.143);
     return info;
@@ -4260,8 +4277,27 @@ Arch::SyncPinTiming Arch::dramPinTiming(const CellInfo *cell, IdString port, boo
     if (dramCheck(cell, port, TIMING_CHECK_SETUP, v))
         t.setup = v;
     if (dramCheck(cell, port, TIMING_CHECK_HOLD, v))
-        t.hold = std::max(v, 0.0);
+        t.hold = std::max(v, 0.0) + holdGuardBand(cell, port);
     return t;
+}
+
+double Arch::holdGuardBand(const CellInfo *cell, IdString port) const
+{
+    if (cell->type == id_SLICE_FFX)
+        return port == id_D ? hold_cal->ff_d : 0.0;
+    if (cell->type != id_SLICE_LUTX || !(cell->lutInfo.is_memory || cell->lutInfo.is_srl))
+        return 0.0;
+    if (port == id_WA3)
+        return hold_cal->lutram_wa3;
+    if (port == id_WA4)
+        return hold_cal->lutram_wa4;
+    if (port == id_WA5)
+        return hold_cal->lutram_wa5;
+    if (port == id_WE)
+        return cell->lutInfo.is_srl ? hold_cal->srl_we : hold_cal->lutram_we;
+    if (port == id_DI1 || port == id_DI2)
+        return hold_cal->dram_di;
+    return 0.0;
 }
 
 bool Arch::dramTimingSite(const CellInfo *cell, int &tt_id, int &inst_id, IdString &variant, bool &is_lut5) const

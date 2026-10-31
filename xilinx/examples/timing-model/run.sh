@@ -44,7 +44,7 @@ synth() {
         >/dev/null 2>&1
 }
 
-if ! synth top || ! synth duty; then
+if ! synth top || ! synth duty || ! synth holdside; then
     echo "FAIL yosys"
     exit 1
 fi
@@ -68,6 +68,14 @@ if NEXTPNR_SETUP_EXPORT="$OUT/duty.tsv" "$NEXTPNR" --chipdb "$CHIPDB" --xdc "$HE
     grade period "$OUT/duty-placed.json" "$OUT/duty.tsv" pb_q ck0 ck0b period_ns 5 duty_mmcm_b
 else
     report "FAIL duty_mmcm_b: nextpnr: $(grep -m1 '^ERROR' "$OUT/duty.log")"
+fi
+
+if NEXTPNR_HOLD_EXPORT="$OUT/holdside.hold.tsv" "$NEXTPNR" --chipdb "$CHIPDB" --xdc "$HERE/base.xdc" \
+        --json "$OUT/holdside.json" --write "$OUT/holdside-routed.json" --log "$OUT/holdside.log" -q --seed 1 \
+        >/dev/null 2>&1; then
+    grade hold_side "$OUT/holdside-routed.json" "$OUT/holdside.hold.tsv" "$TIMINGS" "$TILEGRID" "$OUT/holdside.log" hold_side
+else
+    report "FAIL hold_side: nextpnr: $(grep -m1 '^ERROR' "$OUT/holdside.log")"
 fi
 
 replay() {

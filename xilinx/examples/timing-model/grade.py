@@ -378,10 +378,83 @@ def grade_norow(argv):
     return "PASS %s: %s %s" % (name, grp, "is graded" if present == "1" else "is not graded")
 
 
+def sdf_checks(timings, tiletype, cache={}):
+    if tiletype not in cache:
+        out = {}
+        path = os.path.join(timings, tiletype + ".sdf")
+        if os.path.exists(path):
+            txt = open(path).read()
+            for m in re.finditer(r'\(CELL\s*\(CELLTYPE "([^"]+)"\)\s*\(INSTANCE ([^)]*)\)(.*?)\n    \)', txt, re.S):
+                for c in re.finditer(r"\((HOLD|REMOVAL|SETUP|RECOVERY) (\S+) \((?:posedge|negedge) (\S+)\) "
+                                     r"\(([^:()]*)::([^:()]*)\)\)", m.group(3)):
+                    out[(m.group(2).strip(), m.group(1), c.group(1), c.group(2), c.group(3))] = (
+                        float(c.group(4)), float(c.group(5)))
+        cache[tiletype] = out
+    return cache[tiletype]
+
+
+GUARD_RE = re.compile(r"hold guard band FF D ([0-9.]+), LUTRAM WA3 ([0-9.]+) WA4 ([0-9.]+) WA5 ([0-9.]+) "
+                      r"WE ([0-9.]+), SRL WE ([0-9.]+), LUTRAM/SRL DI ([0-9.]+) ns")
+
+
+def grade_hold_side(argv):
+    routed, hold_tsv, timings, tilegrid, log, name = argv
+    m = GUARD_RE.search(open(log).read()) if os.path.exists(log) else None
+    if m is None:
+        return "FAIL %s: the log states no hold guard band" % name
+    ff_d, wa3, wa4, wa5 = (float(m.group(i)) for i in range(1, 5))
+    band = {"WA1": 0.0, "WA2": 0.0, "WA3": wa3, "WA4": wa4, "WA5": wa5, "WA6": 0.0}
+    cols, rows = read_tsv(hold_tsv)
+    if cols is None:
+        return "FAIL %s: no NEXTPNR_HOLD_EXPORT file was written" % name
+    with open(routed) as f:
+        cells = json.load(f)["modules"]["top"]["cells"]
+    sdf = Sdf(timings, tilegrid)
+    seen = {"FF D": 0, "LUTRAM WA": 0}
+    split = {"FF D": 0, "LUTRAM WA": 0}
+    for r in rows:
+        cell = cells.get(r["cell"])
+        if cell is None:
+            continue
+        attrs = cell.get("attributes", {})
+        tiletype, sitetype, b = sdf.locate(attrs.get("NEXTPNR_BEL", ""))
+        if tiletype is None:
+            continue
+        if cell["type"] == "SLICE_FFX" and r["port"] == "D":
+            kind, inst, ct, pin, guard = "FF D", sitetype, "FF_INIT" if b.endswith("5FF") else "REG_INIT_FF", "DIN", ff_d
+        elif cell["type"] == "SLICE_LUTX" and "X_LUT_AS_DRAM" in attrs and r["port"] in band:
+            kind, inst, pin, guard = "LUTRAM WA", sitetype, r["port"], band[r["port"]]
+            ct = "LUT_OR_MEM5LRAM" if b.endswith("5LUT") else "LUT_OR_MEM6LRAM"
+        else:
+            continue
+        want = sdf_checks(timings, tiletype).get((inst, ct, "HOLD", pin, "CLK"))
+        if want is None:
+            return "FAIL %s: %s.sdf has no %s %s HOLD %s check for %s.%s" % (name, tiletype, inst, ct, pin, r["cell"],
+                                                                         r["port"])
+        got = float(r["hold_ns"])
+        fast = max(want[0], 0.0) + guard
+        slow = max(want[1], 0.0) + guard
+        if abs(got - fast) > TOL:
+            return "FAIL %s: %s.%s at %s hold_ns %.3f where %s.sdf %s %s HOLD %s gives fast %.3f (+%.3f guard = %.3f), " \
+                   "slow %.3f (+guard %.3f)" % (name, r["cell"], r["port"], attrs.get("NEXTPNR_BEL"), got, tiletype,
+                                               inst, ct, pin, want[0], guard, fast, want[1], slow)
+        seen[kind] += 1
+        if abs(fast - slow) > TOL:
+            split[kind] += 1
+    for kind in seen:
+        if split[kind] == 0:
+            return "FAIL %s: no %s hold row whose SDF fast and slow sides differ (%d %s row(s) checked)" % (
+                name, kind, seen[kind], kind)
+    return "PASS %s: %d FF D and %d LUTRAM WA hold row(s) read the SDF HOLD minimum (fast corner) plus the logged " \
+           "guard band, %d and %d of them where the slow side differs" % (name, seen["FF D"], seen["LUTRAM WA"],
+                                                                         split["FF D"], split["LUTRAM WA"])
+
+
 def main():
     cmd, argv = sys.argv[1], sys.argv[2:]
     print({"arcs": grade_arcs, "hold": grade_hold, "skew": grade_skew, "period": grade_period,
-           "norow": grade_norow, "zero_min": grade_zero_min, "srl_launch": grade_srl_launch}[cmd](argv))
+           "norow": grade_norow, "zero_min": grade_zero_min, "srl_launch": grade_srl_launch,
+           "hold_side": grade_hold_side}[cmd](argv))
 
 
 main()
