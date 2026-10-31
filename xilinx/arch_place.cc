@@ -1091,7 +1091,7 @@ bool Arch::isBelLocationValid(BelId bel) const
         LogicTileStatus &lts = *(tileStatus[bel.tile].lts);
         if (xc7) {
             bool v = xc7_logic_tile_valid(belTileType, lts);
-            if (!v && dbg_validity_runtime)
+            if (!v && dbg_validity_runtime())
                 log_info("  invalid-check: xc7_logic_tile_valid=false (type %s)\n", belTileType.c_str(this));
             return v;
         } else
