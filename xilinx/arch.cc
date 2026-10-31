@@ -910,6 +910,14 @@ delay_t Arch::estimateDelay(WireId src, WireId dst, bool) const
                 if (tw.num_downhill == 0 && src_intent != ID_NODE_PINFEED)
                     continue;
                 int tix = ti % chip_info->width, tiy = ti / chip_info->width;
+                if (estimate_nearest_wire) {
+                    if (src_x == -1 || std::abs(tix - dst_x) + std::abs(tiy - dst_y) <
+                                               std::abs(src_x - dst_x) + std::abs(src_y - dst_y)) {
+                        src_x = tix;
+                        src_y = tiy;
+                    }
+                    continue;
+                }
                 if (src_x == -1 || std::abs(tix - dst_x) < std::abs(src_x - dst_x))
                     src_x = tix;
                 if (src_y == -1 || std::abs(tiy - dst_y) < std::abs(src_y - dst_y))
@@ -2988,6 +2996,9 @@ void Arch::findSourceSinkLocations()
 bool Arch::route()
 {
     dsp48e1CacheDrive();
+    estimate_nearest_wire = bool_or_default(settings, id("router/estimateNearestWire"), false);
+    if (estimate_nearest_wire)
+        log_info("estimateDelay: a nodal source is placed at its single tile wire nearest the sink\n");
     assign_budget(getCtx(), true);
     std::string router = str_or_default(settings, id("router"), defaultRouter);
     // Route dedicated clocks BEFORE the Vcc flood.  The packer ties BUFGCTRL

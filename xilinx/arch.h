@@ -763,6 +763,7 @@ struct Arch : BaseCtx
     Arch(ArchArgs args);
 
     bool xc7;
+    bool estimate_nearest_wire = false;
 
     std::string getChipName() const;
     std::string chipdbSpeedGrade() const;
