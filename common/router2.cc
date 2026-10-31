@@ -778,9 +778,14 @@ struct Router2
         auto &nd = nets.at(net->udata);
         float base_cost = ctx->getDelayNS(ctx->getPipDelay(pip).maxDelay() + ctx->getWireDelay(wire).maxDelay() +
                                           ctx->getDelayEpsilon());
-        const float cw = arc_crit_weight(nd, user);
-        float present_cost = 1.0f + (present_wire_cost(wd, net->udata) - 1.0f) * cw;
-        float hist_cost = 1.0f + cw * (wd.hist_cong_cost - 1.0f);
+        const bool weighted = cfg.crit_weight && timing_driven;
+        const float cw = weighted ? arc_crit_weight(nd, user) : 1.0f;
+        float present_cost = present_wire_cost(wd, net->udata);
+        float hist_cost = wd.hist_cong_cost;
+        if (weighted) {
+            present_cost = 1.0f + (present_cost - 1.0f) * cw;
+            hist_cost = 1.0f + cw * (hist_cost - 1.0f);
+        }
         float bias_cost = 0;
         int source_uses = 0;
         if (wd.bound_nets.count(net->udata))
@@ -799,6 +804,8 @@ struct Router2
             bias_cost = cfg.bias_cost_factor * (base_cost / int(net->users.size())) *
                         ((std::abs(pl.x - nd.cx) + std::abs(pl.y - nd.cy)) / float(nd.hpwl));
         }
+        if (!weighted)
+            return base_cost * hist_cost * present_cost / (1 + source_uses) + bias_cost;
         return base_cost * hist_cost * present_cost / (1 + source_uses * cw) + bias_cost;
     }
 
@@ -808,6 +815,8 @@ struct Router2
         int source_uses = 0;
         if (wd.bound_nets.count(net->udata))
             source_uses = wd.bound_nets.at(net->udata).first;
+        if (!(cfg.crit_weight && timing_driven))
+            return (ctx->getDelayNS(ctx->estimateDelay(wd.w, sink)) / (1 + source_uses)) + cfg.ipin_cost_adder;
         const float cw = arc_crit_weight(nets.at(net->udata), user);
         return (ctx->getDelayNS(ctx->estimateDelay(wd.w, sink)) / (1 + source_uses * cw)) + cfg.ipin_cost_adder;
     }
