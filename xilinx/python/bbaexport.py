@@ -11,33 +11,49 @@ def hold_checks(path):
 	with open(path) as f:
 		return [(m.group(1), m.group(2), m.group(3), m.group(4), m.group(5)) for m in HOLD_CHECK_RE.finditer(f.read())]
 
-def hold_min_corner(xraydb_root):
-	speed_dir = os.path.join(xraydb_root, "speed")
+CORNER_FILE = "corner"
+CORNER_FAST_HOLD = "hold_removal=fast::slow"
+
+def read_corner(timings_dir):
+	path = os.path.join(timings_dir, CORNER_FILE)
+	if not os.path.isfile(path):
+		return None, "{} has no {} file naming the corner of its check values".format(timings_dir, CORNER_FILE)
+	with open(path) as f:
+		fields = f.read().split()
+	if CORNER_FAST_HOLD not in fields:
+		return None, "{} does not say {}: {}".format(path, CORNER_FAST_HOLD, " ".join(fields))
+	return fields, None
+
+def hold_min_corner(xraydb_root, speed_root):
 	base_dir = os.path.join(xraydb_root, "timings")
-	if not os.path.isdir(speed_dir):
-		return False, "{} has no speed-graded overlay to compare against".format(xraydb_root)
+	base, why = read_corner(base_dir)
+	if base is None:
+		return False, why
+	stamp = " ".join(f for f in base if f.startswith("makesdf="))
+	if speed_root is None:
+		return True, "{} says {} ({})".format(os.path.join(base_dir, CORNER_FILE), CORNER_FAST_HOLD, stamp)
+	grade_dir = os.path.join(speed_root, "timings")
+	graded, why = read_corner(grade_dir)
+	if graded is None:
+		return False, why
+	base_sdfs = sorted(n for n in os.listdir(base_dir) if n.endswith(".sdf"))
+	missing = [n for n in base_sdfs if not os.path.exists(os.path.join(grade_dir, n))]
+	if missing:
+		return False, "{} covers {} of the {} SDFs in {}; missing {}".format(grade_dir, len(base_sdfs) - len(missing), len(base_sdfs), base_dir, ", ".join(missing))
 	paired = 0
-	overlays = []
-	for grade in sorted(os.listdir(speed_dir)):
-		grade_dir = os.path.join(speed_dir, grade, "timings")
-		if not os.path.isdir(grade_dir):
-			continue
-		overlays.append(grade)
-		for name in sorted(os.listdir(grade_dir)):
-			base_sdf = os.path.join(base_dir, name)
-			if not name.endswith(".sdf") or not os.path.exists(base_sdf):
-				continue
-			base = hold_checks(base_sdf)
-			graded = hold_checks(os.path.join(grade_dir, name))
-			if [c[:4] for c in base] != [c[:4] for c in graded]:
-				return False, "{} and speed/{}/timings/{} list different HOLD/REMOVAL checks".format(base_sdf, grade, name)
-			for b, g in zip(base, graded):
-				if float(b[4]) != float(g[4]):
-					return False, "{} {} {} has minimum {} in {} and {} in speed/{}".format(b[0], b[1], b[3], b[4], base_sdf, g[4], grade)
-			paired += len(base)
-	if paired == 0:
-		return False, "no HOLD/REMOVAL check of {} pairs with one in a speed-graded overlay".format(base_dir)
-	return True, "{} HOLD/REMOVAL minima in {} equal those of speed/{}".format(paired, base_dir, ", speed/".join(overlays))
+	for name in base_sdfs:
+		base_sdf = os.path.join(base_dir, name)
+		b_checks = hold_checks(base_sdf)
+		g_checks = hold_checks(os.path.join(grade_dir, name))
+		if [c[:4] for c in b_checks] != [c[:4] for c in g_checks]:
+			return False, "{} and {} list different HOLD/REMOVAL checks".format(base_sdf, os.path.join(grade_dir, name))
+		for b, g in zip(b_checks, g_checks):
+			if float(b[4]) != float(g[4]):
+				return False, "{} {} {} has minimum {} in {} and {} in {}, so one of the two is not the fast corner its corner file claims".format(b[0], b[1], b[3], b[4], base_sdf, g[4], grade_dir)
+		paired += len(b_checks)
+	return True, "{} and {} each say {} ({}; {}), the overlay has all {} SDFs, and its {} HOLD/REMOVAL minima equal the base's".format(
+		os.path.join(base_dir, CORNER_FILE), os.path.join(grade_dir, CORNER_FILE), CORNER_FAST_HOLD, stamp,
+		" ".join(f for f in graded if f.startswith("makesdf=")), len(base_sdfs), paired)
 
 def main():
 
@@ -81,9 +97,11 @@ def main():
 		if not os.path.isdir(speed_root):
 			raise RuntimeError("no speed-graded timing directory {}".format(speed_root))
 		print("bbaexport: speed-graded timing from {}".format(speed_root), file=sys.stderr)
-	d = import_device(args.device, xraydb_root, metadata_root, speed_root)
-	hold_fast, hold_why = hold_min_corner(xraydb_root)
+	hold_fast, hold_why = hold_min_corner(xraydb_root, speed_root)
+	if speed_root is not None and not hold_fast:
+		raise RuntimeError("--speed-grade {} needs HOLD/REMOVAL minima attested as the fast corner in {} and in {}: {}".format(args.speed_grade, os.path.join(xraydb_root, "timings"), os.path.join(speed_root, "timings"), hold_why))
 	print("bbaexport: HOLD/REMOVAL minimum {} the fast corner: {}".format("attested as" if hold_fast else "NOT attested as", hold_why), file=sys.stderr)
+	d = import_device(args.device, xraydb_root, metadata_root, speed_root)
 	# Import tile types
 	seen_tiletypes = set()
 	tile_types = []

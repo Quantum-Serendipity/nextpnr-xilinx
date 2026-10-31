@@ -70,13 +70,29 @@ else
     report "FAIL duty_mmcm_b: nextpnr: $(grep -m1 '^ERROR' "$OUT/duty.log")"
 fi
 
-if NEXTPNR_HOLD_EXPORT="$OUT/holdside.hold.tsv" "$NEXTPNR" --chipdb "$CHIPDB" --xdc "$HERE/base.xdc" \
-        --json "$OUT/holdside.json" --write "$OUT/holdside-routed.json" --log "$OUT/holdside.log" -q --seed 1 \
-        >/dev/null 2>&1; then
+if NEXTPNR_HOLD_EXPORT="$OUT/holdside.hold.tsv" NEXTPNR_SETUP_EXPORT="$OUT/holdside.tsv" "$NEXTPNR" --chipdb "$CHIPDB" \
+        --xdc "$HERE/base.xdc" --json "$OUT/holdside.json" --write "$OUT/holdside-routed.json" \
+        --log "$OUT/holdside.log" -q --seed 1 >/dev/null 2>&1; then
     grade hold_side "$OUT/holdside-routed.json" "$OUT/holdside.hold.tsv" "$TIMINGS" "$TILEGRID" "$OUT/holdside.log" hold_side
+    grade route_scale "$OUT/holdside-routed.json" "$OUT/holdside.tsv" "$OUT/holdside.hold.tsv" "$OUT/holdside.log" \
+        route_scale
 else
     report "FAIL hold_side: nextpnr: $(grep -m1 '^ERROR' "$OUT/holdside.log")"
+    report "FAIL route_scale: nextpnr: $(grep -m1 '^ERROR' "$OUT/holdside.log")"
 fi
+
+"$PYTHON" "$HERE/mutate_chipdb.py" "$CHIPDB" "$OUT/othergrade.bin" othergrade > "$OUT/othergrade.txt" 2>&1
+if [ ! -s "$OUT/othergrade.bin" ]; then
+    report "FAIL route_scale_other_grade: $(cat "$OUT/othergrade.txt")"
+elif NEXTPNR_HOLD_EXPORT="$OUT/holdside2.hold.tsv" NEXTPNR_SETUP_EXPORT="$OUT/holdside2.tsv" "$NEXTPNR" \
+        --chipdb "$OUT/othergrade.bin" --xdc "$HERE/base.xdc" --json "$OUT/holdside.json" \
+        --write "$OUT/holdside2-routed.json" --log "$OUT/holdside2.log" -q --seed 1 >/dev/null 2>&1; then
+    grade route_scale "$OUT/holdside2-routed.json" "$OUT/holdside2.tsv" "$OUT/holdside2.hold.tsv" "$OUT/holdside2.log" \
+        route_scale_other_grade
+else
+    report "FAIL route_scale_other_grade: nextpnr: $(grep -m1 '^ERROR' "$OUT/holdside2.log")"
+fi
+rm -f "$OUT/othergrade.bin"
 
 replay() {
     local name=$1

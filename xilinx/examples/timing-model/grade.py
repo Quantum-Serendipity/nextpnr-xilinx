@@ -402,7 +402,7 @@ def grade_hold_side(argv):
     m = GUARD_RE.search(open(log).read()) if os.path.exists(log) else None
     if m is None:
         return "FAIL %s: the log states no hold guard band" % name
-    ff_d, wa3, wa4, wa5 = (float(m.group(i)) for i in range(1, 5))
+    ff_d, wa3, wa4, wa5, lutram_we, srl_we, dram_di = (float(m.group(i)) for i in range(1, 8))
     band = {"WA1": 0.0, "WA2": 0.0, "WA3": wa3, "WA4": wa4, "WA5": wa5, "WA6": 0.0}
     cols, rows = read_tsv(hold_tsv)
     if cols is None:
@@ -410,8 +410,9 @@ def grade_hold_side(argv):
     with open(routed) as f:
         cells = json.load(f)["modules"]["top"]["cells"]
     sdf = Sdf(timings, tilegrid)
-    seen = {"FF D": 0, "LUTRAM WA": 0}
-    split = {"FF D": 0, "LUTRAM WA": 0}
+    kinds = ("FF D", "LUTRAM WA", "LUTRAM WE", "SRL WE", "LUTRAM DI", "SRL DI")
+    seen = dict.fromkeys(kinds, 0)
+    split = dict.fromkeys(kinds, 0)
     for r in rows:
         cell = cells.get(r["cell"])
         if cell is None:
@@ -420,41 +421,114 @@ def grade_hold_side(argv):
         tiletype, sitetype, b = sdf.locate(attrs.get("NEXTPNR_BEL", ""))
         if tiletype is None:
             continue
-        if cell["type"] == "SLICE_FFX" and r["port"] == "D":
+        port = r["port"]
+        is_dram = cell["type"] == "SLICE_LUTX" and "X_LUT_AS_DRAM" in attrs
+        is_srl = cell["type"] == "SLICE_LUTX" and "X_LUT_AS_SRL" in attrs
+        lut = "5" if b.endswith("5LUT") else "6"
+        if cell["type"] == "SLICE_FFX" and port == "D":
             kind, inst, ct, pin, guard = "FF D", sitetype, "FF_INIT" if b.endswith("5FF") else "REG_INIT_FF", "DIN", ff_d
-        elif cell["type"] == "SLICE_LUTX" and "X_LUT_AS_DRAM" in attrs and r["port"] in band:
-            kind, inst, pin, guard = "LUTRAM WA", sitetype, r["port"], band[r["port"]]
-            ct = "LUT_OR_MEM5LRAM" if b.endswith("5LUT") else "LUT_OR_MEM6LRAM"
+        elif is_dram and port in band:
+            kind, inst, pin, guard = "LUTRAM WA", sitetype, port, band[port]
+            ct = "LUT_OR_MEM%sLRAM" % lut
+        elif (is_dram or is_srl) and port == "WE":
+            kind = "SRL WE" if is_srl else "LUTRAM WE"
+            inst, pin, guard = sitetype, "WE", srl_we if is_srl else lutram_we
+            ct = "LUT_OR_MEM%s%s" % (lut, "SHFREG" if is_srl else "LRAM")
+        elif (is_dram or is_srl) and port in ("DI1", "DI2"):
+            kind = "SRL DI" if is_srl else "LUTRAM DI"
+            inst, pin, guard = "%s/%s" % (sitetype, b), port, dram_di
+            ct = "LUT_OR_MEM%s%s" % (lut, "SHFREG" if is_srl else "LRAM")
         else:
             continue
         want = sdf_checks(timings, tiletype).get((inst, ct, "HOLD", pin, "CLK"))
         if want is None:
             return "FAIL %s: %s.sdf has no %s %s HOLD %s check for %s.%s" % (name, tiletype, inst, ct, pin, r["cell"],
-                                                                         r["port"])
+                                                                         port)
         got = float(r["hold_ns"])
         fast = max(want[0], 0.0) + guard
         slow = max(want[1], 0.0) + guard
         if abs(got - fast) > TOL:
-            return "FAIL %s: %s.%s at %s hold_ns %.3f where %s.sdf %s %s HOLD %s gives fast %.3f (+%.3f guard = %.3f), " \
-                   "slow %.3f (+guard %.3f)" % (name, r["cell"], r["port"], attrs.get("NEXTPNR_BEL"), got, tiletype,
-                                               inst, ct, pin, want[0], guard, fast, want[1], slow)
+            return "FAIL %s: %s %s.%s at %s hold_ns %.3f where %s.sdf %s %s HOLD %s gives fast %.3f (+%.3f guard = " \
+                   "%.3f), slow %.3f (+guard %.3f)" % (name, kind, r["cell"], port, attrs.get("NEXTPNR_BEL"), got,
+                                                      tiletype, inst, ct, pin, want[0], guard, fast, want[1], slow)
         seen[kind] += 1
         if abs(fast - slow) > TOL:
             split[kind] += 1
-    for kind in seen:
+    for kind in kinds:
         if split[kind] == 0:
             return "FAIL %s: no %s hold row whose SDF fast and slow sides differ (%d %s row(s) checked)" % (
                 name, kind, seen[kind], kind)
-    return "PASS %s: %d FF D and %d LUTRAM WA hold row(s) read the SDF HOLD minimum (fast corner) plus the logged " \
-           "guard band, %d and %d of them where the slow side differs" % (name, seen["FF D"], seen["LUTRAM WA"],
-                                                                         split["FF D"], split["LUTRAM WA"])
+    return "PASS %s: %s hold row(s) read the SDF HOLD minimum (fast corner) plus the logged guard band, every " \
+           "kind with rows whose slow side differs (%s)" % (
+               name, ", ".join("%d %s" % (seen[k], k) for k in kinds), ", ".join("%d" % split[k] for k in kinds))
+
+
+ROUTE_SCALE_RE = re.compile(r"speed grade -(\d+); hold-corner fabric routing is ([0-9.]+) of the slow corner")
+ROUTE_SCALE_EXPECTED = {"1": 0.31, "2": 0.38}
+GLOBAL_WIRE_RE = re.compile(r"GCLK|HCLK|CLK_HROW|CLK_BUFG|BUFG|CLK_LEAF")
+
+
+def grade_route_scale(argv):
+    routed, setup_tsv, hold_tsv, log, name = argv
+    m = ROUTE_SCALE_RE.search(open(log).read()) if os.path.exists(log) else None
+    if m is None:
+        return "FAIL %s: the log states no hold-corner fabric routing factor" % name
+    grade, scale = m.group(1), float(m.group(2))
+    if grade not in ROUTE_SCALE_EXPECTED:
+        return "FAIL %s: the log states speed grade -%s, which this arm has no calibrated factor for" % (name, grade)
+    if abs(scale - ROUTE_SCALE_EXPECTED[grade]) > 1e-9:
+        return "FAIL %s: the log states a hold-corner fabric routing factor of %.2f at -%s, not the calibrated %.2f" % (
+            name, scale, grade, ROUTE_SCALE_EXPECTED[grade])
+    scols, srows = read_tsv(setup_tsv)
+    hcols, hrows = read_tsv(hold_tsv)
+    if scols is None or hcols is None:
+        return "FAIL %s: no NEXTPNR_SETUP_EXPORT or NEXTPNR_HOLD_EXPORT file was written" % name
+    with open(routed) as f:
+        top = json.load(f)["modules"]["top"]
+    pips = {}
+    for nname, nn in top["netnames"].items():
+        route = nn.get("attributes", {}).get("ROUTING", "")
+        if route:
+            fields = route.split(";")
+            pips[nname] = (len(fields) // 3, bool(GLOBAL_WIRE_RE.search(route)))
+    max_delay = {}
+    for r in srows:
+        if r["delay_source"] == "routed":
+            max_delay.setdefault((r["cell"], r["port"], r["net"]), float(r["net_delay_ns"]))
+    checked = sensitive = 0
+    for r in hrows:
+        if r["delay_source"] != "routed":
+            continue
+        key = (r["cell"], r["port"], r["net"])
+        if key not in max_delay or r["net"] not in pips:
+            continue
+        hops, is_global = pips[r["net"]]
+        if is_global:
+            continue
+        hi = max_delay[key]
+        lo = float(r["net_delay_min_ns"])
+        want = scale * hi
+        slack = 0.001 * hops + 0.0005
+        if not (want - slack <= lo <= want + 0.0005):
+            return "FAIL %s: %s.%s on net %s has net_delay_min_ns %.4f where the logged factor %.2f times the setup " \
+                   "export's net_delay_ns %.4f gives %.4f (at most %d pip(s), so %.4f to %.4f)" % (
+                       name, r["cell"], r["port"], r["net"], lo, scale, hi, want, hops, want - slack, want + 0.0005)
+        checked += 1
+        if 0.05 * hi > slack:
+            sensitive += 1
+    if sensitive == 0:
+        return "FAIL %s: no routed fabric hold row where a 0.05 change of factor exceeds the rounding bound (%d " \
+               "checked)" % (name, checked)
+    return "PASS %s: at -%s, %d routed fabric hold row(s) with no global hop have net_delay_min_ns equal to the logged " \
+           "factor %.2f times the setup export's net_delay_ns, %d of them where a 0.05 change of factor would show" % (
+               name, grade, checked, scale, sensitive)
 
 
 def main():
     cmd, argv = sys.argv[1], sys.argv[2:]
     print({"arcs": grade_arcs, "hold": grade_hold, "skew": grade_skew, "period": grade_period,
            "norow": grade_norow, "zero_min": grade_zero_min, "srl_launch": grade_srl_launch,
-           "hold_side": grade_hold_side}[cmd](argv))
+           "hold_side": grade_hold_side, "route_scale": grade_route_scale}[cmd](argv))
 
 
 main()

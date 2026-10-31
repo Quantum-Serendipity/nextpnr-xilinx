@@ -99,9 +99,10 @@ Arch::Arch(ArchArgs args) : args(args)
                   args.chipdb.c_str(), chip_info->name.get(), chip_info->version, int(CHIPDB_VERSION));
     if (chip_info->hold_corner != CHIPDB_HOLD_CORNER_FAST)
         log_error("chipdb %s (%s) was exported from a prjxray-db whose HOLD and REMOVAL minimum bbaexport.py could "
-                  "not attest as the fast corner (no speed/<part>-<grade> overlay whose check minima all equal the "
-                  "base grade's), so every hold and removal requirement would be read from a minimum that may be "
-                  "the slow corner's. Export it from a database whose SDFs prjxray makesdf e9d3a6b7 or later wrote\n",
+                  "not attest as the fast corner (its timings/ directory has no corner file saying "
+                  "hold_removal=fast::slow), so every hold and removal requirement would be read from a minimum that "
+                  "may be the slow corner's. Export it from a database whose SDFs and corner file prjxray makesdf "
+                  "41bc7c2a or later wrote\n",
                   args.chipdb.c_str(), chip_info->name.get());
 
     for (int i = 0; i < chip_info->extra_constids->bba_id_count; i++) {
