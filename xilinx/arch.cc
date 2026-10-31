@@ -980,7 +980,7 @@ ArcBounds Arch::getRouteBoundingBox(WireId src, WireId dst) const
     }
 
     if (src.tile != -1 && chip_info->tile_insts[src.tile].num_sites > 0) {
-        auto &site = chip_info->tile_insts[dst.tile].site_insts[wireInfo(dst).site != -1 ? wireInfo(dst).site : 0];
+        auto &site = chip_info->tile_insts[src.tile].site_insts[wireInfo(src).site != -1 ? wireInfo(src).site : 0];
         if (site.inter_x != -1) {
             expand(site.inter_x, site.inter_y);
         }
