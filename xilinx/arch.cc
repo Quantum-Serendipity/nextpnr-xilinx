@@ -4481,7 +4481,8 @@ bool Arch::xc7_cell_timing_check_lookup(int tt_id, int inst_id, IdString variant
             std::make_tuple(sig_port.index, clock_port.index, int32_t(type)));
     if (!found_check)
         return false;
-    value = found_check->max_value;
+    value = (type == TIMING_CHECK_HOLD || type == TIMING_CHECK_REMOVAL) ? found_check->min_value
+                                                                          : found_check->max_value;
     if (min_value != nullptr)
         *min_value = found_check->min_value;
     return true;
