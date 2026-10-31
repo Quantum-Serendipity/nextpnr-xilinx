@@ -90,6 +90,10 @@ struct Router2Cfg : PartitionRouteCfg
     float estimate_weight;
 
     bool perf_profile = false;
+
+    bool crit_weight = false;
+    int tmg_ripup_iters = 0;
+    bool revisit_lower_delay = false;
 };
 
 void router2(Context *ctx, const Router2Cfg &cfg);

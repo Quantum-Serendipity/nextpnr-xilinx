@@ -57,6 +57,7 @@ struct Router2
         ArcBounds bb;
         bool routed = false;
         float arc_crit = 0;
+        delay_t arc_slack = std::numeric_limits<delay_t>::max();
     };
 
     // As we allow overlap at first; the nextpnr bind functions can't be used
@@ -763,14 +764,23 @@ struct Router2
         ad.routed = false;
     }
 
+    float arc_crit_weight(const PerNetData &nd, size_t user) const
+    {
+        if (!cfg.crit_weight || !timing_driven)
+            return 1.0f;
+        float crit = nd.arcs.at(user).arc_crit;
+        return std::max(0.05f, 1.0f - crit * crit);
+    }
+
     float score_wire_for_arc(NetInfo *net, size_t user, WireId wire, PipId pip)
     {
         auto &wd = wire_data(wire);
         auto &nd = nets.at(net->udata);
         float base_cost = ctx->getDelayNS(ctx->getPipDelay(pip).maxDelay() + ctx->getWireDelay(wire).maxDelay() +
                                           ctx->getDelayEpsilon());
-        float present_cost = present_wire_cost(wd, net->udata);
-        float hist_cost = wd.hist_cong_cost;
+        const float cw = arc_crit_weight(nd, user);
+        float present_cost = 1.0f + (present_wire_cost(wd, net->udata) - 1.0f) * cw;
+        float hist_cost = 1.0f + cw * (wd.hist_cong_cost - 1.0f);
         float bias_cost = 0;
         int source_uses = 0;
         if (wd.bound_nets.count(net->udata))
@@ -789,7 +799,7 @@ struct Router2
             bias_cost = cfg.bias_cost_factor * (base_cost / int(net->users.size())) *
                         ((std::abs(pl.x - nd.cx) + std::abs(pl.y - nd.cy)) / float(nd.hpwl));
         }
-        return base_cost * hist_cost * present_cost / (1 + source_uses) + bias_cost;
+        return base_cost * hist_cost * present_cost / (1 + source_uses * cw) + bias_cost;
     }
 
     float get_togo_cost(NetInfo *net, size_t user, int wire, WireId sink)
@@ -798,8 +808,77 @@ struct Router2
         int source_uses = 0;
         if (wd.bound_nets.count(net->udata))
             source_uses = wd.bound_nets.at(net->udata).first;
-        // FIXME: timing/wirelength balance?
-        return (ctx->getDelayNS(ctx->estimateDelay(wd.w, sink)) / (1 + source_uses)) + cfg.ipin_cost_adder;
+        const float cw = arc_crit_weight(nets.at(net->udata), user);
+        return (ctx->getDelayNS(ctx->estimateDelay(wd.w, sink)) / (1 + source_uses * cw)) + cfg.ipin_cost_adder;
+    }
+
+    bool arc_routed_delay(const NetInfo *net, size_t usr, bool min_delay, delay_t &delay)
+    {
+        auto &nd = nets.at(net->udata);
+        WireId cursor = nd.arcs.at(usr).sink_wire;
+        delay = 0;
+        for (size_t hops = 0; hops <= flat_wires.size(); hops++) {
+            int idx;
+            try {
+                idx = wire_to_idx.at(cursor);
+            } catch (const std::out_of_range &) {
+                return false;
+            }
+            auto &wd = flat_wires.at(idx);
+            auto bound = wd.bound_nets.find(net->udata);
+            if (bound == wd.bound_nets.end())
+                return false;
+            DelayInfo wdel = ctx->getWireDelay(cursor);
+            delay += min_delay ? wdel.minDelay() : wdel.maxDelay();
+            PipId uh = bound->second.second;
+            if (uh == PipId())
+                return cursor == nd.src_wire;
+            DelayInfo pdel = ctx->getPipDelay(uh);
+            delay += min_delay ? pdel.minDelay() : pdel.maxDelay();
+            cursor = ctx->getPipSrcWire(uh);
+        }
+        return false;
+    }
+
+    void refresh_criticalities()
+    {
+        const bool feedback = cfg.crit_weight || cfg.tmg_ripup_iters > 0;
+        if (feedback)
+            ctx->route_delay_override = [this](const NetInfo *ni, const PortRef &pr, bool min_delay, delay_t &d) {
+                if (ni->udata < 0 || ni->udata >= int(nets_by_udata.size()) || nets_by_udata.at(ni->udata) != ni)
+                    return false;
+                for (size_t i = 0; i < ni->users.size(); i++)
+                    if (ni->users.at(i).cell == pr.cell && ni->users.at(i).port == pr.port)
+                        return arc_routed_delay(ni, i, min_delay, d);
+                return false;
+            };
+        get_criticalities(ctx, &net_crit);
+        ctx->route_delay_override = nullptr;
+        for (size_t n = 0; n < nets_by_udata.size(); n++) {
+            auto &net = nets.at(n);
+            net.max_crit = 0;
+            for (auto &ad : net.arcs) {
+                ad.arc_crit = 0;
+                ad.arc_slack = std::numeric_limits<delay_t>::max();
+            }
+            auto fnd = net_crit.find(nets_by_udata.at(n)->name);
+            if (fnd == net_crit.end())
+                continue;
+            for (int i = 0; i < int(fnd->second.criticality.size()); i++) {
+                float c = fnd->second.criticality.at(i);
+                net.arcs.at(i).arc_crit = c;
+                net.max_crit = std::max(net.max_crit, c);
+            }
+            for (int i = 0; i < int(fnd->second.slack.size()); i++)
+                net.arcs.at(i).arc_slack = fnd->second.slack.at(i);
+        }
+    }
+
+    bool tmg_ripup_active = false;
+
+    bool arc_failed_slack(const PerNetData &nd, size_t usr) const
+    {
+        return tmg_ripup_active && nd.arcs.at(usr).arc_slack < 2 * ctx->getDelayEpsilon();
     }
 
     bool check_arc_routing(NetInfo *net, size_t usr)
@@ -1358,7 +1437,7 @@ struct Router2
                 // Evaluate score of next wire
                 WireId next = ctx->getPipDstWire(dh);
                 int next_idx = wire_to_idx.at(next);
-                if (was_visited(next_idx))
+                if (!cfg.revisit_lower_delay && was_visited(next_idx))
                     continue;
 #if 1
                 if (debug_arc)
@@ -1379,7 +1458,9 @@ struct Router2
                         curr.score.delay + ctx->getPipDelay(dh).maxDelay() + ctx->getWireDelay(next).maxDelay();
                 next_score.togo_cost = cfg.estimate_weight * get_togo_cost(net, i, next_idx, dst_wire);
                 const auto &v = nwd.visit;
-                if (!v.visited || (v.score.total() > next_score.total())) {
+                const bool improves = cfg.revisit_lower_delay ? next_score.delay < v.score.delay
+                                                              : v.score.total() > next_score.total();
+                if (!v.visited || improves) {
                     ++explored;
 #if 0
                     ROUTE_LOG_DBG("exploring wire %s cost %f togo %f\n", ctx->nameOfWire(next), next_score.cost,
@@ -1445,10 +1526,13 @@ struct Router2
         bool have_failures = false;
         t.processed_sinks.clear();
         t.route_arcs.clear();
+        bool failed_slack = false;
+        for (size_t i = 0; i < net->users.size() && tmg_ripup_active; i++)
+            failed_slack |= arc_failed_slack(nets.at(net->udata), i);
         for (size_t i = 0; i < net->users.size(); i++) {
             // Ripup failed arcs to start with
             // Check if arc is already legally routed
-            if (check_arc_routing(net, i))
+            if (!failed_slack && check_arc_routing(net, i))
                 continue;
             auto &usr = net->users.at(i);
             WireId dst_wire = ctx->getNetinfoSinkWire(net, usr);
@@ -1460,6 +1544,11 @@ struct Router2
             // Ripup arc to start with
             ripup_arc(net, i);
             t.route_arcs.push_back(i);
+        }
+        if (cfg.crit_weight && timing_driven) {
+            auto &nd = nets.at(net->udata);
+            std::stable_sort(t.route_arcs.begin(), t.route_arcs.end(),
+                             [&](size_t a, size_t b) { return nd.arcs.at(a).arc_crit > nd.arcs.at(b).arc_crit; });
         }
         for (auto i : t.route_arcs) {
             auto res1 = route_arc(t, net, i, is_mt, true);
@@ -1940,11 +2029,23 @@ struct Router2
         }
 
         timing_driven = ctx->setting<bool>("timing_driven");
+        const bool feedback_sta = timing_driven && (cfg.crit_weight || cfg.tmg_ripup_iters > 0);
+        if (feedback_sta)
+            log_info("router2: criticality weighting %s, timing-driven ripup for %d iteration(s), lower-delay "
+                     "revisit %s\n",
+                     cfg.crit_weight ? "on" : "off", cfg.tmg_ripup_iters, cfg.revisit_lower_delay ? "on" : "off");
+        else if (cfg.revisit_lower_delay)
+            log_info("router2: lower-delay revisit on\n");
         log_info("Running main router loop...\n");
         do {
             ctx->sorted_shuffle(route_queue);
 
-            if (timing_driven && (int(route_queue.size()) > (int(nets_by_udata.size()) / 50))) {
+            if (feedback_sta) {
+                if (iter == 1 || tmg_ripup_active || int(route_queue.size()) > int(nets_by_udata.size()) / 500)
+                    refresh_criticalities();
+                std::stable_sort(route_queue.begin(), route_queue.end(),
+                                 [&](int na, int nb) { return nets.at(na).max_crit > nets.at(nb).max_crit; });
+            } else if (timing_driven && (int(route_queue.size()) > (int(nets_by_udata.size()) / 50))) {
                 // Heuristic: reduce runtime by skipping STA in the case of a "long tail" of a few
                 // congested nodes
                 get_criticalities(ctx, &net_crit);
@@ -1983,14 +2084,33 @@ struct Router2
 #endif
             dump_statistics();
 
-            if (overused_wires == 0) {
+            int tmgfail = 0;
+            tmg_ripup_active = timing_driven && iter <= cfg.tmg_ripup_iters;
+            if (tmg_ripup_active) {
+                refresh_criticalities();
+                for (size_t n = 0; n < nets_by_udata.size(); n++) {
+                    NetInfo *ni = nets_by_udata.at(n);
+                    if (ni->name == ctx->id("$PACKER_GND_NET") || ni->name == ctx->id("$PACKER_VCC_NET"))
+                        continue;
+                    for (size_t j = 0; j < ni->users.size(); j++)
+                        if (arc_failed_slack(nets.at(n), j)) {
+                            failed_nets.insert(int(n));
+                            ++tmgfail;
+                        }
+                }
+            }
+            if (overused_wires == 0 && tmgfail == 0) {
                 // Try and actually bind nextpnr Arch API wires
                 bind_and_check_all();
             }
             for (auto cn : failed_nets)
                 route_queue.push_back(cn);
-            log_info("    iter=%d wires=%d overused=%d overuse=%d archfail=%s\n", iter, total_wire_use, overused_wires,
-                     total_overuse, overused_wires > 0 ? "NA" : std::to_string(arch_fail).c_str());
+            if (tmg_ripup_active)
+                log_info("    iter=%d wires=%d overused=%d overuse=%d tmgfail=%d archfail=NA\n", iter, total_wire_use,
+                         overused_wires, total_overuse, tmgfail);
+            else
+                log_info("    iter=%d wires=%d overused=%d overuse=%d archfail=%s\n", iter, total_wire_use,
+                         overused_wires, total_overuse, overused_wires > 0 ? "NA" : std::to_string(arch_fail).c_str());
             ++iter;
             if (curr_cong_weight < 1e9)
                 curr_cong_weight += cfg.curr_cong_mult;
@@ -2480,6 +2600,9 @@ Router2Cfg::Router2Cfg(Context *ctx)
     curr_cong_mult = ctx->setting<float>("router2/currCongWeightMult", 2.0f);
     estimate_weight = ctx->setting<float>("router2/estimateWeight", 1.75f);
     perf_profile = ctx->setting<float>("router2/perfProfile", false);
+    crit_weight = ctx->setting<bool>("router2/critWeight", false);
+    tmg_ripup_iters = ctx->setting<int>("router2/tmgRipupIters", 0);
+    revisit_lower_delay = ctx->setting<bool>("router2/revisitLowerDelay", false);
 }
 
 NEXTPNR_NAMESPACE_END

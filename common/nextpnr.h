@@ -21,6 +21,7 @@
 #include <algorithm>
 #include <assert.h>
 #include <condition_variable>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <stdexcept>
@@ -950,6 +951,7 @@ struct Context : Arch, DeterministicRNG
     WireId getNetinfoSourceWire(const NetInfo *net_info) const;
     WireId getNetinfoSinkWire(const NetInfo *net_info, const PortRef &sink) const;
     delay_t getNetinfoRouteDelay(const NetInfo *net_info, const PortRef &sink, bool min_delay = false) const;
+    std::function<bool(const NetInfo *, const PortRef &, bool, delay_t &)> route_delay_override;
 
     // provided by router1.cc
     bool checkRoutedDesign() const;

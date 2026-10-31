@@ -310,6 +310,12 @@ delay_t Context::getNetinfoRouteDelay(const NetInfo *net_info, const PortRef &us
         return min_delay ? delay_t(predictDelay(n, u) * 0.45f) : predictDelay(n, u);
     };
 
+    if (route_delay_override) {
+        delay_t overridden = 0;
+        if (route_delay_override(net_info, user_info, min_delay, overridden))
+            return overridden;
+    }
+
     if (net_info->wires.empty())
         return pd(net_info, user_info);
 
