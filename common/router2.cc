@@ -38,6 +38,7 @@
 #include <stdexcept>
 #include <queue>
 #include <thread>
+#include "knobs.h"
 #include "log.h"
 #include "nextpnr.h"
 #include "router1.h"
@@ -1310,7 +1311,7 @@ struct Router2
         // it makes a failing arc give up in ms, so the full skip list appears in
         // minutes.  0/unset = unbounded (old behaviour).
         static const int arc_max_visit = []{
-            const char *v = getenv("NEXTPNR_ARC_MAX_VISIT");
+            const char *v = knobs::get("NEXTPNR_ARC_MAX_VISIT");
             return v ? atoi(v) : 0;
         }();
         while (!t.queue.empty() && (must_drain_queue || iter < toexplore)
@@ -1481,7 +1482,7 @@ struct Router2
                         // leave this arc unrouted and keep going, so we can --write a
                         // partially-routed json and import it into Vivado (json2dcp)
                         // to inspect the congestion instead of aborting the run.
-                        if (getenv("NEXTPNR_SKIP_FAILED_ARCS")) {
+                        if (knobs::get("NEXTPNR_SKIP_FAILED_ARCS")) {
                             log_warning("SKIP_FAILED_ARCS: failed to route arc %d of net '%s' (%s -> %s); leaving "
                                         "unrouted.\n",
                                         int(i), ctx->nameOf(net), ctx->nameOfWire(ctx->getNetinfoSourceWire(net)),
@@ -1917,9 +1918,9 @@ struct Router2
         int stall_iters = 0;
         int max_stall = 50;
         int max_iter = 600;
-        if (const char *e = getenv("NEXTPNR_ROUTER2_MAX_STALL"))
+        if (const char *e = knobs::get("NEXTPNR_ROUTER2_MAX_STALL"))
             max_stall = atoi(e);
-        if (const char *e = getenv("NEXTPNR_ROUTER2_MAX_ITER"))
+        if (const char *e = knobs::get("NEXTPNR_ROUTER2_MAX_ITER"))
             max_iter = atoi(e);
 
         // Hybrid GND/VCC strategy: do NOT route the constant nets in router2.  Their
@@ -2011,7 +2012,7 @@ struct Router2
                 }
                 // NEXTPNR_SKIP_FAILED_ARCS: accept the partial route (overuse + any
                 // unroutable arcs) and fall through to --write, for Vivado inspection.
-                if (getenv("NEXTPNR_SKIP_FAILED_ARCS")) {
+                if (knobs::get("NEXTPNR_SKIP_FAILED_ARCS")) {
                     log_warning("router2: SKIP_FAILED_ARCS - accepting partial route with %d overused wire(s) after "
                                 "%d iterations; %d net(s) left with unrouted arcs.\n",
                                 overused_wires, iter - 1, int(failed_nets.size()));
@@ -2059,7 +2060,7 @@ struct Router2
         auto rend = std::chrono::high_resolution_clock::now();
         log_info("Router2 time %.02fs\n", std::chrono::duration<float>(rend - rstart).count());
 
-        if (getenv("NPNR_ROUTER1_RECHECK")) {
+        if (knobs::get("NPNR_ROUTER1_RECHECK")) {
             log_info("Running router1 to check that route is legal...\n");
             router1(ctx, Router1Cfg(ctx));
         }

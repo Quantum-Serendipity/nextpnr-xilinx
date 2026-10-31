@@ -26,6 +26,7 @@
 #include <set>
 #include <string>
 
+#include "knobs.h"
 #include "log.h"
 #include "router1.h"
 #include "timing.h"
@@ -1095,11 +1096,11 @@ Router1Cfg::Router1Cfg(Context *ctx)
     skipFailedArcs = ctx->setting<bool>("router1/skipFailedArcs", false);
     // Env-var overrides (avoid command.cc plumbing): bound the per-arc A* search
     // and skip arcs that exceed it, so a hanging arc is left for an external router.
-    if (const char *amv = getenv("NEXTPNR_ARC_MAX_VISIT"))
+    if (const char *amv = knobs::get("NEXTPNR_ARC_MAX_VISIT"))
         arcMaxVisitCnt = atoi(amv);
-    if (getenv("NEXTPNR_SKIP_FAILED_ARCS"))
+    if (knobs::get("NEXTPNR_SKIP_FAILED_ARCS"))
         skipFailedArcs = true;
-    constNoRipup = getenv("NEXTPNR_GND_NO_RIPUP") != nullptr;
+    constNoRipup = knobs::get("NEXTPNR_GND_NO_RIPUP") != nullptr;
     constRipupCost = ctx->setting<int>("router1/constRipupCost", 4);
     constRipupMaxRounds = ctx->setting<int>("router1/constRipupMaxRounds", 16);
     if (constRipupCost < 0)

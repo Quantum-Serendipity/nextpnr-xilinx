@@ -26,6 +26,7 @@
 #include <set>
 #include "cells.h"
 #include "design_utils.h"
+#include "knobs.h"
 #include "log.h"
 #include "nextpnr.h"
 #include "util.h"
@@ -326,14 +327,14 @@ void Arch::routeConstants(std::function<void()> reroute)
 {
     Context *ctx = getCtx();
     int max_passes = const_holdout_max_passes;
-    const char *passes_env = getenv("NEXTPNR_CONST_HOLDOUT_PASSES");
+    const char *passes_env = knobs::get("NEXTPNR_CONST_HOLDOUT_PASSES");
     const bool passes_overridden = passes_env != nullptr;
     if (passes_overridden)
         max_passes = atoi(passes_env);
-    const bool allow = getenv("NEXTPNR_ALLOW_CONST_HOLDOUTS") != nullptr || allow_const_holdouts;
+    const bool allow = knobs::get("NEXTPNR_ALLOW_CONST_HOLDOUTS") != nullptr || allow_const_holdouts;
     const bool partition_rect_active = roi_active();
     const bool rm_build = partition_rect_active && !rm_cells.empty();
-    const bool no_drivers = getenv("NEXTPNR_NO_CONST_LUT_DRIVERS") != nullptr || rm_build;
+    const bool no_drivers = knobs::get("NEXTPNR_NO_CONST_LUT_DRIVERS") != nullptr || rm_build;
 
     // Fatal by default: an unrouted constant sink reads as 1 in silicon.
     auto report = [&](const std::vector<std::pair<ConstHoldout, const char *>> &left) {
@@ -380,7 +381,7 @@ void Arch::routeConstants(std::function<void()> reroute)
                                      "budget before reaching an interconnect pip outside every partition rectangle "
                                      "under NEXTPNR_PARTITION_ROI";
     int fence_walk_budget = 512;
-    if (const char *b = getenv("NEXTPNR_CONST_FENCE_WALK_BUDGET"))
+    if (const char *b = knobs::get("NEXTPNR_CONST_FENCE_WALK_BUDGET"))
         fence_walk_budget = atoi(b);
     std::vector<bool> interconnect_tile_type(chip_info->num_tiletypes, false);
     for (int t = 0; t < chip_info->num_tiletypes; t++) {

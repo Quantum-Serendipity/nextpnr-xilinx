@@ -37,6 +37,7 @@
 #include "design_utils.h"
 #include "json_frontend.h"
 #include "jsonwrite.h"
+#include "knobs.h"
 #include "log.h"
 #include "timing.h"
 #include "util.h"
@@ -94,6 +95,12 @@ bool CommandHandler::executeBeforeContext()
             log_error("Failed to open log file '%s' for writing.\n", logfilename.c_str());
         log_streams.push_back(std::make_pair(&logfile, LogLevel::LOG_MSG));
     }
+
+    if (vm.count("list-knobs")) {
+        knobs::list();
+        return true;
+    }
+    knobs::init(vm.count("set") ? vm["set"].as<std::vector<std::string>>() : std::vector<std::string>{});
     return false;
 }
 
@@ -156,6 +163,10 @@ po::options_description CommandHandler::getGeneralOptions()
     general.add_options()("no-ignore-loops", "fail timing analysis on a combinational loop");
 
     general.add_options()("version,V", "show version");
+    general.add_options()("set", po::value<std::vector<std::string>>(),
+                          "set a setting as key=value, overriding the input netlist's (repeatable); the fork's "
+                          "knobs are knob/<name>, see --list-knobs");
+    general.add_options()("list-knobs", "list the fork's knobs with their setting keys and environment aliases");
     general.add_options()("test", "check architecture database integrity");
     general.add_options()("freq", po::value<double>(), "set target frequency for design in MHz");
     general.add_options()("timing-allow-fail", "allow timing to fail in design");
@@ -283,6 +294,7 @@ void CommandHandler::setupContext(Context *ctx)
     ctx->settings[ctx->id("arch.name")] = std::string(ctx->archId().c_str(ctx));
     ctx->settings[ctx->id("arch.type")] = std::string(ctx->archArgsToId(ctx->archArgs()).c_str(ctx));
     ctx->settings[ctx->id("seed")] = ctx->rngstate;
+    knobs::apply(ctx);
 }
 
 int CommandHandler::executeMain(std::unique_ptr<Context> ctx)
@@ -302,6 +314,7 @@ int CommandHandler::executeMain(std::unique_ptr<Context> ctx)
                 std::ifstream f(filename);
                 if (!parse_json(f, filename, w.getContext()))
                     log_error("Loading design failed.\n");
+                knobs::apply(w.getContext());
                 customAfterLoad(w.getContext());
                 w.notifyChangeContext();
                 w.updateActions();
@@ -320,6 +333,7 @@ int CommandHandler::executeMain(std::unique_ptr<Context> ctx)
         std::ifstream f(filename);
         if (!parse_json(f, filename, ctx.get()))
             log_error("Loading design failed.\n");
+        knobs::apply(ctx.get());
 
         customAfterLoad(ctx.get());
     }
@@ -368,7 +382,7 @@ int CommandHandler::executeMain(std::unique_ptr<Context> ctx)
             run_script_hook("post-route");
         }
 
-        if (getenv("NEXTPNR_TIMING_ONLY") != nullptr)
+        if (knobs::get("NEXTPNR_TIMING_ONLY") != nullptr)
             timing_analysis(ctx.get(), true, true, true, false);
 
         customBitstream(ctx.get());

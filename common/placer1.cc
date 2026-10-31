@@ -39,6 +39,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <vector>
+#include "knobs.h"
 #include "log.h"
 #include "place_common.h"
 #include "timing.h"
@@ -483,9 +484,6 @@ class SAPlacer
             log_info("SA moves rejected by the partition rectangle: %lld\n", (long long)n_roi_reject);
 
         // Final post-pacement validitiy check
-        extern bool dbg_validity_runtime;
-        if (getenv("NEXTPNR_DUMP_INVALID_TILE") != nullptr)
-            dbg_validity_runtime = true;
         ctx->yield();
         for (auto bel : ctx->getBels()) {
             CellInfo *cell = ctx->getBoundBelCell(bel);
@@ -493,7 +491,7 @@ class SAPlacer
                 std::string cell_text = "no cell";
                 if (cell != nullptr)
                     cell_text = std::string("cell '") + ctx->nameOf(cell) + "'";
-                if (getenv("NEXTPNR_DUMP_INVALID_TILE") != nullptr) {
+                if (knobs::get("NEXTPNR_DUMP_INVALID_TILE") != nullptr) {
                     Loc l = ctx->getBelLocation(bel);
                     for (auto tb : ctx->getBelsByTile(l.x, l.y)) {
                         CellInfo *tc = ctx->getBoundBelCell(tb);
@@ -518,7 +516,7 @@ class SAPlacer
         for (auto cell : sorted(ctx->cells))
             if (get_constraints_distance(ctx, cell.second) != 0) {
                 Loc cl = ctx->getBelLocation(cell.second->bel);
-                if (getenv("NEXTPNR_DBG_CONSTR")) {
+                if (knobs::get("NEXTPNR_DBG_CONSTR")) {
                     std::function<void(const CellInfo *, int)> dump = [&](const CellInfo *c, int depth) {
                         for (auto child : c->constr_children) {
                             int d = get_constraints_distance(ctx, child);
@@ -540,7 +538,7 @@ class SAPlacer
         // and only router1 passes print_path, so without this the open flow can
         // report "43 MHz" with no way to see WHICH path is slow.
         timing_analysis(ctx, true /* slack_histogram */, true /* print_fmax */,
-                        getenv("NEXTPNR_CRIT_PATH_REPORT") != nullptr /* print_path */,
+                        knobs::get("NEXTPNR_CRIT_PATH_REPORT") != nullptr /* print_path */,
                         false /* warn_on_failure */);
         ctx->unlock();
         return true;
@@ -850,7 +848,7 @@ class SAPlacer
     int excl_x0 = -1, excl_y0 = -1, excl_x1 = -1, excl_y1 = -1;
     void setup_exclusion_bbox()
     {
-        if (getenv("NEXTPNR_EXCLUDE_STAMPED_BBOX") == nullptr)
+        if (knobs::get("NEXTPNR_EXCLUDE_STAMPED_BBOX") == nullptr)
             return;
         for (auto &cell : ctx->cells) {
             CellInfo *ci = cell.second.get();

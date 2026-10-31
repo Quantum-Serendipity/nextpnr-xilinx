@@ -29,6 +29,7 @@
 #include "cells.h"
 #include "chain_utils.h"
 #include "design_utils.h"
+#include "knobs.h"
 #include "log.h"
 #include "nextpnr.h"
 #include "pack.h"
@@ -437,7 +438,7 @@ void XC7Packer::pack_gbs()
     // routed CE0=VCC becomes CE=0 and DISABLES the buffer -> no clock on HW (this is
     // why the open-flow USER_CLOCK build was silent).  A real control signal (e.g. a
     // BUFGMUX select) is on a non-const net and is left untouched.
-    if (getenv("NEXTPNR_BUFG_CONST_DISCONNECT")) {
+    if (knobs::get("NEXTPNR_BUFG_CONST_DISCONNECT")) {
         IdString gnd = ctx->id("$PACKER_GND_NET"), vcc = ctx->id("$PACKER_VCC_NET");
         int n = 0;
         for (auto cell : sorted(ctx->cells)) {

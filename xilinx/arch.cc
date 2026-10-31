@@ -20,18 +20,22 @@
 
 #include <algorithm>
 #include <boost/algorithm/string.hpp>
+#include <boost/lexical_cast.hpp>
 #include <boost/range/adaptor/reversed.hpp>
 #include <cctype>
 #include <cmath>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
 #include <map>
 #include <queue>
 #include <random>
 #include <set>
+#include <sstream>
 #include <system_error>
 #include "design_utils.h"
+#include "knobs.h"
 #include "log.h"
 #include "nextpnr.h"
 #include "placer1.h"
@@ -74,7 +78,7 @@ static const ChipInfoPOD *get_chip_info(const RelPtr<ChipInfoPOD> *ptr) { return
 
 static bool env_says_off(const char *name)
 {
-    const char *v = getenv(name);
+    const char *v = knobs::get(name);
     return v != nullptr && std::string(v) == "off";
 }
 
@@ -208,11 +212,11 @@ std::string Arch::chipdb_route_identity() const
 void Arch::record_partition_modes()
 {
     auto env_or = [](const char *name, const char *dflt) {
-        const char *v = getenv(name);
+        const char *v = knobs::get(name);
         return std::string(v != nullptr ? v : dflt);
     };
     auto file_digest = [](const char *name) {
-        const char *v = getenv(name);
+        const char *v = knobs::get(name);
         if (v == nullptr)
             return std::string("none");
         std::error_code ec;
@@ -232,7 +236,7 @@ void Arch::record_partition_modes()
         return std::string(hex);
     };
     auto on_off = [](const char *name) { return env_says_off(name) ? std::string("off") : std::string("on"); };
-    auto set_unset = [](const char *name) { return std::string(getenv(name) != nullptr ? "set" : "unset"); };
+    auto set_unset = [](const char *name) { return std::string(knobs::get(name) != nullptr ? "set" : "unset"); };
     static const char *const knobs[] = {"NEXTPNR_PARTITION_ROI",
                                         "NEXTPNR_PARTITION_CLAMP",
                                         "NEXTPNR_PARTITION_KEEPOUT",
@@ -249,7 +253,7 @@ void Arch::record_partition_modes()
                                         "NEXTPNR_LUT_PERM_DROP"};
     bool any = roi_active();
     for (const char *k : knobs)
-        any = any || getenv(k) != nullptr;
+        any = any || knobs::get(k) != nullptr;
     if (!any) {
         if (idstring_str_to_idx->count("partition_modes"))
             settings.erase(id("partition_modes"));
@@ -625,7 +629,7 @@ void Arch::setup_pip_blacklist()
         // EXPERIMENT (NEXTPNR_PIP_BLACKLIST=<file>): forbid an explicit list
         // of pip types, one "TILETYPE.DST.SRC" per line -- the generic knob
         // for bisecting suspected-misencoded pips against hardware.
-        if (const char *blf = getenv("NEXTPNR_PIP_BLACKLIST")) {
+        if (const char *blf = knobs::get("NEXTPNR_PIP_BLACKLIST")) {
             static std::set<std::string> bl;
             static bool loaded = false;
             if (!loaded) {
@@ -651,7 +655,7 @@ void Arch::setup_pip_blacklist()
         // design (golden ibex/ethsoc drive long lines forward only) --
         // prime suspect for mis-encoded bits that break open-flow nets on
         // silicon while passing every DB-space audit.
-        if (getenv("NEXTPNR_NO_LONGLINES") &&
+        if (knobs::get("NEXTPNR_NO_LONGLINES") &&
             (boost::starts_with(type, "INT_L") || boost::starts_with(type, "INT_R"))) {
             for (int j = 0; j < td.num_pips; j++) {
                 auto &pd = td.pip_data[j];
@@ -771,7 +775,7 @@ void Arch::setup_pip_blacklist()
     // instances (one "TILENAME.DST.SRC" per line), for pips whose config bit
     // collides with a live IOB config bit in the shared INT frame column.  Unlike
     // NEXTPNR_PIP_BLACKLIST (per tile TYPE) this forbids the pip in ONE tile only.
-    if (const char *blf = getenv("NEXTPNR_PIP_BLACKLIST_TILE")) {
+    if (const char *blf = knobs::get("NEXTPNR_PIP_BLACKLIST_TILE")) {
         if (tile_by_name.empty())
             for (int i = 0; i < chip_info->num_tiles; i++)
                 tile_by_name[chip_info->tile_insts[i].name.get()] = i;
@@ -1074,41 +1078,40 @@ bool Arch::place()
 
     if (placer == "heap") {
         PlacerHeapCfg cfg(getCtx());
-        cfg.criticalityExponent = 7;
+        auto heap_param = [&](const char *key, auto arch_default) {
+            using T = decltype(arch_default);
+            T value = arch_default;
+            if (const char *given = knobs::user_setting(key)) {
+                try {
+                    value = boost::lexical_cast<T>(given);
+                } catch (const boost::bad_lexical_cast &) {
+                    log_error("setting %s=%s is not a number\n", key, given);
+                }
+            }
+            std::ostringstream echo;
+            echo << std::setprecision(7) << value;
+            settings[id(key)] = echo.str();
+            return value;
+        };
+        cfg.criticalityExponent = heap_param("placerHeap/criticalityExponent", 7);
+        cfg.timingWeight = heap_param("placerHeap/timingWeight", 10);
+        cfg.alpha = heap_param("placerHeap/alpha", 0.08f);
+        cfg.beta = heap_param("placerHeap/beta", 0.4f);
+        cfg.spread_scale_x = heap_param("placerHeap/spreadScaleX", 2);
+        cfg.spread_scale_y = heap_param("placerHeap/spreadScaleY", 1);
+        cfg.netShareWeight = heap_param("placerHeap/netShareWeight", 0.2f);
+        cfg.solverTolerance = heap_param("placerHeap/solverTolerance", 0.6e-6f);
         cfg.ioBufTypes.insert(id("IOB_IBUFCTRL"));
         cfg.ioBufTypes.insert(id("IOB_OUTBUF"));
         cfg.ioBufTypes.insert(id_PSEUDO_GND);
         cfg.ioBufTypes.insert(id_PSEUDO_VCC);
-        cfg.alpha = 0.08;
-        cfg.beta = 0.4;
         cfg.placeAllAtOnce = true;
         cfg.hpwl_scale_x = 1;
         cfg.hpwl_scale_y = 2;
-        cfg.spread_scale_x = 2;
-        cfg.spread_scale_y = 1;
-        // Congestion-reduction knobs, env-adjustable.  The HeAP cut-spreader
-        // treats a region as over-used (and spreads cells out of it) once its
-        // occupancy exceeds beta*capacity.  LOWERING beta lowers the target
-        // density, so cells spread further and leave more free bels/routing
-        // tracks per region -- trading wirelength/timing for routability on
-        // designs the default placement leaves unroutable (e.g. the dsr_0_ /
-        // txu_iLast hard arcs).  spread_scale_{x,y} = how aggressively an
-        // over-used region is grown each spreading pass.
-        //   NEXTPNR_PLACER_BETA   (default 0.4; try 0.2-0.3 to de-congest)
-        //   NEXTPNR_SPREAD_SCALE_X / _Y  (defaults 2 / 1)
-        //   NEXTPNR_PLACER_ALPHA  (solver/spread blend, default 0.08)
-        if (const char *e = getenv("NEXTPNR_PLACER_BETA"))
-            cfg.beta = float(atof(e));
-        if (const char *e = getenv("NEXTPNR_SPREAD_SCALE_X"))
-            cfg.spread_scale_x = atoi(e);
-        if (const char *e = getenv("NEXTPNR_SPREAD_SCALE_Y"))
-            cfg.spread_scale_y = atoi(e);
-        if (const char *e = getenv("NEXTPNR_PLACER_ALPHA"))
-            cfg.alpha = float(atof(e));
-        log_info("HeAP congestion knobs: beta=%.3f spread_scale=%d,%d alpha=%.3f\n",
-                 cfg.beta, cfg.spread_scale_x, cfg.spread_scale_y, cfg.alpha);
-        cfg.netShareWeight = 0.2;
-        cfg.solverTolerance = 0.6e-6;
+        log_info("HeAP congestion knobs: beta=%.3f spread_scale=%d,%d alpha=%.3f\n", cfg.beta, cfg.spread_scale_x,
+                 cfg.spread_scale_y, cfg.alpha);
+        log_info("HeAP: criticalityExponent=%g timingWeight=%g netShareWeight=%g solverTolerance=%g\n",
+                 cfg.criticalityExponent, cfg.timingWeight, cfg.netShareWeight, cfg.solverTolerance);
         cfg.cellGroups.emplace_back();
         cfg.cellGroups.back().insert(id_SLICE_LUTX);
         cfg.cellGroups.back().insert(id_SLICE_FFX);
@@ -1281,7 +1284,7 @@ std::vector<Arch::ConstHoldout> Arch::routeVcc()
     // Unreached sinks are returned to the caller; NEXTPNR_GND_HOLDOUT_FILE also
     // dumps the GND ones as "<cell> <port>" lines.
     std::ofstream holdout_out;
-    if (const char *hf = getenv("NEXTPNR_GND_HOLDOUT_FILE"))
+    if (const char *hf = knobs::get("NEXTPNR_GND_HOLDOUT_FILE"))
         holdout_out.open(hf);
     auto say = [&](bool warning, IdString cell, IdString port, const std::string &text) {
         if (const_fill_deferred) {
@@ -1468,7 +1471,7 @@ void Arch::routeBufhcePassthroughCE()
 // Hardcoded for xc7vx485t bottom-right; enable with NEXTPNR_GT_CLK_BODGE=1.
 bool Arch::gtClockTemplateRoute(NetInfo *clk_net, PortRef &usr, int &conflicts)
 {
-    if (!getenv("NEXTPNR_GT_CLK_BODGE"))
+    if (!knobs::get("NEXTPNR_GT_CLK_BODGE"))
         return false;
     auto driver_type = clk_net->driver.cell ? clk_net->driver.cell->type : IdString();
     std::string dtype = driver_type.str(this);
@@ -2162,10 +2165,10 @@ void Arch::applyFixedRoutes(const std::string &filename, std::function<void()> r
     // 2235, i.e. essentially every flip-flop left with an unconfigured D mux --
     // dead on hardware.  So allow "keep Vivado's pin assignment" while still
     // letting the router complete the last mile.
-    const bool noswap_env = getenv("NEXTPNR_FIXEDROUTES_NOSWAP") != nullptr;
-    bool replicate = getenv("NEXTPNR_FIXEDROUTES_NO_PINSWAP") != nullptr || noswap_env ||
-                     (getenv("NEXTPNR_ROUTE_FIXED_ONLY") != nullptr &&
-                      getenv("NEXTPNR_FIXEDROUTES_PINSWAP") == nullptr);
+    const bool noswap_env = knobs::get("NEXTPNR_FIXEDROUTES_NOSWAP") != nullptr;
+    bool replicate = knobs::get("NEXTPNR_FIXEDROUTES_NO_PINSWAP") != nullptr || noswap_env ||
+                     (knobs::get("NEXTPNR_ROUTE_FIXED_ONLY") != nullptr &&
+                      knobs::get("NEXTPNR_FIXEDROUTES_PINSWAP") == nullptr);
     const bool swap_lut_pins = !replicate;
     std::unordered_map<int, std::unordered_map<int, NetInfo *>> locked_lut_input;
     for (NetInfo *net : fixed_nets) {
@@ -2309,7 +2312,7 @@ void Arch::applyFixedRoutes(const std::string &filename, std::function<void()> r
     // external BFS "hook" (which GUESSED wires and failed ~386 arcs on the
     // golden macro) is disabled by default.  Set NEXTPNR_FIXEDROUTES_HOOK=1
     // to re-enable the legacy hooking for comparison.
-    if (getenv("NEXTPNR_FIXEDROUTES_HOOK") == nullptr) {
+    if (knobs::get("NEXTPNR_FIXEDROUTES_HOOK") == nullptr) {
         log_info("    fixed-routes: last-mile left to router2 (reserved-net contract)\n");
         return;
     }
@@ -3014,7 +3017,7 @@ bool Arch::route()
     // unrouted and the bitstream dead.  Run the same finishing passes the
     // normal path does -- routeVcc() as the fill, then fixupRouting() -- so the
     // FASM is complete.
-    if (getenv("NEXTPNR_ROUTE_FIXED_ONLY") != nullptr) {
+    if (knobs::get("NEXTPNR_ROUTE_FIXED_ONLY") != nullptr) {
         findSourceSinkLocations();
         std::vector<ConstHoldout> holdouts = routeVcc();
         if (!holdouts.empty())
@@ -3053,7 +3056,7 @@ bool Arch::route()
         return p.is_string ? (p.as_string() != "0" && p.as_string() != "false" && !p.as_string().empty())
                            : p.as_int64() != 0;
     };
-    if (roi_active() && (getenv("NEXTPNR_SKIP_FAILED_ARCS") != nullptr || router1_skip_setting()))
+    if (roi_active() && (knobs::get("NEXTPNR_SKIP_FAILED_ARCS") != nullptr || router1_skip_setting()))
         log_error("NEXTPNR_SKIP_FAILED_ARCS or the router1/skipFailedArcs setting is set and NEXTPNR_PARTITION_ROI is "
                   "set; the router would accept a partial route and this run would write it as routed under a "
                   "partition rectangle. Unset NEXTPNR_SKIP_FAILED_ARCS and remove router1/skipFailedArcs from the "
@@ -3076,7 +3079,7 @@ bool Arch::route()
             cfg.bb_margin_y = 4;
             cfg.backwards_max_iter = 200;
             cfg.perf_profile = true;
-            const char *clamp_mode = getenv("NEXTPNR_PARTITION_CLAMP");
+            const char *clamp_mode = knobs::get("NEXTPNR_PARTITION_CLAMP");
             const bool clamp_off = clamp_mode != nullptr && std::string(clamp_mode) == "off";
             if (roi_active() && clamp_off) {
                 log_warning("partition route clamp: DISABLED by NEXTPNR_PARTITION_CLAMP=off. The rectangle governs "
@@ -3085,7 +3088,7 @@ bool Arch::route()
                             "unclamped control arm for the acceptance evidence. It must never be set for a build whose "
                             "bitstream will be loaded.\n");
             }
-            const char *keepout_mode = getenv("NEXTPNR_PARTITION_KEEPOUT");
+            const char *keepout_mode = knobs::get("NEXTPNR_PARTITION_KEEPOUT");
             const bool keepout_off = keepout_mode != nullptr && std::string(keepout_mode) == "off";
             if (roi_active() && keepout_off) {
                 log_warning("partition static keepout: DISABLED by NEXTPNR_PARTITION_KEEPOUT=off. Nets belonging to no "
@@ -3094,7 +3097,7 @@ bool Arch::route()
                             "relocated to another by rewriting its FAR word. This setting exists to produce the "
                             "un-kept-out control arm for the acceptance evidence.\n");
             }
-            const char *narrow_mode = getenv("NEXTPNR_PARTITION_KEEPOUT_NARROW");
+            const char *narrow_mode = knobs::get("NEXTPNR_PARTITION_KEEPOUT_NARROW");
             const bool narrow_off = narrow_mode != nullptr && std::string(narrow_mode) == "off";
             if (roi_active() && !keepout_off && narrow_off) {
                 log_warning("partition static keepout: the narrow licence is DISABLED by "
@@ -3146,7 +3149,7 @@ bool Arch::route()
     check_partition_keepout();
     dsp48e1CheckCache();
     dsp48e1WarnInternalPaths();
-    const char *post_route_timing = getenv("NEXTPNR_POST_ROUTE_TIMING");
+    const char *post_route_timing = knobs::get("NEXTPNR_POST_ROUTE_TIMING");
     bool do_post_route_timing = (router == "router2");
     if (post_route_timing != nullptr)
         do_post_route_timing =
@@ -3154,7 +3157,7 @@ bool Arch::route()
     if (do_post_route_timing) {
         log_info("Post-route timing analysis:\n");
         timing_analysis(getCtx(), false /* slack_histogram */, true /* print_fmax */,
-                        getenv("NEXTPNR_CRIT_PATH_REPORT") != nullptr /* print_path */,
+                        knobs::get("NEXTPNR_CRIT_PATH_REPORT") != nullptr /* print_path */,
                         false /* warn_on_failure */);
     }
     getCtx()->settings[getCtx()->id("route")] = 1;
@@ -4483,7 +4486,7 @@ const std::vector<std::string> Arch::availableRouters = {"router1", "router2"};
 void Arch::load_bel_blacklist() const
 {
     blacklist_bels_loaded = true;
-    const char *f = getenv("NEXTPNR_BEL_BLACKLIST");
+    const char *f = knobs::get("NEXTPNR_BEL_BLACKLIST");
     if (f == nullptr)
         return;
     std::error_code ec;
@@ -4720,7 +4723,7 @@ struct RoiJsonScan
 void Arch::load_partition_roi() const
 {
     roi_loaded = true;
-    const char *f = getenv("NEXTPNR_PARTITION_ROI");
+    const char *f = knobs::get("NEXTPNR_PARTITION_ROI");
     if (f == nullptr)
         return;
     std::ifstream in(f);
@@ -4848,7 +4851,7 @@ void Arch::snapshot_rm_cells()
 void Arch::load_exempt_nets() const
 {
     exempt_nets_loaded = true;
-    const char *f = getenv("NEXTPNR_PARTITION_EXEMPT_NETS");
+    const char *f = knobs::get("NEXTPNR_PARTITION_EXEMPT_NETS");
     if (f == nullptr)
         return;
     std::ifstream in(f);
@@ -4888,7 +4891,7 @@ std::unordered_set<IdString> Arch::load_keepout_exempt_nets() const
         out.insert(n);
     const int from_p = int(out.size());
 
-    const char *f = getenv("NEXTPNR_PARTITION_KEEPOUT_EXEMPT");
+    const char *f = knobs::get("NEXTPNR_PARTITION_KEEPOUT_EXEMPT");
     int n = 0, miss = 0;
     if (f != nullptr) {
         std::ifstream in(f);
@@ -4923,7 +4926,7 @@ std::unordered_set<IdString> Arch::load_keepout_exempt_nets() const
 std::unordered_map<IdString, std::vector<PipId>> Arch::load_keepout_licence_pips() const
 {
     std::unordered_map<IdString, std::vector<PipId>> out;
-    const char *f = getenv("NEXTPNR_PARTITION_KEEPOUT_LICENCE");
+    const char *f = knobs::get("NEXTPNR_PARTITION_KEEPOUT_LICENCE");
     if (f == nullptr || !roi_active())
         return out;
     if (keepout_licence_loaded)
@@ -5331,7 +5334,7 @@ void Arch::check_partition_nets() const
                   stale);
 
     const IdString gnd_net = id("$PACKER_GND_NET"), vcc_net = id("$PACKER_VCC_NET");
-    const char *mode = getenv("NEXTPNR_PARTITION_NETS");
+    const char *mode = knobs::get("NEXTPNR_PARTITION_NETS");
     const bool fatal = (mode == nullptr) || std::string(mode) != "warn";
 
     int rm_nets = 0, excl_const = 0, excl_listed = 0;

@@ -26,6 +26,7 @@
 #include <cmath>
 #include <fstream>
 #include <set>
+#include "knobs.h"
 #include "log.h"
 #include "nextpnr.h"
 #include "pins.h"
@@ -1470,7 +1471,7 @@ struct FasmBackend
             // the output's DRIVE bits -> FasmInconsistentBits).
             bool partner_out = partner_is_output(pad);
             bool is_lefthp_se_in = is_hp_bank && !is_riob18 && !is_output && !is_diff && yLoc == 1
-                                   && (getenv("NEXTPNR_RX_PLAIN_LVCMOS") == nullptr)
+                                   && (knobs::get("NEXTPNR_RX_PLAIN_LVCMOS") == nullptr)
                                    && !partner_out;
             if (is_hp_bank && !is_output) {
                 if (is_diff) {

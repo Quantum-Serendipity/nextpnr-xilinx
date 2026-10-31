@@ -21,6 +21,7 @@
 #include <queue>
 #include <unordered_set>
 #include "design_utils.h"
+#include "knobs.h"
 #include "log.h"
 #include "nextpnr.h"
 #include "place_common.h"
@@ -41,10 +42,14 @@ inline NetInfo *port_or_nullptr(const CellInfo *cell, IdString name)
 // already sets it, but the default xc7 flow uses HeAP, whose strict
 // legaliser is precisely the caller one needs to observe when a placement
 // refuses to legalise.
-bool dbg_validity_runtime = getenv("NEXTPNR_DUMP_INVALID_TILE") != nullptr;
+static bool dbg_validity_runtime()
+{
+    static const bool on = knobs::is_set("NEXTPNR_DUMP_INVALID_TILE");
+    return on;
+}
 #define DBG_RT()                                                                                                       \
     do {                                                                                                               \
-        if (dbg_validity_runtime)                                                                                      \
+        if (dbg_validity_runtime())                                                                                      \
             log_info("invalid-arm: line %d\n", __LINE__);                                                             \
     } while (0)
 #ifdef DEBUG_VALIDITY
@@ -566,7 +571,7 @@ bool Arch::xc7_logic_tile_valid(IdString tileType, LogicTileStatus &lts) const
                     // two SRL16Es per slot routinely).
                     if (!srl_pair && !imported_carry_feedthrough && !imported_slot &&
                         (lut6->lutInfo.input_count == 6 || lut6->lutInfo.output_count == 2)) {
-                        if (dbg_validity_runtime)
+                        if (dbg_validity_runtime())
                             log_info("  invalid-arm-387: lut6=%s(BEL=%d) in=%d out=%d lut5=%s(BEL=%d) imported_slot=%d\n",
                                      nameOf(lut6), int(lut6->attrs.count(id_BEL)), lut6->lutInfo.input_count,
                                      lut6->lutInfo.output_count, nameOf(lut5), int(lut5->attrs.count(id_BEL)),
@@ -861,7 +866,7 @@ bool Arch::xc7_logic_tile_valid(IdString tileType, LogicTileStatus &lts) const
             // doesn't model, so let that flow opt out -- a wrong guess fails
             // loudly in the router, it can't produce a silently-bad bitstream.
             static const bool allow_co_5ff_contention =
-                    getenv("NEXTPNR_ALLOW_CO_5FF_CONTENTION") != nullptr;
+                    knobs::get("NEXTPNR_ALLOW_CO_5FF_CONTENTION") != nullptr;
             if (!allow_co_5ff_contention && carry4 != nullptr && carry4->carryInfo.cout_sigs[i % 4] != nullptr) {
                 NetInfo *co = carry4->carryInfo.cout_sigs[i % 4];
                 bool co_uses_mux = false;
@@ -903,7 +908,7 @@ bool Arch::xc7_logic_tile_valid(IdString tileType, LogicTileStatus &lts) const
 
             lts.eights[i].valid = true;
         } else if (!lts.eights[i].valid) {
-            if (dbg_validity_runtime)
+            if (dbg_validity_runtime())
                 log_info("  invalid-arm: cached eights[%d].valid=false\n", i);
             return false;
         }
@@ -955,7 +960,7 @@ bool Arch::xc7_logic_tile_valid(IdString tileType, LogicTileStatus &lts) const
                         if (we_not_yet_recorded) {
                             we = lut->lutInfo.we;
                         } else if (we_disagrees_with_recorded) {
-                            if (dbg_validity_runtime)
+                            if (dbg_validity_runtime())
                                 log_info("  invalid-arm: half-tile WE mismatch: %s vs %s\n", nameOf(we),
                                          nameOf(lut->lutInfo.we));
                             return false;
@@ -976,20 +981,20 @@ bool Arch::xc7_logic_tile_valid(IdString tileType, LogicTileStatus &lts) const
                     }
                     if (found_ff[0] || found_ff[1]) {
                         if (ff->ffInfo.clk != clk) {
-                            if (dbg_validity_runtime)
+                            if (dbg_validity_runtime())
                                 log_info("  invalid-arm: ctrlset clk %s: %s vs %s\n", nameOf(ff),
                                          ff->ffInfo.clk ? nameOf(ff->ffInfo.clk) : "-", clk ? nameOf(clk) : "-");
                             return false;
                         }
                         if (ff->ffInfo.sr != sr) {
-                            if (dbg_validity_runtime)
+                            if (dbg_validity_runtime())
                                 log_info("  invalid-arm: ctrlset sr %s @%s: %s vs %s\n", nameOf(ff),
                                          getBelName(ff->bel).c_str(getCtx()),
                                          ff->ffInfo.sr ? nameOf(ff->ffInfo.sr) : "-", sr ? nameOf(sr) : "-");
                             return false;
                         }
                         if (ff->ffInfo.ce != ce) {
-                            if (dbg_validity_runtime)
+                            if (dbg_validity_runtime())
                                 log_info("  invalid-arm: ctrlset ce %s: %s vs %s\n", nameOf(ff),
                                          ff->ffInfo.ce ? nameOf(ff->ffInfo.ce) : "-", ce ? nameOf(ce) : "-");
                             return false;
@@ -1013,7 +1018,7 @@ bool Arch::xc7_logic_tile_valid(IdString tileType, LogicTileStatus &lts) const
                     } else {
                         clk = ff->ffInfo.clk;
                         if (i == 0 && wclk != nullptr && clk != wclk) {
-                            if (dbg_validity_runtime)
+                            if (dbg_validity_runtime())
                                 log_info("  invalid-arm: wclk %s: clk %s vs wclk %s\n", nameOf(ff),
                                          clk ? nameOf(clk) : "-", wclk ? nameOf(wclk) : "-");
                             return false;
@@ -1021,7 +1026,7 @@ bool Arch::xc7_logic_tile_valid(IdString tileType, LogicTileStatus &lts) const
                         const bool ff_half_clkinv = ff->ffInfo.is_clkinv != ff->ffInfo.is_latch;
                         const bool ff_polarity_is_not_wclk = ff_half_clkinv != wclk_inv;
                         if (i == 0 && wclk != nullptr && ff_polarity_is_not_wclk) {
-                            if (dbg_validity_runtime)
+                            if (dbg_validity_runtime())
                                 log_info("  invalid-arm: wclk polarity %s: ff %d vs wclk %d\n", nameOf(ff),
                                          int(ff_half_clkinv), int(wclk_inv));
                             return false;
@@ -1038,7 +1043,7 @@ bool Arch::xc7_logic_tile_valid(IdString tileType, LogicTileStatus &lts) const
             }
             lts.halfs[i].valid = true;
         } else if (!lts.halfs[i].valid) {
-            if (dbg_validity_runtime)
+            if (dbg_validity_runtime())
                 log_info("  invalid-arm: cached halfs[%d].valid=false\n", i);
             return false;
         }
@@ -2046,7 +2051,7 @@ void Arch::fixupRouting()
     int perm_label_no_net = 0;
     int perm_dropped_nets = 0;
     bool lut_perm_drop_fatal = false;
-    if (const char *pdm = getenv("NEXTPNR_LUT_PERM_DROP")) {
+    if (const char *pdm = knobs::get("NEXTPNR_LUT_PERM_DROP")) {
         const std::string m(pdm);
         if (m == "fatal")
             lut_perm_drop_fatal = true;

@@ -32,6 +32,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
+#include "knobs.h"
 #include "log.h"
 #include "util.h"
 
@@ -1122,12 +1123,12 @@ struct Timing
         }
         if (ctx->timing_ignore_nets)
             ignore_attr = ctx->id("NEXTPNR_TIMING_IGNORE");
-        if (getenv("NEXTPNR_ASYNC_GROUPS"))
+        if (knobs::get("NEXTPNR_ASYNC_GROUPS"))
             log_error("NEXTPNR_ASYNC_GROUPS is no longer read; declare the crossing with set_clock_groups in an XDC\n");
         if (!ctx->timing_io_delays.empty())
             resolve_io_delays();
         if (export_setup) {
-            if (const char *sf = getenv("NEXTPNR_SETUP_EXPORT")) {
+            if (const char *sf = knobs::get("NEXTPNR_SETUP_EXPORT")) {
                 setup_export.open(sf);
                 if (!setup_export)
                     log_error("cannot open NEXTPNR_SETUP_EXPORT file '%s' for writing\n", sf);
@@ -1135,7 +1136,7 @@ struct Timing
                                 "clk\tcapture_clk\tpath_len\tdelay_source\tlaunch_clk_delay_ns\tcapture_clk_delay_"
                                 "ns\trequirement_source\n";
             }
-            if (const char *hf = getenv("NEXTPNR_HOLD_EXPORT")) {
+            if (const char *hf = knobs::get("NEXTPNR_HOLD_EXPORT")) {
                 hold_export.open(hf);
                 if (!hold_export)
                     log_error("cannot open NEXTPNR_HOLD_EXPORT file '%s' for writing\n", hf);
@@ -2051,7 +2052,7 @@ struct Timing
                     nc.cd_worst_slack = std::min(nc.cd_worst_slack, worst_slack.at(domain));
                 }
             }
-            if (const char *cf = getenv("NEXTPNR_CRIT_EXPORT")) {
+            if (const char *cf = knobs::get("NEXTPNR_CRIT_EXPORT")) {
                 std::map<IdString, float> cell_crit;
                 for (auto &nc : *net_crit) {
                     float mx = 0.0f;
@@ -2302,7 +2303,7 @@ void export_cell_arcs(Context *ctx, const char *path)
 
 void timing_analysis(Context *ctx, bool print_histogram, bool print_fmax, bool print_path, bool warn_on_failure)
 {
-    if (const char *af = getenv("NEXTPNR_ARC_EXPORT"))
+    if (const char *af = knobs::get("NEXTPNR_ARC_EXPORT"))
         export_cell_arcs(ctx, af);
     auto format_event = [ctx](const ClockEvent &e, bool is_end, int field_width = 0) {
         std::string value;

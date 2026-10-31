@@ -27,6 +27,7 @@
 #include "cells.h"
 #include "chain_utils.h"
 #include "design_utils.h"
+#include "knobs.h"
 #include "log.h"
 #include "nextpnr.h"
 #include "pack.h"
@@ -191,7 +192,7 @@ void XC7Packer::pack_carries_atomic()
                 // CYINIT=1 is the PRECYINIT.C1 config bit (no routing), DI[0]=0
                 // ties internally, and S[0]=cnt[0] becomes a plain routethru
                 // like S[1..3] -- no O5/O6 sharing, no constant delivery.
-                if (getenv("NEXTPNR_CARRY_COUNTER_FIX") &&
+                if (knobs::get("NEXTPNR_CARRY_COUNTER_FIX") &&
                     z == 0 && prev == root && c4_di != nullptr &&
                     c4_di->name == ctx->id("$PACKER_VCC_NET") && c4_s != nullptr) {
                     NetInfo *cyi = get_net_or_empty(prev, ctx->id("CYINIT"));
@@ -226,7 +227,7 @@ void XC7Packer::pack_carries_atomic()
                         connect_port(ctx, ctx->nets.at(ctx->id("$PACKER_VCC_NET")).get(),
                                      prev, ctx->id("CYINIT"));
                         c4_s = get_net_or_empty(prev, ctx->id("S[0]"));
-                        if (getenv("DBG_CARRYFF"))
+                        if (knobs::get("DBG_CARRYFF"))
                             log_info("CARRY +1 re-encode %s: CYINIT=1, DI[0]=0, S[0]<-%s\n",
                                      ctx->nameOf(prev), ctx->nameOf(inv_in));
                     }
@@ -382,7 +383,7 @@ void XC7Packer::pack_carries_atomic()
                     pr.port = ctx->id("DI[" + zs + "]");
                     auto di_feed = feed_through_lut(c4_di, {pr});
                     di_lut = di_feed.get();
-                    if (ctx->debug || getenv("DBG_DIFEED"))
+                    if (ctx->debug || knobs::get("DBG_DIFEED"))
                         log_info("DIFEED %s for %s.DI[%s] di_net=%s prevBEL=%s\n", ctx->nameOf(di_lut),
                                  ctx->nameOf(prev), zs.c_str(), ctx->nameOf(c4_di),
                                  prev->attrs.count(id_BEL) ?
@@ -453,7 +454,7 @@ void XC7Packer::pack_carries_atomic()
                 // registered counters/adders need (sum returns intra-slice to
                 // drive S).  Opt out with NEXTPNR_NO_CARRY_COUNTER_FIX.
                 NetInfo *c4_o = get_net_or_empty(prev, ctx->id("O[" + zs + "]"));
-                if (!getenv("NEXTPNR_NO_CARRY_COUNTER_FIX") && c4_o != nullptr) {
+                if (!knobs::get("NEXTPNR_NO_CARRY_COUNTER_FIX") && c4_o != nullptr) {
                     CellInfo *sum_ff = nullptr;
                     bool ambiguous = false;
                     for (auto &u : c4_o->users) {
@@ -510,7 +511,7 @@ void XC7Packer::pack_carries_atomic()
                             if ((child->constr_z & 0xF) == BEL_FF && ctrl_key(child) != new_key)
                                 sr_ok = false;
                         if (!sr_ok) {
-                            if (getenv("DBG_CARRYFF"))
+                            if (knobs::get("DBG_CARRYFF"))
                                 log_info("CARRYFF SKIP %s for %s.O[%d] ctrlset-mismatch\n",
                                          ctx->nameOf(sum_ff), ctx->nameOf(prev), z);
                         } else {
@@ -520,11 +521,11 @@ void XC7Packer::pack_carries_atomic()
                         sum_ff->constr_y = anchor_y;
                         sum_ff->constr_abs_z = true;
                         sum_ff->constr_z = (z << 4 | BEL_FF);
-                        if (getenv("DBG_CARRYFF"))
+                        if (knobs::get("DBG_CARRYFF"))
                             log_info("CARRYFF %s -> %s.O[%d] @ lane %d (z<<4|FF)\n",
                                      ctx->nameOf(sum_ff), ctx->nameOf(prev), z, z);
                         }
-                    } else if (getenv("DBG_CARRYFF") && sum_ff != nullptr) {
+                    } else if (knobs::get("DBG_CARRYFF") && sum_ff != nullptr) {
                         log_info("CARRYFF SKIP %s for %s.O[%d] amb=%d pinned=%d constr=%d\n",
                                  ctx->nameOf(sum_ff), ctx->nameOf(prev), z, ambiguous,
                                  (int)sum_ff->attrs.count(id_BEL),
@@ -674,7 +675,7 @@ void XC7Packer::pack_carries_atomic()
 
 void XC7Packer::pack_carries()
 {
-    const char *legacy = std::getenv("XC7_LEGACY_CARRY4_SPLIT");
+    const char *legacy = knobs::get("XC7_LEGACY_CARRY4_SPLIT");
     if (legacy == nullptr || legacy[0] == '0') {
         pack_carries_atomic();
         return;
@@ -1007,7 +1008,7 @@ void XC7Packer::pack_carries()
 // slice with a free output mux.  Opt out with NEXTPNR_NO_CARRY_O_RELOC.
 void XC7Packer::relocate_carry_o_fabric()
 {
-    if (getenv("NEXTPNR_NO_CARRY_O_RELOC"))
+    if (knobs::get("NEXTPNR_NO_CARRY_O_RELOC"))
         return;
     if (!ctx->nets.count(ctx->id("$PACKER_GND_NET")) || !ctx->nets.count(ctx->id("$PACKER_VCC_NET")))
         return;
@@ -1113,7 +1114,7 @@ void XC7Packer::relocate_carry_o_fabric()
         add_net(std::move(sum_copy));
         new_cells.push_back(std::move(lut));
         relocated++;
-        if (getenv("DBG_CARRYO"))
+        if (knobs::get("DBG_CARRYO"))
             log_info("CARRO %s.O%d -> sum LUT (S^CIN), %d fabric users moved\n",
                      ctx->nameOf(c4), bit, moved);
     };
@@ -1386,7 +1387,7 @@ void XC7Packer::relocate_carry_o_fabric()
                  relocated, split_carries, int(roots.size()), chains_pinned, cells_pinned);
 
     flush_cells();
-    if (getenv("DBG_CARRYO")) {
+    if (knobs::get("DBG_CARRYO")) {
         for (auto &cell : ctx->cells) {
             CellInfo *ci = cell.second.get();
             if (ci->type != ctx->id("CARRY4"))

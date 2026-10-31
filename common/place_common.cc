@@ -19,6 +19,7 @@
 
 #include "place_common.h"
 #include <cmath>
+#include "knobs.h"
 #include "log.h"
 #include "util.h"
 
@@ -594,7 +595,7 @@ class ConstraintLegaliseWorker
         for (auto cell : sorted(ctx->cells))
             if (get_constraints_distance(ctx, cell.second) != 0) {
                 Loc cl = ctx->getBelLocation(cell.second->bel);
-                if (getenv("NEXTPNR_DBG_CONSTR")) {
+                if (knobs::get("NEXTPNR_DBG_CONSTR")) {
                     std::function<void(const CellInfo *, int)> dump = [&](const CellInfo *c, int depth) {
                         for (auto child : c->constr_children) {
                             int d = get_constraints_distance(ctx, child);

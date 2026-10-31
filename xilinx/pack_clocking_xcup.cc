@@ -25,6 +25,7 @@
 #include "cells.h"
 #include "chain_utils.h"
 #include "design_utils.h"
+#include "knobs.h"
 #include "log.h"
 #include "nextpnr.h"
 #include "pack.h"
@@ -44,7 +45,7 @@ BelId XilinxPacker::find_bel_with_short_route(WireId source, IdString beltype, I
     // aborting P&R. The BFS runs once per clock-buffer driver over a hash-set, so
     // a higher bound is cheap; it stays bounded by the (finite) routing graph.
     size_t max_visit = 1000000;
-    bool dbg_route = getenv("NEXTPNR_DBG_SHORTROUTE") != nullptr;
+    bool dbg_route = knobs::get("NEXTPNR_DBG_SHORTROUTE") != nullptr;
     std::unordered_set<WireId> visited;
     // Layer-by-layer BFS instead of a single FIFO.  When the original
     // FIFO encountered two reachable target BELs at the same pip-distance

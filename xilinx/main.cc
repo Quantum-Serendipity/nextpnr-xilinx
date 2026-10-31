@@ -26,6 +26,7 @@
 #include "command.h"
 #include "design_utils.h"
 #include "jsonwrite.h"
+#include "knobs.h"
 #include "log.h"
 #include "router2.h"
 #include "timing.h"
@@ -161,7 +162,7 @@ void UspCommandHandler::customAfterLoad(Context *ctx)
                     "and the route clamp and the partition routing check confine nothing. This is the shape of a "
                     "static build; an RM build needs its RM cells unplaced in the input netlist.\n",
                     vm.count("no-place") ? " (--no-place with a placed input netlist)" : "");
-    if (const char *blf = getenv("NEXTPNR_BEL_BLACKLIST")) {
+    if (const char *blf = knobs::get("NEXTPNR_BEL_BLACKLIST")) {
         std::error_code ec;
         if (std::filesystem::is_directory(blf, ec))
             log_error("NEXTPNR_BEL_BLACKLIST: '%s' is a directory, not a file of bel names\n", blf);
