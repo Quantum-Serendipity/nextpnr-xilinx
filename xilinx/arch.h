@@ -765,6 +765,7 @@ struct Arch : BaseCtx
     bool xc7;
 
     std::string getChipName() const;
+    std::string chipdbSpeedGrade() const;
     std::string chipdb_route_identity() const;
     void record_partition_modes();
 

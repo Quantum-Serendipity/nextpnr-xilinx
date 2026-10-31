@@ -173,44 +173,10 @@ void XC7Packer::pack_carries_atomic()
                 NetInfo *c4_s  = get_net_or_empty(prev, ctx->id("S["  + zs + "]"));
                 NetInfo *c4_di = get_net_or_empty(prev, ctx->id("DI[" + zs + "]"));
 
-                // Constant-driven DI inputs ($PACKER_GND_NET / $PACKER_VCC_NET)
-                // don't need a feed-through LUT: the CARRY4 DI mux defaults to 0
-                // when the DI route is simply omitted, so a const DI is tied
-                // internally.  (Spurious DI feed-throughs were what hung the
-                // heap placer when we tried to constrain them.)
-                //
-                // S inputs are different: the carry's S (propagate) input MUST
-                // be driven by a real LUT output -- there is no internal tie.  A
-                // constant S therefore needs a feed-through LUT that buffers the
-                // VCC/GND net into S; otherwise routeVcc() is asked to route the
-                // constant to a LUT *output* sitewire, which no fabric pip can
-                // reach (arch.cc:744 assert).  So DON'T null a const S here --
-                // let the s_lut==nullptr path below insert the feed-through.
                 auto is_const = [&](NetInfo *n) {
                     return n && (n->name == ctx->id("$PACKER_GND_NET") ||
                                  n->name == ctx->id("$PACKER_VCC_NET"));
                 };
-                // CARRY4 DI=GND: OMIT the route entirely.  The DI mux defaults to 0
-                // when its input is left unconnected (golden sets no DImux feature
-                // for a GND DI), so the carry is tied low internally with no fabric
-                // route, no AX bypass and no feed-through LUT.  Routing GND to these
-                // DIs (via the sparse GND backbone -> AX) is exactly what produced
-                // the unroutable holdouts in congested slots.  (VCC DIs still fall
-                // through to the feed-through/AX path below -- omitting would give 0,
-                // not 1.)
-                // FIX (DI-delivery): an unrouted carry-DI bypass does NOT default
-                // to 0 -- it defaults to VCC (the BYP mux VCC fallback), so omitting a
-                // GND DI silently delivers 1 and corrupts the carry (counters oscillate).
-                // Vivado drives these to 0 explicitly (GFAN).  Keep the GND DI connected
-                // so the di_feed path below buffers it to a const-0 (O5=0 -> DI=O5=0).
-                // The legacy omit (which relied on the false 0-default) is available via
-                // NEXTPNR_CARRY_OMIT_GND_DI for the old behaviour.
-                if (getenv("NEXTPNR_CARRY_OMIT_GND_DI") &&
-                    c4_di != nullptr && c4_di->name == ctx->id("$PACKER_GND_NET")) {
-                    disconnect_port(ctx, prev, ctx->id("DI[" + zs + "]"));
-                    c4_di = nullptr;
-                }
-
                 // ---- Counter "+1" re-encode (robust replacement for the I5
                 // trick) ----
                 // yosys encodes a counter's bottom +1 as CYINIT=0, DI[0]=VCC,

@@ -100,6 +100,7 @@ Arch::Arch(ArchArgs args) : args(args)
         xc7 = true;
     else
         xc7 = false;
+    log_info("chipdb: %s, fabric delays at speed grade %s\n", chip_info->name.get(), chipdbSpeedGrade().c_str());
 
     tileStatus.resize(chip_info->num_tiles);
     for (int i = 0; i < chip_info->num_tiles; i++) {
@@ -156,6 +157,13 @@ Arch::Arch(ArchArgs args) : args(args)
 // -----------------------------------------------------------------------
 
 std::string Arch::getChipName() const { return chip_info->name.get(); }
+
+std::string Arch::chipdbSpeedGrade() const
+{
+    std::string name = chip_info->name.get();
+    auto dash = name.rfind('-');
+    return dash == std::string::npos ? std::string("unknown") : name.substr(dash);
+}
 
 std::string Arch::chipdb_route_identity() const
 {
@@ -843,14 +851,12 @@ std::vector<std::pair<IdString, std::string>> Arch::getBelAttrs(BelId bel) const
 
 // -----------------------------------------------------------------------
 
-delay_t Arch::estimateDelay(WireId src, WireId dst, bool debug) const
+delay_t Arch::estimateDelay(WireId src, WireId dst, bool) const
 {
     if (src == dst)
         return 0;
     int src_x, src_y, dst_x, dst_y;
-    int src_intent = wireIntent(src); // , dst_intent = wireIntent(dst);
-    // if (src_intent == ID_PSEUDO_GND || dst_intent == ID_PSEUDO_VCC)
-    //    return 500;
+    int src_intent = wireIntent(src);
     int dst_tile = dst.tile == -1 ? chip_info->nodes[dst.index].tile_wires[0].tile : dst.tile;
     int src_tile = src.tile == -1 ? chip_info->nodes[src.index].tile_wires[0].tile : src.tile;
 
@@ -882,8 +888,6 @@ delay_t Arch::estimateDelay(WireId src, WireId dst, bool debug) const
                 vcc_glbl = id("PSEUDO_VCC_WIRE_GLBL");
                 vcc_row = id("PSEUDO_VCC_WIRE_ROW");
             }
-            if (debug)
-                log_info("%s %d %d\n", IdString(wireInfo(src).name).c_str(this), wireInfo(src).name, gnd_glbl.index);
             if (wireInfo(src).name == gnd_glbl.index || wireInfo(src).name == vcc_glbl.index)
                 return 15000;
 
@@ -926,19 +930,6 @@ delay_t Arch::estimateDelay(WireId src, WireId dst, bool debug) const
         src_x = src_tile % chip_info->width;
         src_y = src_tile / chip_info->width;
     }
-    if (debug)
-        log_info("    src (%d, %d) dst (%d, %d)\n", src_x, src_y, dst_x, dst_y);
-    /*
-        delay_t base = 150 * std::min(std::abs(dst_x - src_x), 30) + 40 * std::max(std::abs(dst_x - src_x) - 30, 0)
-                +  150 * std::min(std::abs(dst_y - src_y), 10) + 60 * std::max(std::abs(dst_y - src_y)  - 10, 0)
-                + 500;
-        auto &srci = wireInfo(src);*/
-    /*
-    if (srci.intent == ID_NODE_HLONG || srci.intent == ID_NODE_VLONG)
-        base -= 180;
-    if (srci.intent == ID_NODE_HQUAD || srci.intent == ID_NODE_VQUAD || srci.intent == ID_NODE_DOUBLE)
-        base -= 120;
-    */
     delay_t base = 30 * std::min(std::abs(dst_x - src_x), 18) + 10 * std::max(std::abs(dst_x - src_x) - 18, 0) +
                    60 * std::min(std::abs(dst_y - src_y), 6) + 20 * std::max(std::abs(dst_y - src_y) - 6, 0) + 300;
 
@@ -997,15 +988,7 @@ ArcBounds Arch::getRouteBoundingBox(WireId src, WireId dst) const
     return {x0, y0, x1, y1};
 }
 
-delay_t Arch::getBoundingBoxCost(WireId src, WireId dst, int distance) const
-{
-    int src_intent = wireIntent(src);
-    if (src.tile == -1 && (src_intent == ID_PSEUDO_GND || src_intent == ID_PSEUDO_VCC))
-        return 0;
-    if (distance < 5)
-        return 0;
-    return (distance - 5) * 0;
-}
+delay_t Arch::getBoundingBoxCost(WireId, WireId, int) const { return 0; }
 
 delay_t Arch::getWireRipupDelayPenalty(WireId wire) const
 {
@@ -1129,14 +1112,17 @@ bool Arch::place()
         cfg.cellGroups.emplace_back();
         cfg.cellGroups.back().insert(id_SLICE_LUTX);
         cfg.cellGroups.back().insert(id_SLICE_FFX);
-        cfg.cellGroups.back().insert(id_CARRY8);
+        if (!xc7)
+            cfg.cellGroups.back().insert(id_CARRY8);
+        else if (bool_or_default(settings, id("placerHeap/carry4Group"), false))
+            cfg.cellGroups.back().insert(id("CARRY4"));
         if (!placer_heap(getCtx(), cfg))
             return false;
     } else if (placer == "sa") {
         if (!placer1(getCtx(), Placer1Cfg(getCtx())))
             return false;
     } else {
-        log_error("US+ architecture does not support placer '%s'\n", placer.c_str());
+        log_error("the xilinx architecture does not support placer '%s'\n", placer.c_str());
     }
     fixupPlacement();
     if (roi_active()) {
@@ -3406,7 +3392,8 @@ Arch::SyncPinTiming Arch::bramPinTiming(const CellInfo *cell, IdString port) con
         if (!bram_source_logged.exchange(true))
             log_info("block RAM: clock-to-out, setup and hold are DS181 v1.25 Table 30 -2 literals (cascade upper "
                      "half TRCKO_DO_CASCOUT, ECC read TRCKO_DO_ECC); the fabric arcs are the chipdb SDF's single "
-                     "grade\n");
+                     "grade, %s from %s\n",
+                     chipdbSpeedGrade().c_str(), chip_info->name.get());
         t.clk_to_q_min = reg ? 0.204 : 0.585;
         return t;
     }
