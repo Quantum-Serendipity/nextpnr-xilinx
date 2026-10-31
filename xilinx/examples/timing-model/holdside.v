@@ -9,6 +9,9 @@ module top (
     reg [7:0] q = 0;
     reg [31:0] sh = 0;
     reg sq = 0;
+    reg [7:0] wb = 0;
+    reg mem2 [0:255];
+    reg q2 = 0;
     always @(posedge clk_i) begin
         lfsr <= {lfsr[30:0], lfsr[31] ^ lfsr[21] ^ lfsr[1] ^ lfsr[0] ^ btn};
         wa <= lfsr[5:0];
@@ -19,6 +22,10 @@ module top (
         if (lfsr[17])
             sh <= {sh[30:0], lfsr[29]};
         sq <= sh[ra[4:0]];
+        wb <= lfsr[31:24];
+        if (lfsr[9])
+            mem2[wb] <= lfsr[3];
+        q2 <= mem2[wb];
     end
-    assign led = q ^ {7'b0, sq};
+    assign led = q ^ {6'b0, q2, sq};
 endmodule

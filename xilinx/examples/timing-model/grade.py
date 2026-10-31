@@ -393,8 +393,16 @@ def sdf_checks(timings, tiletype, cache={}):
     return cache[tiletype]
 
 
-GUARD_RE = re.compile(r"hold guard band FF D ([0-9.]+), LUTRAM WA3 ([0-9.]+) WA4 ([0-9.]+) WA5 ([0-9.]+) "
-                      r"WE ([0-9.]+), SRL WE ([0-9.]+), LUTRAM/SRL DI ([0-9.]+) ns")
+GRADE_RE = re.compile(r"speed grade -(\d+); hold-corner")
+GUARD_RE = re.compile(r"hold guard band FF D ([0-9.]+), LUTRAM WA1 ([0-9.]+) WA2 ([0-9.]+) WA3 ([0-9.]+) "
+                      r"WA4 ([0-9.]+) WA5 ([0-9.]+) WA6 ([0-9.]+) WA7 ([0-9.]+) WA8 ([0-9.]+) WE ([0-9.]+), "
+                      r"SRL WE ([0-9.]+), LUTRAM/SRL DI ([0-9.]+) ns")
+WA_PINS = tuple("WA%d" % i for i in range(1, 9))
+GUARD_NAMES = ("FF D",) + WA_PINS + ("LUTRAM WE", "SRL WE", "LUTRAM/SRL DI")
+GUARD_EXPECTED = {
+    "1": (0.040, 0.000, 0.001, 0.022, 0.033, 0.057, 0.057, 0.057, 0.057, 0.047, 0.056, 0.057),
+    "2": (0.040, 0.000, 0.001, 0.022, 0.033, 0.057, 0.057, 0.057, 0.057, 0.047, 0.056, 0.057),
+}
 
 
 def grade_hold_side(argv):
@@ -402,8 +410,17 @@ def grade_hold_side(argv):
     m = GUARD_RE.search(open(log).read()) if os.path.exists(log) else None
     if m is None:
         return "FAIL %s: the log states no hold guard band" % name
-    ff_d, wa3, wa4, wa5, lutram_we, srl_we, dram_di = (float(m.group(i)) for i in range(1, 8))
-    band = {"WA1": 0.0, "WA2": 0.0, "WA3": wa3, "WA4": wa4, "WA5": wa5, "WA6": 0.0}
+    vals = [float(m.group(i)) for i in range(1, 13)]
+    g = GRADE_RE.search(open(log).read())
+    if g is None or g.group(1) not in GUARD_EXPECTED:
+        return "FAIL %s: the log states no speed grade with a calibrated hold guard band" % name
+    off = [(n, v, e) for n, v, e in zip(GUARD_NAMES, vals, GUARD_EXPECTED[g.group(1)]) if abs(v - e) > 0.0005]
+    if off:
+        return "FAIL %s: at -%s the logged hold guard band is not the calibrated one: %s" % (
+            name, g.group(1), ", ".join("%s %.3f where %.3f" % o for o in off))
+    ff_d, lutram_we, srl_we, dram_di = vals[0], vals[9], vals[10], vals[11]
+    band = dict(zip(WA_PINS, vals[1:9]))
+    seen_wa = dict.fromkeys(WA_PINS, 0)
     cols, rows = read_tsv(hold_tsv)
     if cols is None:
         return "FAIL %s: no NEXTPNR_HOLD_EXPORT file was written" % name
@@ -430,6 +447,7 @@ def grade_hold_side(argv):
         elif is_dram and port in band:
             kind, inst, pin, guard = "LUTRAM WA", sitetype, port, band[port]
             ct = "LUT_OR_MEM%sLRAM" % lut
+            seen_wa[port] += 1
         elif (is_dram or is_srl) and port == "WE":
             kind = "SRL WE" if is_srl else "LUTRAM WE"
             inst, pin, guard = sitetype, "WE", srl_we if is_srl else lutram_we
@@ -454,13 +472,18 @@ def grade_hold_side(argv):
         seen[kind] += 1
         if abs(fast - slow) > TOL:
             split[kind] += 1
+    missing = [p for p in WA_PINS if seen_wa[p] == 0]
+    if missing:
+        return "FAIL %s: no distributed-RAM hold row on %s, so their guard band is not checked" % (
+            name, "/".join(missing))
     for kind in kinds:
         if split[kind] == 0:
             return "FAIL %s: no %s hold row whose SDF fast and slow sides differ (%d %s row(s) checked)" % (
                 name, kind, seen[kind], kind)
     return "PASS %s: %s hold row(s) read the SDF HOLD minimum (fast corner) plus the logged guard band, every " \
-           "kind with rows whose slow side differs (%s)" % (
-               name, ", ".join("%d %s" % (seen[k], k) for k in kinds), ", ".join("%d" % split[k] for k in kinds))
+           "kind with rows whose slow side differs (%s); LUTRAM rows per pin %s" % (
+               name, ", ".join("%d %s" % (seen[k], k) for k in kinds), ", ".join("%d" % split[k] for k in kinds),
+               " ".join("%s:%d" % (p, seen_wa[p]) for p in WA_PINS))
 
 
 ROUTE_SCALE_RE = re.compile(r"speed grade -(\d+); hold-corner fabric routing is ([0-9.]+) of the slow corner")

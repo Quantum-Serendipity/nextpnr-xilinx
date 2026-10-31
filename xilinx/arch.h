@@ -777,7 +777,9 @@ struct Arch : BaseCtx
     {
         int grade;
         float route_scale;
-        double ff_d, lutram_wa3, lutram_wa4, lutram_wa5, lutram_we, srl_we, dram_di;
+        double ff_d;
+        double lutram_wa[8];
+        double lutram_we, srl_we, dram_di;
     };
     const HoldCalibration *hold_cal = nullptr;
     float holdRouteScale() const { return hold_cal->route_scale; }

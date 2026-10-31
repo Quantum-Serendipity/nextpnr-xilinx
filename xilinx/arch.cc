@@ -117,8 +117,8 @@ Arch::Arch(ArchArgs args) : args(args)
         xc7 = false;
     {
         static const HoldCalibration hold_calibrations[] = {
-                {1, 0.31f, 0.040, 0.022, 0.033, 0.057, 0.047, 0.056, 0.030},
-                {2, 0.38f, 0.040, 0.022, 0.033, 0.057, 0.047, 0.056, 0.030},
+                {1, 0.31f, 0.040, {0.000, 0.001, 0.022, 0.033, 0.057, 0.057, 0.057, 0.057}, 0.047, 0.056, 0.057},
+                {2, 0.38f, 0.040, {0.000, 0.001, 0.022, 0.033, 0.057, 0.057, 0.057, 0.057}, 0.047, 0.056, 0.057},
         };
         std::string chip_name = chip_info->name.get();
         size_t dash = chip_name.rfind('-');
@@ -132,9 +132,12 @@ Arch::Arch(ArchArgs args) : args(args)
                       chip_name.c_str(), grade.c_str());
         speed_grade_2 = hold_cal->grade == 2;
         log_info("chipdb %s: speed grade -%d; hold-corner fabric routing is %.2f of the slow corner; hold guard "
-                 "band FF D %.3f, LUTRAM WA3 %.3f WA4 %.3f WA5 %.3f WE %.3f, SRL WE %.3f, LUTRAM/SRL DI %.3f ns\n",
-                 chip_name.c_str(), hold_cal->grade, hold_cal->route_scale, hold_cal->ff_d, hold_cal->lutram_wa3,
-                 hold_cal->lutram_wa4, hold_cal->lutram_wa5, hold_cal->lutram_we, hold_cal->srl_we, hold_cal->dram_di);
+                 "band FF D %.3f, LUTRAM WA1 %.3f WA2 %.3f WA3 %.3f WA4 %.3f WA5 %.3f WA6 %.3f WA7 %.3f WA8 %.3f WE "
+                 "%.3f, SRL WE %.3f, LUTRAM/SRL DI %.3f ns\n",
+                 chip_name.c_str(), hold_cal->grade, hold_cal->route_scale, hold_cal->ff_d, hold_cal->lutram_wa[0],
+                 hold_cal->lutram_wa[1], hold_cal->lutram_wa[2], hold_cal->lutram_wa[3], hold_cal->lutram_wa[4],
+                 hold_cal->lutram_wa[5], hold_cal->lutram_wa[6], hold_cal->lutram_wa[7], hold_cal->lutram_we,
+                 hold_cal->srl_we, hold_cal->dram_di);
         if (speed_grade_2)
             log_info("chipdb %s: DSP48E1, ICAPE2 and LUTRAM fallback clock-to-out and setup literals are the -2 "
                      "grade's\n",
@@ -4288,12 +4291,10 @@ double Arch::holdGuardBand(const CellInfo *cell, IdString port) const
         return port == id_D ? hold_cal->ff_d : 0.0;
     if (cell->type != id_SLICE_LUTX || !(cell->lutInfo.is_memory || cell->lutInfo.is_srl))
         return 0.0;
-    if (port == id_WA3)
-        return hold_cal->lutram_wa3;
-    if (port == id_WA4)
-        return hold_cal->lutram_wa4;
-    if (port == id_WA5)
-        return hold_cal->lutram_wa5;
+    static const IdString wa_pins[] = {id_WA1, id_WA2, id_WA3, id_WA4, id_WA5, id_WA6, id_WA7, id_WA8};
+    for (int i = 0; i < 8; i++)
+        if (port == wa_pins[i])
+            return hold_cal->lutram_wa[i];
     if (port == id_WE)
         return cell->lutInfo.is_srl ? hold_cal->srl_we : hold_cal->lutram_we;
     if (port == id_DI1 || port == id_DI2)
