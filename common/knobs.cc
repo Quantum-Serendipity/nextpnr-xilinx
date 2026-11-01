@@ -57,6 +57,7 @@ const KnobDef knob_table[] = {
         {"NEXTPNR_CRIT_PATH_REPORT", nullptr, true, false},
         {"NEXTPNR_DBG_CONSTR", nullptr, false, false},
         {"NEXTPNR_DBG_SHORTROUTE", nullptr, false, false},
+        {nullptr, "knob/dram_tie_unread_di", false, false},
         {"NEXTPNR_DUMP_INVALID_TILE", nullptr, false, false},
         {"NEXTPNR_EXCLUDE_STAMPED_BBOX", nullptr, false, true},
         {"NEXTPNR_FIXEDROUTES_HOOK", nullptr, false, false},

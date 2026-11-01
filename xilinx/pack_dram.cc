@@ -25,6 +25,7 @@
 #include "cells.h"
 #include "chain_utils.h"
 #include "design_utils.h"
+#include "knobs.h"
 #include "log.h"
 #include "nextpnr.h"
 #include "pack.h"
@@ -249,6 +250,13 @@ void XilinxPacker::pack_dram()
         }
     }
     int multiport_bits = 0, multiport_cells = 0, unread_data_inputs = 0;
+    bool tie_unread_di = false;
+    if (const char *v = knobs::get("knob/dram_tie_unread_di")) {
+        if (std::string(v) == "on")
+            tie_unread_di = true;
+        else if (std::string(v) != "off")
+            log_error("knob/dram_tie_unread_di=%s is refused: the value is on or off\n", v);
+    }
     for (auto cell : sorted(ctx->cells)) {
         CellInfo *ci = cell.second;
         const std::string &type = ci->type.str(ctx);
@@ -276,7 +284,7 @@ void XilinxPacker::pack_dram()
             else if (pname.compare(0, 2, "DI") == 0 || pname.compare(0, 2, "DO") == 0)
                 data_ports[pname] = &port.second;
         }
-        for (int p = 0; p < 4; p++) {
+        for (int p = 0; p < 4 && tie_unread_di; p++) {
             for (int j = 0; j < width; j++) {
                 std::string suffix = is_64 ? std::string(1, 'A' + p) : stringf("%c[%d]", 'A' + p, j);
                 auto di = data_ports.find("DI" + suffix);
@@ -335,7 +343,10 @@ void XilinxPacker::pack_dram()
     log_info("   Transformed %d tied-low DRAM address inputs to be tied-high (%d address bit(s) of %d RAM32M/RAM64M "
              "cell(s))\n",
              inverted_ports, multiport_bits, multiport_cells);
-    log_info("   Tied %d tied-low RAM32M/RAM64M data inputs high whose outputs nothing reads\n", unread_data_inputs);
+    if (tie_unread_di)
+        log_info("   Tied %d tied-low RAM32M/RAM64M data inputs high whose outputs nothing reads "
+                 "(knob/dram_tie_unread_di=on)\n",
+                 unread_data_inputs);
 
     for (auto cell : sorted(ctx->cells)) {
         CellInfo *ci = cell.second;

@@ -31,33 +31,72 @@ report() {
     case $1 in PASS*) ;; *) rc_total=1 ;; esac
 }
 
-if ! "$YOSYS" -q -l "$OUT/yosys.log" \
-        -p "read_verilog \"$HERE/top.v\"; synth_xilinx -flatten -abc9 -arch xc7 -top top; write_json \"$OUT/top.json\"" \
-        >/dev/null 2>&1; then
+synth() {
+    local src=$1 out=$2 flags=$3
+    "$YOSYS" -q -l "$out.yosys.log" \
+        -p "read_verilog \"$HERE/$src\"; synth_xilinx -flatten -abc9 -arch xc7 $flags -top top; write_json \"$out\"" \
+        >/dev/null 2>&1
+}
+
+pack() {
+    local json=$1 base=$2
+    shift 2
+    timeout "$NPNR_TIMEOUT" "$NEXTPNR" --chipdb "$CHIPDB" "$@" --json "$json" --pack-only \
+        --write "$base.json" --log "$base.log" -q >/dev/null 2>&1
+}
+
+if ! synth top.v "$OUT/top-synth.json" "" || ! synth stripped.v "$OUT/stripped-synth.json" "-noiopad -noclkbuf"; then
     echo "FAIL yosys"
     exit 1
 fi
+"$PYTHON" "$HERE/check.py" edit "$OUT/top-synth.json" "$OUT/top.json" >"$OUT/edit.txt" 2>&1 || { echo "FAIL edit: $(cat "$OUT/edit.txt")"; exit 1; }
+"$PYTHON" "$HERE/check.py" strip "$OUT/stripped-synth.json" "$OUT/stripped.json" >"$OUT/strip.txt" 2>&1 || { echo "FAIL strip: $(cat "$OUT/strip.txt")"; exit 1; }
+echo "INFO $(cat "$OUT/edit.txt"); stripped.v: $(cat "$OUT/strip.txt")"
 
-if ! timeout "$NPNR_TIMEOUT" "$NEXTPNR" --chipdb "$CHIPDB" --xdc "$HERE/top.xdc" --json "$OUT/top.json" --pack-only \
-        --write "$OUT/packed.json" --log "$OUT/pack.log" -q >/dev/null 2>&1; then
-    echo "FAIL pack: $(grep -m1 '^ERROR' "$OUT/pack.log")"
-    exit 1
-fi
+KNOB_ON=(--set knob/dram_tie_unread_di=on)
+for run in off on; do
+    knob=()
+    [ "$run" = on ] && knob=("${KNOB_ON[@]}")
+    if ! pack "$OUT/top.json" "$OUT/packed-$run" --xdc "$HERE/top.xdc" ${knob[@]+"${knob[@]}"}; then
+        echo "FAIL pack knob $run: $(grep -m1 '^ERROR' "$OUT/packed-$run.log")"
+        exit 1
+    fi
+    if ! pack "$OUT/stripped.json" "$OUT/stripped-$run" ${knob[@]+"${knob[@]}"}; then
+        echo "FAIL pack stripped knob $run: $(grep -m1 '^ERROR' "$OUT/stripped-$run.log")"
+        exit 1
+    fi
+done
 
 check() {
-    local arm=$1 mode=$2 out
-    if out=$("$PYTHON" "$HERE/check.py" "$mode" "$OUT/top.json" "$OUT/packed.json" --log "$OUT/pack.log" 2>&1); then
+    local arm=$1 mode=$2 pre=$3 run=$4 knob=$5 out
+    if out=$("$PYTHON" "$HERE/check.py" "$mode" "$OUT/$pre.json" "$OUT/$run.json" --log "$OUT/$run.log" \
+            --knob "$knob" 2>&1); then
         report "PASS $arm: $(printf '%s\n' "$out" | tail -1)"
     else
         report "FAIL $arm: $(printf '%s\n' "$out" | tr '\n' ' ')"
     fi
 }
 
-check contents contents
-check count count
-check unread-data unread-data
-check mutant-no-permute mutant-no-permute
-check mutant-driven-bit mutant-driven-bit
+check contents contents top packed-off off
+check count count top packed-off off
+check skip-init skip-init top packed-off off
+check unread-data-off data top packed-off off
+check contents-knob-on contents top packed-on on
+check count-knob-on count top packed-on on
+check unread-data-on data top packed-on on
+check stripped-knob-off stripped stripped stripped-off off
+check stripped-knob-on stripped stripped stripped-on on
+check mutant-no-permute mutant-no-permute top packed-off off
+check mutant-driven-bit mutant-driven-bit top packed-off off
+check mutant-skip-port-d mutant-skip-port-d top packed-off off
+
+pack "$OUT/top.json" "$OUT/packed-bad" --xdc "$HERE/top.xdc" --set knob/dram_tie_unread_di=maybe
+rc=$?
+if [ "$rc" -ne 0 ] && grep -q '^ERROR: knob/dram_tie_unread_di=maybe is refused: the value is on or off' "$OUT/packed-bad.log"; then
+    report "PASS knob-value-refused: --set knob/dram_tie_unread_di=maybe stops the run at rc $rc and names the two values"
+else
+    report "FAIL knob-value-refused: rc $rc: $(grep -m1 '^ERROR' "$OUT/packed-bad.log")"
+fi
 
 echo "outputs in $OUT"
 exit "$rc_total"
