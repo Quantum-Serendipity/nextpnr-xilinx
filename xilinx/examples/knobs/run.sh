@@ -48,6 +48,14 @@ if ! npnr "$OUT/place.log" --json "$NETLIST" --write "$OUT/placed.json" --no-rou
     exit 1
 fi
 
+heap_echo=$(settings_of "$OUT/placed.json" placerHeap/)
+heap_want="placerHeap/alpha=0.100000 placerHeap/beta=0.900000 placerHeap/criticalityExponent=2 placerHeap/timingWeight=10"
+if [ "$heap_echo" = "$heap_want" ] && ! grep -q '^Info: knob \|^Info: setting ' "$OUT/place.log"; then
+    report "PASS default placement: the written netlist carries only the four placerHeap/ settings PlacerHeapCfg writes, with its own defaults, and no knob or setting is logged"
+else
+    report "FAIL default placement: placerHeap/ settings '$heap_echo', want '$heap_want'"
+fi
+
 timeout 60 "$NEXTPNR" --list-knobs >"$OUT/list.txt" 2>&1
 rc=$?
 row() { awk -F'\t' -v k="$1" '$1 == k { print $2 "|" $3 }' "$OUT/list.txt"; }
@@ -56,14 +64,18 @@ r_beta=$(row placerHeap/beta)
 r_omit=$(row knob/carry_omit_gnd_di)
 r_async=$(row knob/async_groups)
 r_start=$(row knob/setup_export_start)
+r_skip=$(row router1/skipFailedArcs)
+r_visit=$(row router1/arcMaxVisitCnt)
 if [ "$rc" -eq 0 ] && [ "$r_hold" = "NEXTPNR_HOLD_EXPORT|environment not read" ] &&
         [ "$r_beta" = "NEXTPNR_PLACER_BETA|environment alias read (deprecated)" ] &&
         [ "$r_omit" = "NEXTPNR_CARRY_OMIT_GND_DI|removed, refused from the environment and --set" ] &&
         [ "$r_async" = "NEXTPNR_ASYNC_GROUPS|removed, refused from the environment and --set" ] &&
-        [ "$r_start" = "-|no environment name" ]; then
-    report "PASS --list-knobs: rc 0, a refused knob, an alias, both removed names and a knob with no environment name are listed with their status"
+        [ "$r_start" = "-|no environment name" ] &&
+        [ "$r_skip" = "NEXTPNR_SKIP_FAILED_ARCS|plain setting doing what this banned knob does, refused" ] &&
+        [ "$r_visit" = "NEXTPNR_ARC_MAX_VISIT|plain setting doing what this banned knob does, refused" ]; then
+    report "PASS --list-knobs: rc 0, a refused knob, an alias, both removed names, a knob with no environment name and both refused plain settings are listed with their status"
 else
-    report "FAIL --list-knobs: rc $rc, hold_export '$r_hold', placerHeap/beta '$r_beta', carry_omit_gnd_di '$r_omit', async_groups '$r_async', setup_export_start '$r_start'"
+    report "FAIL --list-knobs: rc $rc, hold_export '$r_hold', placerHeap/beta '$r_beta', carry_omit_gnd_di '$r_omit', async_groups '$r_async', setup_export_start '$r_start', router1/skipFailedArcs '$r_skip', router1/arcMaxVisitCnt '$r_visit'"
 fi
 
 npnr "$OUT/set.log" --json "$OUT/placed.json" --no-pack --no-place --set knob/crit_export="$OUT/set-crit.tsv" \
@@ -100,6 +112,62 @@ if [ "$rc" -ne 0 ] && [ "$rc2" -ne 0 ] &&
     report "PASS removed knob: NEXTPNR_CARRY_OMIT_GND_DI is refused from the environment (rc $rc) and from --set (rc $rc2), naming the removal"
 else
     report "FAIL removed knob: rc $rc/$rc2, $(grep -m1 '^ERROR' "$OUT/omit.log"), $(grep -m1 '^ERROR' "$OUT/omit-set.log")"
+fi
+
+NEXTPNR_ASYNC_GROUPS=1 npnr "$OUT/async.log" --json "$OUT/placed.json" --no-pack --no-place
+rc=$?
+npnr "$OUT/async-set.log" --json "$OUT/placed.json" --no-pack --no-place --set knob/async_groups=1
+rc2=$?
+if [ "$rc" -ne 0 ] && [ "$rc2" -ne 0 ] &&
+        grep -q "^ERROR: NEXTPNR_ASYNC_GROUPS was removed and is refused: declare the crossing with set_clock_groups" "$OUT/async.log" &&
+        grep -q "^ERROR: --set knob/async_groups: NEXTPNR_ASYNC_GROUPS was removed and is refused" "$OUT/async-set.log"; then
+    report "PASS removed knob: NEXTPNR_ASYNC_GROUPS is refused from the environment (rc $rc) and from --set (rc $rc2), naming set_clock_groups"
+else
+    report "FAIL removed knob: rc $rc/$rc2, $(grep -m1 '^ERROR' "$OUT/async.log"), $(grep -m1 '^ERROR' "$OUT/async-set.log")"
+fi
+
+npnr "$OUT/r1skip.log" --json "$OUT/placed.json" --no-pack --no-place --set router1/skipFailedArcs=1
+rc=$?
+npnr "$OUT/r1visit.log" --json "$OUT/placed.json" --no-pack --no-place --set router1/arcMaxVisitCnt=2000000
+rc2=$?
+if [ "$rc" -ne 0 ] && [ "$rc2" -ne 0 ] &&
+        grep -q "^ERROR: --set router1/skipFailedArcs is refused: it does what NEXTPNR_SKIP_FAILED_ARCS (knob/skip_failed_arcs) does" "$OUT/r1skip.log" &&
+        grep -q "^ERROR: --set router1/arcMaxVisitCnt is refused: it does what NEXTPNR_ARC_MAX_VISIT (knob/arc_max_visit) does" "$OUT/r1visit.log"; then
+    report "PASS banned plain settings: --set router1/skipFailedArcs=1 (rc $rc) and --set router1/arcMaxVisitCnt=2000000 (rc $rc2) are refused, each naming the banned knob it replicates"
+else
+    report "FAIL banned plain settings: rc $rc/$rc2, $(grep -m1 '^ERROR' "$OUT/r1skip.log"), $(grep -m1 '^ERROR' "$OUT/r1visit.log")"
+fi
+
+with_settings() {
+    "$PYTHON" -c 'import json,sys; d=json.load(open(sys.argv[1])); s=d["modules"]["top"]["settings"]; [s.__setitem__(a.split("=",1)[0], a.split("=",1)[1]) for a in sys.argv[3:]]; json.dump(d, open(sys.argv[2], "w"))' "$@"
+}
+with_settings "$OUT/placed.json" "$OUT/r1-carried.json" router1/skipFailedArcs=1
+with_settings "$OUT/placed.json" "$OUT/r1-defaults.json" router1/skipFailedArcs=0 router1/arcMaxVisitCnt=2147483647
+npnr "$OUT/r1-carried.log" --json "$OUT/r1-carried.json" --no-pack --no-place --router router2
+rc=$?
+npnr "$OUT/r1-defaults.log" --json "$OUT/r1-defaults.json" --no-pack --no-place --router router2
+rc2=$?
+if [ "$rc" -ne 0 ] && [ "$rc2" -eq 0 ] &&
+        grep -q "^ERROR: the input netlist carries the setting router1/skipFailedArcs=1, which does what NEXTPNR_SKIP_FAILED_ARCS" "$OUT/r1-carried.log"; then
+    report "PASS carried banned plain settings: a netlist carrying router1/skipFailedArcs=1 is refused (rc $rc); one carrying the written defaults router1/skipFailedArcs=0 and router1/arcMaxVisitCnt=2147483647 routes at rc 0"
+else
+    report "FAIL carried banned plain settings: rc $rc/$rc2, $(grep -m1 '^ERROR' "$OUT/r1-carried.log"), $(grep -m1 '^ERROR' "$OUT/r1-defaults.log")"
+fi
+
+printf 'knob_unset("knob/crit_export")\nprint("knob-unset: returned")\n' >"$OUT/unset-other.py"
+printf 'knob_unset("knob/partition_roi")\nprint("knob-unset: returned")\n' >"$OUT/unset-roi.py"
+timeout 600 "$NEXTPNR" --chipdb "$CHIPDB" --json "$OUT/placed.json" --log "$OUT/unset-other.log" --run "$OUT/unset-other.py" \
+    >"$OUT/unset-other.out" 2>&1
+rc=$?
+timeout 600 "$NEXTPNR" --chipdb "$CHIPDB" --json "$OUT/placed.json" --log "$OUT/unset-roi.log" --run "$OUT/unset-roi.py" \
+    >"$OUT/unset-roi.out" 2>&1
+rc2=$?
+if [ "$rc2" -eq 0 ] && grep -q '^knob-unset: returned' "$OUT/unset-roi.out" &&
+        ! grep -q '^knob-unset: returned' "$OUT/unset-other.out" &&
+        grep -q "^ERROR: knob_unset knob/crit_export: only knob/partition_roi may be unset from Python" "$OUT/unset-other.log"; then
+    report "PASS knob_unset: knob/partition_roi is unset and the script continues (rc $rc2); knob/crit_export is refused naming knob/partition_roi and the script stops (rc $rc)"
+else
+    report "FAIL knob_unset: rc $rc/$rc2, $(grep -m1 '^ERROR' "$OUT/unset-other.log"), roi script $(grep -c '^knob-unset: returned' "$OUT/unset-roi.out") return line(s)"
 fi
 
 NEXTPNR_PLACER_BETA=0.3 npnr "$OUT/alias.log" --json "$NETLIST" --fasm "$OUT/alias.fasm" --write "$OUT/alias.json" --seed 1
