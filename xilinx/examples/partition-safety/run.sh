@@ -707,8 +707,9 @@ arm_skip_failed_arcs_under_a_rectangle() {
         NEXTPNR_PARTITION_ROI=$OUT/far.roi.json NEXTPNR_PARTITION_CLAMP=off NEXTPNR_PARTITION_KEEPOUT=off \
             npnr "$OUT/sfa-r1s.log" --json "$OUT/placed-router1-skip.json" --no-pack --no-place)
     rc=$?
-    if [ "$rc0" -eq 0 ] && [ "$rc" -ne 0 ] && grep -q '^ERROR: knob/skip_failed_arcs or the router1/skipFailedArcs setting is set' "$OUT/sfa-r1s.log"; then
-        report "PASS router1/skipFailedArcs stored in the input netlist: rc 0 without a rectangle, refused at rc $rc under one"
+    carried='^ERROR: the input netlist carries the setting router1/skipFailedArcs=1, which does what NEXTPNR_SKIP_FAILED_ARCS'
+    if [ "$rc0" -ne 0 ] && [ "$rc" -ne 0 ] && grep -q "$carried" "$OUT/sfa-r1s-noroi.log" && grep -q "$carried" "$OUT/sfa-r1s.log"; then
+        report "PASS router1/skipFailedArcs stored in the input netlist: refused at load naming NEXTPNR_SKIP_FAILED_ARCS, rc $rc0 without a rectangle and rc $rc under one"
     else
         report "FAIL router1/skipFailedArcs stored in the input netlist: rc $rc0 without a rectangle, rc $rc under one: $(grep -m1 '^ERROR' "$OUT/sfa-r1s.log")"
     fi
