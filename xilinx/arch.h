@@ -332,7 +332,14 @@ NPNR_PACKED_STRUCT(struct ChipInfoPOD {
 
     int32_t num_speed_grades;
     RelPtr<TimingDataPOD> timing_data;
+    int32_t hold_corner;
 });
+
+enum : int32_t
+{
+    CHIPDB_VERSION = 2,
+    CHIPDB_HOLD_CORNER_FAST = 1,
+};
 
 /************************ End of chipdb section. ************************/
 
@@ -764,6 +771,20 @@ struct Arch : BaseCtx
 
     bool xc7;
     bool estimate_nearest_wire = false;
+    bool speed_grade_2 = false;
+    double gradeNS(double grade1, double grade2) const { return speed_grade_2 ? grade2 : grade1; }
+
+    struct HoldCalibration
+    {
+        int grade;
+        float route_scale;
+        double ff_d;
+        double lutram_wa[8];
+        double lutram_we, srl_we, dram_di;
+    };
+    const HoldCalibration *hold_cal = nullptr;
+    float holdRouteScale() const { return hold_cal->route_scale; }
+    double holdGuardBand(const CellInfo *cell, IdString port) const;
 
     std::string getChipName() const;
     std::string chipdbSpeedGrade() const;
@@ -1546,11 +1567,7 @@ struct Arch : BaseCtx
     DelayInfo getPipDelay(PipId pip) const
     {
         DelayInfo delay;
-        // early/fast-corner scale for the min-delay (hold) pass.  Fabric routing
-        // ~0.45x slow (golden get_net_delays FAST_MIN/SLOW_MAX = 0.562, but the
-        // per-PIP tail is lower); the dedicated global clock tree is low-variation
-        // (~0.9) so hold-critical clock skew isn't understated.
-        float minscale = 0.45f;
+        float minscale = holdRouteScale();
         NPNR_ASSERT(pip != PipId());
         if (locInfo(pip).pip_data[pip.index].flags == PIP_TILE_ROUTING) {
             int src_intent = wireIntent(getPipSrcWire(pip)), dst_intent = wireIntent(getPipDstWire(pip));
@@ -1611,7 +1628,7 @@ struct Arch : BaseCtx
             delay.delay = 300;
         } else
             delay.delay = 25;
-        delay.min = delay_t(delay.delay * minscale);   // fast/early corner (hold)
+        delay.min = delay_t(delay.delay * minscale);
         return delay;
     }
 

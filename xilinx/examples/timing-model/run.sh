@@ -44,7 +44,7 @@ synth() {
         >/dev/null 2>&1
 }
 
-if ! synth top || ! synth duty; then
+if ! synth top || ! synth duty || ! synth holdside; then
     echo "FAIL yosys"
     exit 1
 fi
@@ -69,6 +69,30 @@ if NEXTPNR_SETUP_EXPORT="$OUT/duty.tsv" "$NEXTPNR" --chipdb "$CHIPDB" --xdc "$HE
 else
     report "FAIL duty_mmcm_b: nextpnr: $(grep -m1 '^ERROR' "$OUT/duty.log")"
 fi
+
+if NEXTPNR_SETUP_EXPORT="$OUT/holdside.tsv" "$NEXTPNR" --set knob/hold_export="$OUT/holdside.hold.tsv" --chipdb "$CHIPDB" \
+        --xdc "$HERE/base.xdc" --json "$OUT/holdside.json" --write "$OUT/holdside-routed.json" \
+        --log "$OUT/holdside.log" -q --seed 1 >/dev/null 2>&1; then
+    grade hold_side "$OUT/holdside-routed.json" "$OUT/holdside.hold.tsv" "$TIMINGS" "$TILEGRID" "$OUT/holdside.log" hold_side
+    grade route_scale "$OUT/holdside-routed.json" "$OUT/holdside.tsv" "$OUT/holdside.hold.tsv" "$OUT/holdside.log" \
+        route_scale
+else
+    report "FAIL hold_side: nextpnr: $(grep -m1 '^ERROR' "$OUT/holdside.log")"
+    report "FAIL route_scale: nextpnr: $(grep -m1 '^ERROR' "$OUT/holdside.log")"
+fi
+
+"$PYTHON" "$HERE/mutate_chipdb.py" "$CHIPDB" "$OUT/othergrade.bin" othergrade > "$OUT/othergrade.txt" 2>&1
+if [ ! -s "$OUT/othergrade.bin" ]; then
+    report "FAIL route_scale_other_grade: $(cat "$OUT/othergrade.txt")"
+elif NEXTPNR_SETUP_EXPORT="$OUT/holdside2.tsv" "$NEXTPNR" --set knob/hold_export="$OUT/holdside2.hold.tsv" \
+        --chipdb "$OUT/othergrade.bin" --xdc "$HERE/base.xdc" --json "$OUT/holdside.json" \
+        --write "$OUT/holdside2-routed.json" --log "$OUT/holdside2.log" -q --seed 1 >/dev/null 2>&1; then
+    grade route_scale "$OUT/holdside2-routed.json" "$OUT/holdside2.tsv" "$OUT/holdside2.hold.tsv" "$OUT/holdside2.log" \
+        route_scale_other_grade
+else
+    report "FAIL route_scale_other_grade: nextpnr: $(grep -m1 '^ERROR' "$OUT/holdside2.log")"
+fi
+rm -f "$OUT/othergrade.bin"
 
 replay() {
     local name=$1
@@ -168,6 +192,24 @@ else
     report "FAIL zero_checks: refused, but not for its timing checks: $(grep -m1 '^ERROR' "$OUT/zero_checks.log")"
 fi
 rm -f "$OUT/nochecks.bin"
+
+marker_arm() {
+    local name=$1 mode=$2 why=$3
+    "$PYTHON" "$HERE/mutate_chipdb.py" "$CHIPDB" "$OUT/$name.bin" "$mode" > "$OUT/$name.txt" 2>&1
+    if [ ! -s "$OUT/$name.bin" ]; then
+        report "FAIL $name: $(cat "$OUT/$name.txt")"
+    elif "$NEXTPNR" --chipdb "$OUT/$name.bin" --xdc "$HERE/base.xdc" --json "$OUT/top.json" --pack-only \
+            --log "$OUT/$name.log" -q >/dev/null 2>&1; then
+        report "FAIL $name: a chipdb after '$(cat "$OUT/$name.txt")' was accepted"
+    elif grep -qF -- "$why" "$OUT/$name.log"; then
+        report "PASS $name: a chipdb after '$(cat "$OUT/$name.txt")' is refused, naming '$why'"
+    else
+        report "FAIL $name: refused without naming '$why': $(grep -m1 '^ERROR' "$OUT/$name.log")"
+    fi
+    rm -f "$OUT/$name.bin"
+}
+marker_arm old_format version "is format version 1 and this nextpnr reads only version 2"
+marker_arm slow_hold slowhold "could not attest as the fast corner"
 
 "$PYTHON" "$HERE/mutate_chipdb.py" "$CHIPDB" "$OUT/zeromin.bin" min > "$OUT/zeromin.txt" 2>&1
 if [ ! -s "$OUT/zeromin.bin" ]; then

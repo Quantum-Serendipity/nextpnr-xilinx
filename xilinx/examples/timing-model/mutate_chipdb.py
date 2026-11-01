@@ -10,10 +10,30 @@ def rel(buf, at):
 def main():
     src, dst = sys.argv[1:3]
     mode = sys.argv[3] if len(sys.argv) > 3 else "checks"
-    if mode not in ("checks", "min"):
-        sys.exit("mutate_chipdb: mode %s is neither checks nor min" % mode)
+    if mode not in ("checks", "min", "version", "slowhold", "othergrade"):
+        sys.exit("mutate_chipdb: mode %s is not checks, min, version, slowhold or othergrade" % mode)
     buf = bytearray(open(src, "rb").read())
     chip = rel(buf, 0)
+    if mode == "othergrade":
+        name_at = rel(buf, chip)
+        end = buf.index(0, name_at)
+        name = buf[name_at:end].decode()
+        swap = {"-1": "-2", "-2": "-1"}
+        if name[-2:] not in swap:
+            sys.exit("mutate_chipdb: chipdb %s has no -1 or -2 grade suffix" % name)
+        buf[end - 2:end] = swap[name[-2:]].encode()
+        open(dst, "wb").write(buf)
+        print("renamed the chipdb %s to %s" % (name, buf[name_at:end].decode()))
+        return
+    if mode in ("version", "slowhold"):
+        at, was = (chip + 8, 2) if mode == "version" else (chip + 56, 1)
+        have = struct.unpack_from("<i", buf, at)[0]
+        if have != was:
+            sys.exit("mutate_chipdb: %s field reads %d, not %d" % (mode, have, was))
+        struct.pack_into("<i", buf, at, 1 if mode == "version" else 0)
+        open(dst, "wb").write(buf)
+        print("set the chipdb format version to 1" if mode == "version" else "cleared the fast-corner hold marker")
+        return
     td = rel(buf, chip + 52)
     ntt = struct.unpack_from("<i", buf, td)[0]
     tct = rel(buf, td + 12)

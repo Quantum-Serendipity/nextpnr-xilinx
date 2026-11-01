@@ -378,10 +378,180 @@ def grade_norow(argv):
     return "PASS %s: %s %s" % (name, grp, "is graded" if present == "1" else "is not graded")
 
 
+def sdf_checks(timings, tiletype, cache={}):
+    if tiletype not in cache:
+        out = {}
+        path = os.path.join(timings, tiletype + ".sdf")
+        if os.path.exists(path):
+            txt = open(path).read()
+            for m in re.finditer(r'\(CELL\s*\(CELLTYPE "([^"]+)"\)\s*\(INSTANCE ([^)]*)\)(.*?)\n    \)', txt, re.S):
+                for c in re.finditer(r"\((HOLD|REMOVAL|SETUP|RECOVERY) (\S+) \((?:posedge|negedge) (\S+)\) "
+                                     r"\(([^:()]*)::([^:()]*)\)\)", m.group(3)):
+                    out[(m.group(2).strip(), m.group(1), c.group(1), c.group(2), c.group(3))] = (
+                        float(c.group(4)), float(c.group(5)))
+        cache[tiletype] = out
+    return cache[tiletype]
+
+
+GRADE_RE = re.compile(r"speed grade -(\d+); hold-corner")
+GUARD_RE = re.compile(r"hold guard band FF D ([0-9.]+), LUTRAM WA1 ([0-9.]+) WA2 ([0-9.]+) WA3 ([0-9.]+) "
+                      r"WA4 ([0-9.]+) WA5 ([0-9.]+) WA6 ([0-9.]+) WA7 ([0-9.]+) WA8 ([0-9.]+) WE ([0-9.]+), "
+                      r"SRL WE ([0-9.]+), LUTRAM/SRL DI ([0-9.]+) ns")
+WA_PINS = tuple("WA%d" % i for i in range(1, 9))
+GUARD_NAMES = ("FF D",) + WA_PINS + ("LUTRAM WE", "SRL WE", "LUTRAM/SRL DI")
+GUARD_EXPECTED = {
+    "1": (0.040, 0.000, 0.001, 0.022, 0.033, 0.057, 0.057, 0.057, 0.057, 0.047, 0.056, 0.057),
+    "2": (0.040, 0.000, 0.001, 0.022, 0.033, 0.057, 0.057, 0.057, 0.057, 0.047, 0.056, 0.057),
+}
+
+
+def grade_hold_side(argv):
+    routed, hold_tsv, timings, tilegrid, log, name = argv
+    m = GUARD_RE.search(open(log).read()) if os.path.exists(log) else None
+    if m is None:
+        return "FAIL %s: the log states no hold guard band" % name
+    vals = [float(m.group(i)) for i in range(1, 13)]
+    g = GRADE_RE.search(open(log).read())
+    if g is None or g.group(1) not in GUARD_EXPECTED:
+        return "FAIL %s: the log states no speed grade with a calibrated hold guard band" % name
+    off = [(n, v, e) for n, v, e in zip(GUARD_NAMES, vals, GUARD_EXPECTED[g.group(1)]) if abs(v - e) > 0.0005]
+    if off:
+        return "FAIL %s: at -%s the logged hold guard band is not the calibrated one: %s" % (
+            name, g.group(1), ", ".join("%s %.3f where %.3f" % o for o in off))
+    ff_d, lutram_we, srl_we, dram_di = vals[0], vals[9], vals[10], vals[11]
+    band = dict(zip(WA_PINS, vals[1:9]))
+    seen_wa = dict.fromkeys(WA_PINS, 0)
+    cols, rows = read_tsv(hold_tsv)
+    if cols is None:
+        return "FAIL %s: no NEXTPNR_HOLD_EXPORT file was written" % name
+    with open(routed) as f:
+        cells = json.load(f)["modules"]["top"]["cells"]
+    sdf = Sdf(timings, tilegrid)
+    kinds = ("FF D", "LUTRAM WA", "LUTRAM WE", "SRL WE", "LUTRAM DI", "SRL DI")
+    seen = dict.fromkeys(kinds, 0)
+    split = dict.fromkeys(kinds, 0)
+    for r in rows:
+        cell = cells.get(r["cell"])
+        if cell is None:
+            continue
+        attrs = cell.get("attributes", {})
+        tiletype, sitetype, b = sdf.locate(attrs.get("NEXTPNR_BEL", ""))
+        if tiletype is None:
+            continue
+        port = r["port"]
+        is_dram = cell["type"] == "SLICE_LUTX" and "X_LUT_AS_DRAM" in attrs
+        is_srl = cell["type"] == "SLICE_LUTX" and "X_LUT_AS_SRL" in attrs
+        lut = "5" if b.endswith("5LUT") else "6"
+        if cell["type"] == "SLICE_FFX" and port == "D":
+            kind, inst, ct, pin, guard = "FF D", sitetype, "FF_INIT" if b.endswith("5FF") else "REG_INIT_FF", "DIN", ff_d
+        elif is_dram and port in band:
+            kind, inst, pin, guard = "LUTRAM WA", sitetype, port, band[port]
+            ct = "LUT_OR_MEM%sLRAM" % lut
+            seen_wa[port] += 1
+        elif (is_dram or is_srl) and port == "WE":
+            kind = "SRL WE" if is_srl else "LUTRAM WE"
+            inst, pin, guard = sitetype, "WE", srl_we if is_srl else lutram_we
+            ct = "LUT_OR_MEM%s%s" % (lut, "SHFREG" if is_srl else "LRAM")
+        elif (is_dram or is_srl) and port in ("DI1", "DI2"):
+            kind = "SRL DI" if is_srl else "LUTRAM DI"
+            inst, pin, guard = "%s/%s" % (sitetype, b), port, dram_di
+            ct = "LUT_OR_MEM%s%s" % (lut, "SHFREG" if is_srl else "LRAM")
+        else:
+            continue
+        want = sdf_checks(timings, tiletype).get((inst, ct, "HOLD", pin, "CLK"))
+        if want is None:
+            return "FAIL %s: %s.sdf has no %s %s HOLD %s check for %s.%s" % (name, tiletype, inst, ct, pin, r["cell"],
+                                                                         port)
+        got = float(r["hold_ns"])
+        fast = max(want[0], 0.0) + guard
+        slow = max(want[1], 0.0) + guard
+        if abs(got - fast) > TOL:
+            return "FAIL %s: %s %s.%s at %s hold_ns %.3f where %s.sdf %s %s HOLD %s gives fast %.3f (+%.3f guard = " \
+                   "%.3f), slow %.3f (+guard %.3f)" % (name, kind, r["cell"], port, attrs.get("NEXTPNR_BEL"), got,
+                                                      tiletype, inst, ct, pin, want[0], guard, fast, want[1], slow)
+        seen[kind] += 1
+        if abs(fast - slow) > TOL:
+            split[kind] += 1
+    missing = [p for p in WA_PINS if seen_wa[p] == 0]
+    if missing:
+        return "FAIL %s: no distributed-RAM hold row on %s, so their guard band is not checked" % (
+            name, "/".join(missing))
+    for kind in kinds:
+        if split[kind] == 0:
+            return "FAIL %s: no %s hold row whose SDF fast and slow sides differ (%d %s row(s) checked)" % (
+                name, kind, seen[kind], kind)
+    return "PASS %s: %s hold row(s) read the SDF HOLD minimum (fast corner) plus the logged guard band, every " \
+           "kind with rows whose slow side differs (%s); LUTRAM rows per pin %s" % (
+               name, ", ".join("%d %s" % (seen[k], k) for k in kinds), ", ".join("%d" % split[k] for k in kinds),
+               " ".join("%s:%d" % (p, seen_wa[p]) for p in WA_PINS))
+
+
+ROUTE_SCALE_RE = re.compile(r"speed grade -(\d+); hold-corner fabric routing is ([0-9.]+) of the slow corner")
+ROUTE_SCALE_EXPECTED = {"1": 0.31, "2": 0.38}
+GLOBAL_WIRE_RE = re.compile(r"GCLK|HCLK|CLK_HROW|CLK_BUFG|BUFG|CLK_LEAF")
+
+
+def grade_route_scale(argv):
+    routed, setup_tsv, hold_tsv, log, name = argv
+    m = ROUTE_SCALE_RE.search(open(log).read()) if os.path.exists(log) else None
+    if m is None:
+        return "FAIL %s: the log states no hold-corner fabric routing factor" % name
+    grade, scale = m.group(1), float(m.group(2))
+    if grade not in ROUTE_SCALE_EXPECTED:
+        return "FAIL %s: the log states speed grade -%s, which this arm has no calibrated factor for" % (name, grade)
+    if abs(scale - ROUTE_SCALE_EXPECTED[grade]) > 1e-9:
+        return "FAIL %s: the log states a hold-corner fabric routing factor of %.2f at -%s, not the calibrated %.2f" % (
+            name, scale, grade, ROUTE_SCALE_EXPECTED[grade])
+    scols, srows = read_tsv(setup_tsv)
+    hcols, hrows = read_tsv(hold_tsv)
+    if scols is None or hcols is None:
+        return "FAIL %s: no NEXTPNR_SETUP_EXPORT or NEXTPNR_HOLD_EXPORT file was written" % name
+    with open(routed) as f:
+        top = json.load(f)["modules"]["top"]
+    pips = {}
+    for nname, nn in top["netnames"].items():
+        route = nn.get("attributes", {}).get("ROUTING", "")
+        if route:
+            fields = route.split(";")
+            pips[nname] = (len(fields) // 3, bool(GLOBAL_WIRE_RE.search(route)))
+    max_delay = {}
+    for r in srows:
+        if r["delay_source"] == "routed":
+            max_delay.setdefault((r["cell"], r["port"], r["net"]), float(r["net_delay_ns"]))
+    checked = sensitive = 0
+    for r in hrows:
+        if r["delay_source"] != "routed":
+            continue
+        key = (r["cell"], r["port"], r["net"])
+        if key not in max_delay or r["net"] not in pips:
+            continue
+        hops, is_global = pips[r["net"]]
+        if is_global:
+            continue
+        hi = max_delay[key]
+        lo = float(r["net_delay_min_ns"])
+        want = scale * hi
+        slack = 0.001 * hops + 0.0005
+        if not (want - slack <= lo <= want + 0.0005):
+            return "FAIL %s: %s.%s on net %s has net_delay_min_ns %.4f where the logged factor %.2f times the setup " \
+                   "export's net_delay_ns %.4f gives %.4f (at most %d pip(s), so %.4f to %.4f)" % (
+                       name, r["cell"], r["port"], r["net"], lo, scale, hi, want, hops, want - slack, want + 0.0005)
+        checked += 1
+        if 0.05 * hi > slack:
+            sensitive += 1
+    if sensitive == 0:
+        return "FAIL %s: no routed fabric hold row where a 0.05 change of factor exceeds the rounding bound (%d " \
+               "checked)" % (name, checked)
+    return "PASS %s: at -%s, %d routed fabric hold row(s) with no global hop have net_delay_min_ns equal to the logged " \
+           "factor %.2f times the setup export's net_delay_ns, %d of them where a 0.05 change of factor would show" % (
+               name, grade, checked, scale, sensitive)
+
+
 def main():
     cmd, argv = sys.argv[1], sys.argv[2:]
     print({"arcs": grade_arcs, "hold": grade_hold, "skew": grade_skew, "period": grade_period,
-           "norow": grade_norow, "zero_min": grade_zero_min, "srl_launch": grade_srl_launch}[cmd](argv))
+           "norow": grade_norow, "zero_min": grade_zero_min, "srl_launch": grade_srl_launch,
+           "hold_side": grade_hold_side, "route_scale": grade_route_scale}[cmd](argv))
 
 
 main()

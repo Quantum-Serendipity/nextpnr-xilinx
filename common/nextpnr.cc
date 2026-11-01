@@ -303,11 +303,13 @@ delay_t Context::getNetinfoRouteDelay(const NetInfo *net_info, const PortRef &us
         return 0;
 #endif
 
-    // min_delay=true returns the early/fast-corner routed delay for the hold
-    // pass (per-arc DelayInfo::minDelay(), populated in getPipDelay).  The
-    // unrouted predictDelay() fallback is scaled to the fast corner too.
+#ifdef ARCH_XILINX
+    const float hold_route_scale = holdRouteScale();
+#else
+    const float hold_route_scale = 0.45f;
+#endif
     auto pd = [&](const NetInfo *n, const PortRef &u) {
-        return min_delay ? delay_t(predictDelay(n, u) * 0.45f) : predictDelay(n, u);
+        return min_delay ? delay_t(predictDelay(n, u) * hold_route_scale) : predictDelay(n, u);
     };
 
     if (route_delay_override) {

@@ -323,7 +323,43 @@ class Device:
 	def site(self, name):
 		return self.sites_by_name[name]
 
-def import_device(name, prjxray_root, metadata_root):
+def apply_speed_overlay(tj, speed_root, tiletype):
+	path = os.path.join(speed_root, "tile_type_" + tiletype + ".json")
+	if not os.path.exists(path):
+		raise RuntimeError("no speed-graded routing timing for tile type {} in {}".format(tiletype, speed_root))
+	with open(path, "r") as f:
+		oj = json.load(f)
+	missing = []
+	for pip, pipdata in tj["pips"].items():
+		graded = oj["pips"].get(pip)
+		if graded is None:
+			missing.append("pip " + pip)
+			continue
+		for k in ("is_pass_transistor", "src_to_dst", "dst_to_src"):
+			pipdata[k] = graded[k]
+	for wire in tj["wires"]:
+		if wire not in oj["wires"]:
+			missing.append("wire " + wire)
+			continue
+		tj["wires"][wire] = oj["wires"][wire]
+	graded_sites = {(s["prefix"], s["name"]): s["site_pins"] for s in oj["sites"]}
+	for site in tj["sites"]:
+		graded_pins = graded_sites.get((site.get("prefix"), site["name"]), {})
+		for pin, pindata in site["site_pins"].items():
+			if pindata is None:
+				continue
+			graded = graded_pins.get(pin)
+			if graded is None:
+				missing.append("site pin " + site["name"] + "/" + pin)
+				continue
+			for k in ("delay", "res", "cap"):
+				pindata.pop(k, None)
+			pindata.update(graded)
+	if missing:
+		raise RuntimeError("{}: {} has no speed-graded entry for {} resource(s), first {}".format(
+			path, tiletype, len(missing), missing[0]))
+
+def import_device(name, prjxray_root, metadata_root, speed_root=None):
 	site_type_cache = {}
 	tile_type_cache = {}
 	tile_json_cache = {}
@@ -384,6 +420,8 @@ def import_device(name, prjxray_root, metadata_root):
 			else:
 				with open(prjxray_root + "/tile_type_" + tiletype + ".json", "r") as jf:
 					tile_json_cache[tiletype] = json.load(jf)
+				if speed_root is not None:
+					apply_speed_overlay(tile_json_cache[tiletype], speed_root, tiletype)
 		return tile_json_cache[tiletype]
 
 	def get_tile_type_data(tiletype):
@@ -437,8 +475,15 @@ def import_device(name, prjxray_root, metadata_root):
 						if "cap" in pindata:
 							tspd.capacitance = float(pindata["cap"])
 					td.sitepin_data[(sitetype, rel_xy, sitepin)] = tspd
-			if os.path.exists(prjxray_root + "/timings/" + tiletype + ".sdf"):
-				td.cell_timing = parse_sdf_file(prjxray_root + "/timings/" + tiletype + ".sdf")
+			base_sdf = prjxray_root + "/timings/" + tiletype + ".sdf"
+			if speed_root is not None:
+				graded_sdf = speed_root + "/timings/" + tiletype + ".sdf"
+				if os.path.exists(base_sdf) and not os.path.exists(graded_sdf):
+					raise RuntimeError("{} has cell timing in {} but none in {}".format(
+						tiletype, base_sdf, graded_sdf))
+				base_sdf = graded_sdf
+			if os.path.exists(base_sdf):
+				td.cell_timing = parse_sdf_file(base_sdf)
 
 			tile_type_cache[tiletype] = td
 
