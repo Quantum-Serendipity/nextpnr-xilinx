@@ -65,6 +65,17 @@ module top (
         .DOA(f_a), .DOB(f_b), .DOC(f_c), .DOD(f_d)
     );
 
+    wire [1:0] u_a, u_b, u_c, u_d;
+    RAM32M #(
+        .INIT_A(64'h243F6A8885A308D3), .INIT_B(64'h13198A2E03707344),
+        .INIT_C(64'hA4093822299F31D0), .INIT_D(64'h082EFA98EC4E6C89)
+    ) r_unread (
+        .WCLK(clk), .WE(we),
+        .ADDRA(ra[4:0]), .ADDRB(ra[5:1]), .ADDRC(ra[4:0]), .ADDRD(wa[4:0]),
+        .DIA(2'b00), .DIB(2'b00), .DIC(d[5:4]), .DID(d[7:6]),
+        .DOA(u_a), .DOB(u_b), .DOC(u_c), .DOD(u_d)
+    );
+
     assign q = ^{b_a, b_b, b_c, b_d, m_a, m_b, m_c, m_d, v_a, v_b, v_c, v_d, s_a, s_b, s_c, s_d,
-                 f_a, f_b, f_c, f_d};
+                 f_a, f_b, f_c, f_d, u_b, u_c, u_d};
 endmodule

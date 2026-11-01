@@ -55,6 +55,7 @@ check() {
 
 check contents contents
 check count count
+check unread-data unread-data
 check mutant-no-permute mutant-no-permute
 check mutant-driven-bit mutant-driven-bit
 

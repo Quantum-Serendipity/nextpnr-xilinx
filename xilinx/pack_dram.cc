@@ -248,7 +248,7 @@ void XilinxPacker::pack_dram()
             }
         }
     }
-    int multiport_bits = 0, multiport_cells = 0;
+    int multiport_bits = 0, multiport_cells = 0, unread_data_inputs = 0;
     for (auto cell : sorted(ctx->cells)) {
         CellInfo *ci = cell.second;
         const std::string &type = ci->type.str(ctx);
@@ -268,14 +268,32 @@ void XilinxPacker::pack_dram()
                 init_ok = false;
             inits.push_back(&param.second);
         }
-        if (!init_ok)
-            continue;
-        std::unordered_map<std::string, PortInfo *> addr_ports;
+        std::unordered_map<std::string, PortInfo *> addr_ports, data_ports;
         for (auto &port : ci->ports) {
             const std::string &pname = port.first.str(ctx);
             if (pname.compare(0, 4, "ADDR") == 0)
                 addr_ports[pname] = &port.second;
+            else if (pname.compare(0, 2, "DI") == 0 || pname.compare(0, 2, "DO") == 0)
+                data_ports[pname] = &port.second;
         }
+        for (int p = 0; p < 4; p++) {
+            for (int j = 0; j < width; j++) {
+                std::string suffix = is_64 ? std::string(1, 'A' + p) : stringf("%c[%d]", 'A' + p, j);
+                auto di = data_ports.find("DI" + suffix);
+                auto dout = data_ports.find("DO" + suffix);
+                if (di == data_ports.end() || di->second->net == nullptr ||
+                    di->second->net->name.str(ctx) != "$PACKER_GND_NET")
+                    continue;
+                if (dout != data_ports.end() && dout->second->net != nullptr && !dout->second->net->users.empty())
+                    continue;
+                IdString diport = di->second->name;
+                disconnect_port(ctx, ci, diport);
+                connect_port(ctx, ctx->nets[ctx->id("$PACKER_VCC_NET")].get(), ci, diport);
+                ++unread_data_inputs;
+            }
+        }
+        if (!init_ok)
+            continue;
         int mask = 0;
         for (int i = 0; i < abits; i++) {
             bool all_gnd = true;
@@ -317,6 +335,7 @@ void XilinxPacker::pack_dram()
     log_info("   Transformed %d tied-low DRAM address inputs to be tied-high (%d address bit(s) of %d RAM32M/RAM64M "
              "cell(s))\n",
              inverted_ports, multiport_bits, multiport_cells);
+    log_info("   Tied %d tied-low RAM32M/RAM64M data inputs high whose outputs nothing reads\n", unread_data_inputs);
 
     for (auto cell : sorted(ctx->cells)) {
         CellInfo *ci = cell.second;

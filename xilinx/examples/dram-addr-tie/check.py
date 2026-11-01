@@ -7,7 +7,9 @@ import sys
 
 GND = "$PACKER_GND_NET"
 VCC = "$PACKER_VCC_NET"
-EXPECTED_MASKS = {"r_both": 0b11000, "r_mixed": 0b01000, "r_vcc": 0b10000, "r64": 0b100000, "r_free": 0}
+EXPECTED_MASKS = {"r_both": 0b11000, "r_mixed": 0b01000, "r_vcc": 0b10000, "r64": 0b100000, "r_free": 0,
+                  "r_unread": 0}
+EXPECTED_DATA = {"r_unread/DPR0_0": VCC, "r_unread/DPR0_1": VCC, "r_unread/DPR1_0": GND, "r_unread/DPR1_1": GND}
 
 
 def top_module(doc):
@@ -168,7 +170,7 @@ def mutate_driven_bit(design, target, bit):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("mode", choices=["contents", "count", "mutant-no-permute", "mutant-driven-bit"])
+    ap.add_argument("mode", choices=["contents", "count", "unread-data", "mutant-no-permute", "mutant-driven-bit"])
     ap.add_argument("pre")
     ap.add_argument("packed")
     ap.add_argument("--log")
@@ -203,6 +205,23 @@ def main():
             return 1
         print("log total=%d bits=%d cells=%d, and the packed pins show the same flips: %s"
               % (total, nbits, ncells, " ".join("%s=%s" % (k, bin(masks[k])) for k in sorted(masks))))
+        return 0
+
+    if a.mode == "unread-data":
+        text = open(a.log).read()
+        m = re.search(r"Tied (\d+) tied-low RAM32M/RAM64M data inputs high whose outputs nothing reads", text)
+        got = {}
+        for sub in EXPECTED_DATA:
+            sc = design.packed["cells"].get(sub)
+            pin = "DI1" if sub.endswith("_0") else "DI2"
+            got[sub] = design.pin_net(sc, pin) if sc else None
+        want_n = sum(1 for v in EXPECTED_DATA.values() if v == VCC)
+        if not m or int(m.group(1)) != want_n or got != EXPECTED_DATA:
+            print("log count %s, want %d; data pins %s, want %s"
+                  % (m.group(1) if m else "absent", want_n, got, EXPECTED_DATA))
+            return 1
+        print("log count %s; r_unread's unread port A data inputs on %s, its read port B data inputs still on %s"
+              % (m.group(1), VCC, GND))
         return 0
 
     if a.mode == "mutant-no-permute":
