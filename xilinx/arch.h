@@ -771,8 +771,8 @@ struct Arch : BaseCtx
 
     bool xc7;
     bool estimate_nearest_wire = false;
-    bool speed_grade_2 = false;
-    double gradeNS(double grade1, double grade2) const { return speed_grade_2 ? grade2 : grade1; }
+    int speed_grade = 0;
+    double gradeNS(double grade1, double grade2) const { return speed_grade == 2 ? grade2 : grade1; }
 
     struct HoldCalibration
     {

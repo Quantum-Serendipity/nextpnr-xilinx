@@ -119,7 +119,6 @@ Arch::Arch(ArchArgs args) : args(args)
         xc7 = true;
     else
         xc7 = false;
-    log_info("chipdb: %s, fabric delays at speed grade %s\n", chip_info->name.get(), chipdbSpeedGrade().c_str());
     {
         static const HoldCalibration hold_calibrations[] = {
                 {1, 0.31f, 0.040, {0.000, 0.001, 0.022, 0.033, 0.057, 0.057, 0.057, 0.057}, 0.047, 0.056, 0.057},
@@ -128,22 +127,26 @@ Arch::Arch(ArchArgs args) : args(args)
         std::string chip_name = chip_info->name.get();
         size_t dash = chip_name.rfind('-');
         std::string grade = dash == std::string::npos ? std::string() : chip_name.substr(dash + 1);
-        for (const HoldCalibration &c : hold_calibrations)
-            if (grade == std::to_string(c.grade))
-                hold_cal = &c;
-        if (hold_cal == nullptr)
+        if (grade == "1")
+            speed_grade = 1;
+        else if (grade == "2")
+            speed_grade = 2;
+        else
             log_error("chipdb %s has speed grade '%s', and only grades -1 and -2 have a hold calibration (fabric "
                       "routing minimum as a fraction of the slow corner, and the site-pin hold guard band)\n",
                       chip_name.c_str(), grade.c_str());
-        speed_grade_2 = hold_cal->grade == 2;
+        for (const HoldCalibration &c : hold_calibrations)
+            if (c.grade == speed_grade)
+                hold_cal = &c;
+        NPNR_ASSERT(hold_cal != nullptr);
         log_info("chipdb %s: speed grade -%d; hold-corner fabric routing is %.2f of the slow corner; hold guard "
                  "band FF D %.3f, LUTRAM WA1 %.3f WA2 %.3f WA3 %.3f WA4 %.3f WA5 %.3f WA6 %.3f WA7 %.3f WA8 %.3f WE "
                  "%.3f, SRL WE %.3f, LUTRAM/SRL DI %.3f ns\n",
-                 chip_name.c_str(), hold_cal->grade, hold_cal->route_scale, hold_cal->ff_d, hold_cal->lutram_wa[0],
+                 chip_name.c_str(), speed_grade, hold_cal->route_scale, hold_cal->ff_d, hold_cal->lutram_wa[0],
                  hold_cal->lutram_wa[1], hold_cal->lutram_wa[2], hold_cal->lutram_wa[3], hold_cal->lutram_wa[4],
                  hold_cal->lutram_wa[5], hold_cal->lutram_wa[6], hold_cal->lutram_wa[7], hold_cal->lutram_we,
                  hold_cal->srl_we, hold_cal->dram_di);
-        if (speed_grade_2)
+        if (speed_grade == 2)
             log_info("chipdb %s: DSP48E1, ICAPE2 and LUTRAM fallback clock-to-out and setup literals are the -2 "
                      "grade's\n",
                      chip_name.c_str());
@@ -205,12 +208,7 @@ Arch::Arch(ArchArgs args) : args(args)
 
 std::string Arch::getChipName() const { return chip_info->name.get(); }
 
-std::string Arch::chipdbSpeedGrade() const
-{
-    std::string name = chip_info->name.get();
-    auto dash = name.rfind('-');
-    return dash == std::string::npos ? std::string("unknown") : name.substr(dash);
-}
+std::string Arch::chipdbSpeedGrade() const { return "-" + std::to_string(speed_grade); }
 
 std::string Arch::chipdb_route_identity() const
 {
