@@ -32,7 +32,7 @@ if ! "$YOSYS" -q -l "$OUT/yosys.log" \
     exit 1
 fi
 
-if ! NEXTPNR_CRIT_EXPORT="$OUT/crit.tsv" "$NEXTPNR" --chipdb "$CHIPDB" --xdc "$HERE/crit-domains.xdc" \
+if ! "$NEXTPNR" --set knob/crit_export="$OUT/crit.tsv" --chipdb "$CHIPDB" --xdc "$HERE/crit-domains.xdc" \
         --json "$OUT/top.json" --write "$OUT/routed.json" --log "$OUT/pnr.log" -q --seed 1 >/dev/null 2>&1; then
     echo "FAIL nextpnr place and route: $(grep -m1 '^ERROR' "$OUT/pnr.log")"
     exit 1
@@ -46,7 +46,7 @@ if ! "$YOSYS" -q -l "$OUT/negedge-yosys.log" \
         >/dev/null 2>&1; then
     echo "FAIL negedge yosys"
     rc=1
-elif ! NEXTPNR_CRIT_EXPORT="$OUT/negedge-crit.tsv" "$NEXTPNR" --chipdb "$CHIPDB" --xdc "$HERE/negedge.xdc" \
+elif ! "$NEXTPNR" --set knob/crit_export="$OUT/negedge-crit.tsv" --chipdb "$CHIPDB" --xdc "$HERE/negedge.xdc" \
         --json "$OUT/negedge.json" --write "$OUT/negedge-routed.json" --log "$OUT/negedge-pnr.log" -q --seed 1 \
         >/dev/null 2>&1; then
     echo "FAIL negedge nextpnr place and route: $(grep -m1 '^ERROR' "$OUT/negedge-pnr.log")"

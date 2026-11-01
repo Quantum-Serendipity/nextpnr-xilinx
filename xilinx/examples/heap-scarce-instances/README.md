@@ -2,8 +2,8 @@
 
 `top.v` is placed once, its LUTs and flip-flops are unplaced, and the result is placed twice in
 one `nextpnr-xilinx --run two_placers.py` process: first `ctx.place()` under the partition
-rectangle (100,180)-(120,200), then a second context made with `load_design` and placed with no
-rectangle. Each HeAP legaliser logs its own classification of SLICE_LUTX the first time it
+rectangle (100,180)-(120,200), then `knob_unset("knob/partition_roi")` clears the rectangle knob and a second context made with
+`load_design` is placed with no rectangle. Each HeAP legaliser logs its own classification of SLICE_LUTX the first time it
 legalises that type.
 
 ```

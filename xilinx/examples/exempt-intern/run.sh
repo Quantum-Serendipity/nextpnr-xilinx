@@ -46,14 +46,14 @@ printf 'no_such_net_stale_a\nno_such_net_stale_b\n' >"$OUT/stale.nets"
 route() {
     local tag=$1
     shift
-    env NEXTPNR_PARTITION_ROI="$OUT/roi.json" "$@" timeout 600 "$NEXTPNR" --chipdb "$CHIPDB" --json "$OUT/placed.json" \
+    NEXTPNR_PARTITION_ROI="$OUT/roi.json" timeout 600 "$NEXTPNR" "$@" --chipdb "$CHIPDB" --json "$OUT/placed.json" \
         --no-pack --no-place --write "$OUT/$tag.json" --write-fixed-routes "$OUT/$tag.routes" --fasm "$OUT/$tag.fasm" \
         --log "$OUT/$tag.log" -q >/dev/null 2>&1
 }
 
 route clean
 rc_clean=$?
-route stale NEXTPNR_PARTITION_EXEMPT_NETS="$OUT/stale.nets" NEXTPNR_PARTITION_KEEPOUT_EXEMPT="$OUT/stale.nets"
+route stale --set knob/partition_exempt_nets="$OUT/stale.nets" --set knob/partition_keepout_exempt="$OUT/stale.nets"
 rc_stale=$?
 if [ "$rc_clean" -eq 0 ] && [ "$rc_stale" -eq 0 ] \
         && grep -q 'partition net exemptions: 0 net(s) exempt from invariant P, from .*stale.nets (2 unresolved)' "$OUT/stale.log"; then

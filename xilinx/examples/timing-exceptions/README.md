@@ -66,8 +66,8 @@ against 30 ns (`dram_maxdelay`). The routed JSON of `dram_fp` is then replayed w
 under `--xdc-strict`, which must accept it and grade no distributed-RAM row (`dram_fp_replay`).
 
 `NEXTPNR_ASYNC_GROUPS`, the environment file that once excluded crossings from the setup report
-only, is refused: the `async_groups_env` arm passes when a replay with it set stops with an error
-naming `set_clock_groups`.
+only, is refused as removed: the `async_groups_env` arm passes when a replay with it set stops with
+an error naming `set_clock_groups` and offering no `--set` spelling.
 
 ## What the reader accepts
 

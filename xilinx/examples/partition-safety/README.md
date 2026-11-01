@@ -23,7 +23,7 @@ prints `SKIP` and does not count.
 | router1 under a rectangle | a netlist placed with `--router router1`, which stores that router in its settings, is refused when it is routed with `NEXTPNR_PARTITION_ROI` set; with `NEXTPNR_PARTITION_CLAMP=off` and `NEXTPNR_PARTITION_KEEPOUT=off` as well it routes at rc 0 |
 | static keepout, router2 control | a one-tile rectangle on an INT tile the longest static net crosses is routed around by router2 at rc 0, and the keepout gate's census reads 0 unlicensed |
 | static keepout, `--fixed-routes` | the base route replayed with `--fixed-routes` under that rectangle is refused by the keepout gate |
-| static keepout, imported routing | the routed netlist, kept as-is with `NEXTPNR_ROUTE_FIXED_ONLY=1` under that rectangle, is refused by the keepout gate |
+| static keepout, imported routing | the routed netlist, kept as-is with `--set knob/route_fixed_only=1` under that rectangle, is refused by the keepout gate |
 | static keepout, keepout off | the `--fixed-routes` replay with `NEXTPNR_PARTITION_KEEPOUT=off` exits rc 0 and the gate's report-only census names the unlicensed pips |
 | constant containment, imported | a one-tile rectangle on the INT tile carrying the most constant pips of the base route, whose sinks are all outside it, is refused by the keepout gate when the routed netlist is kept as-is |
 | constant containment, fresh bridge | routing the placed netlist under that rectangle either ties every constant sink without a pip inside it, or refuses because no tie avoids it; rc 0 with a constant pip inside fails |

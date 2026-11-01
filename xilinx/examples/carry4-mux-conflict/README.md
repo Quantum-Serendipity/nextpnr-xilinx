@@ -21,7 +21,7 @@ not say so — it exhausts its per-cell attempt budget and reports utilisation:
 ERROR: Unable to find legal placement for cell 'c4', check constraints and utilisation.
 ```
 
-`NEXTPNR_DUMP_INVALID_TILE=1` shows the real reason: every one of ~16 700
+`--set knob/dump_invalid_tile=1` shows the real reason: every one of ~16 700
 candidate sites is refused by the same arm, the `CO`-vs-output-mux check.
 
 ## The fix this pins
@@ -33,7 +33,7 @@ into an unconstrained 2-input XOR LUT (`S ^ CIN`) which takes over the `O` net's
 fabric users. The original cell keeps its name, so `json_to_loc_tcl` can still
 pin it; the chain gains cells rather than losing them.
 
-`NEXTPNR_NO_CARRY_O_RELOC=1` turns the pass off, which is how the reproducer's
+`--set knob/no_carry_o_reloc=1` turns the pass off, which is how the reproducer's
 red state is recovered without rebuilding.
 
 ## The five arms
@@ -74,7 +74,7 @@ the last two** — both mutants place and route to `rc` 0:
 
 | mutation | arms that turn red | quantity that caught it |
 |---|---|---|
-| `NEXTPNR_NO_CARRY_O_RELOC=1` (whole pass off) | all five | summary line absent |
+| `--set knob/no_carry_o_reloc=1` (whole pass off) | all five | summary line absent |
 | `if (false && …BEL…)` — both pinned guards removed | `ctl_pinned` only | sums 1≠0, splits 1≠0, pinned chains 0≠1, bits `O1`≠— |
 | `co_has_fabric`: `if (bit == 0) return true` — minimal over-fire | `ctl_sum_only` only | sums 1≠0, bits `O0`≠— |
 

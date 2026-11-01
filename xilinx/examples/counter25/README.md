@@ -38,7 +38,7 @@ no bypass). So `insert_lutbuf.py` inserts a **LUT1 buffer** (`O = I0`,
 nextpnr then routes the whole design with **0 skipped arcs**, and the physical
 netlist simulates with **0 undriven (X) nodes**.
 
-(The companion nextpnr knobs `NEXTPNR_ARC_MAX_VISIT` / `NEXTPNR_SKIP_FAILED_ARCS`
+(The companion nextpnr knobs `knob/arc_max_visit` / `knob/skip_failed_arcs`, set with `--set`,
 in `common/router1.{h,cc}` bound the per-arc A* search and skip-and-log a failed
 arc instead of aborting; with the LUT-buffer transform applied nothing is
 actually skipped.)

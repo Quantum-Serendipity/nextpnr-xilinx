@@ -43,7 +43,7 @@ if ! "$YOSYS" -q -l "$OUT/yosys.log" \
     exit 1
 fi
 
-if ! NEXTPNR_CRIT_EXPORT="$OUT/base_crit.tsv" "$NEXTPNR" --chipdb "$CHIPDB" --xdc "$HERE/base.xdc" \
+if ! "$NEXTPNR" --set knob/crit_export="$OUT/base_crit.tsv" --chipdb "$CHIPDB" --xdc "$HERE/base.xdc" \
         --json "$OUT/top.json" --write "$OUT/routed.json" --fasm "$OUT/base.fasm" --log "$OUT/pnr.log" -q --seed 1 >/dev/null 2>&1; then
     echo "FAIL nextpnr place and route"
     exit 1
@@ -137,8 +137,9 @@ fi
 printf 'clk_a\nclk_b\n' > "$OUT/async_groups.txt"
 if NEXTPNR_ASYNC_GROUPS="$OUT/async_groups.txt" replay async_groups_env; then
     report "FAIL async_groups_env: a replay with NEXTPNR_ASYNC_GROUPS set finished rc 0"
-elif grep -q 'NEXTPNR_ASYNC_GROUPS is no longer read' "$OUT/async_groups_env.log"; then
-    report "PASS async_groups_env: NEXTPNR_ASYNC_GROUPS is refused and set_clock_groups is named"
+elif grep -q 'NEXTPNR_ASYNC_GROUPS was removed and is refused: declare the crossing with set_clock_groups' "$OUT/async_groups_env.log" \
+        && ! grep '^ERROR' "$OUT/async_groups_env.log" | grep -q -- '--set'; then
+    report "PASS async_groups_env: NEXTPNR_ASYNC_GROUPS is refused, set_clock_groups is named and no --set spelling is offered"
 else
     report "FAIL async_groups_env: the replay failed without the refusal line: $(grep -m1 '^ERROR' "$OUT/async_groups_env.log")"
 fi
@@ -162,7 +163,7 @@ strict_arm strict_groups_typo groups_typo "clock 'clkb_typo' matched no clock"
 strict_arm strict_from_comb fp_from_comb 'matched no timing startpoint'
 strict_arm strict_dp_nofrom maxdelay_dp_nofrom '-datapath_only requires -from'
 
-if ! NEXTPNR_SETUP_EXPORT="$OUT/pnr_groups.tsv" NEXTPNR_CRIT_EXPORT="$OUT/pnr_groups_crit.tsv" "$NEXTPNR" --chipdb "$CHIPDB" --xdc "$HERE/base.xdc" \
+if ! NEXTPNR_SETUP_EXPORT="$OUT/pnr_groups.tsv" "$NEXTPNR" --set knob/crit_export="$OUT/pnr_groups_crit.tsv" --chipdb "$CHIPDB" --xdc "$HERE/base.xdc" \
         --xdc "$HERE/xdc/groups.xdc" --xdc "$HERE/xdc/fp_from_to.xdc" --json "$OUT/top.json" \
         --write "$OUT/routed_groups.json" --log "$OUT/pnr_groups.log" -q --seed 1 >/dev/null 2>&1; then
     report "FAIL pnr_groups: place and route with exceptions exited non-zero"

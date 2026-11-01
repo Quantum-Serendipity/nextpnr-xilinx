@@ -280,8 +280,8 @@ arm_reconfigurable_cells() {
 
 arm_walk_budget_exhausted() {
     local log=$OUT/walk.log
-    NEXTPNR_PIP_BLACKLIST_TILE=$OUT/vcc-block.pips NEXTPNR_PARTITION_ROI=$OUT/rect.json NEXTPNR_CONST_FENCE_WALK_BUDGET=0 \
-        timeout "$NPNR_TIMEOUT" "$NEXTPNR" --chipdb "$CHIPDB" --log "$log" -q --json "$OUT/placed.json" \
+    NEXTPNR_PIP_BLACKLIST_TILE=$OUT/vcc-block.pips NEXTPNR_PARTITION_ROI=$OUT/rect.json \
+        timeout "$NPNR_TIMEOUT" "$NEXTPNR" --set knob/const_fence_walk_budget=0 --chipdb "$CHIPDB" --log "$log" -q --json "$OUT/placed.json" \
         --no-pack --no-place --write "$OUT/walk-routed.json" >/dev/null 2>&1
     local rc=$?
     if [ "$rc" -eq 0 ]; then

@@ -24,7 +24,7 @@ for arm in "${ARMS[@]}"; do
     if [ $rc -ne 0 ]; then echo "FAIL $v: yosys rc=$rc"; rc_total=1; continue; fi
 
     # shellcheck disable=SC2086
-    DBG_CARRYO=1 "$NEXTPNR" --chipdb "$CHIPDB" --xdc carry4.xdc --json "$v.json" $extra \
+    "$NEXTPNR" --set knob/dbg_carryo=1 --chipdb "$CHIPDB" --xdc carry4.xdc --json "$v.json" $extra \
                --write "$v.routed.json" > "$v.log" 2>&1
     rc=$?
 
@@ -54,7 +54,7 @@ for v in conflict ctl_pinned; do
     extra=""
     [ "$v" = ctl_pinned ] && extra="--no-route"
     # shellcheck disable=SC2086
-    DBG_CARRYO=1 DBG_SFEED=1 DBG_BIND=1 NEXTPNR_DBG_LUTGATE=1 "$NEXTPNR" --chipdb "$CHIPDB" --xdc carry4.xdc \
+    DBG_SFEED=1 DBG_BIND=1 NEXTPNR_DBG_LUTGATE=1 "$NEXTPNR" --set knob/dbg_carryo=1 --chipdb "$CHIPDB" --xdc carry4.xdc \
         --json "$v.json" $extra --write "$v.dbg.routed.json" > "$v.dbg.log" 2>&1
     rc=$?
     residue=$(grep -cE '^Info: (SFEED|FEEDPOS|BINDCH|BIND-OK|BIND-FAIL|LUTGATE)' "$v.dbg.log")

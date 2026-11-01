@@ -45,7 +45,7 @@ fi
 pnr() {
     local name=$1
     shift
-    NEXTPNR_SETUP_EXPORT="$OUT/$name.tsv" NEXTPNR_HOLD_EXPORT="$OUT/$name.hold.tsv" "$NEXTPNR" --chipdb "$CHIPDB" \
+    NEXTPNR_SETUP_EXPORT="$OUT/$name.tsv" "$NEXTPNR" --set knob/hold_export="$OUT/$name.hold.tsv" --chipdb "$CHIPDB" \
         "$@" --log "$OUT/$name.log" -q --seed 1 >/dev/null 2>&1
 }
 

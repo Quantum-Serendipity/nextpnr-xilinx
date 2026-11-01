@@ -33,8 +33,8 @@ echo "[1] insert LUT1 buffers (FFMUX bypass workaround)"
 python3 insert_lutbuf.py top.json top_buf.json
 
 echo "[2] nextpnr place + route"
-NEXTPNR_ARC_MAX_VISIT=2000000 NEXTPNR_SKIP_FAILED_ARCS=1 \
-  "$NEXTPNR" --router router1 --chipdb "$CHIPDB" --xdc top.xdc \
+"$NEXTPNR" --set knob/arc_max_visit=2000000 --set knob/skip_failed_arcs=1 \
+    --router router1 --chipdb "$CHIPDB" --xdc top.xdc \
     --json top_buf.json --write routed.json --freq 200 2>&1 \
   | grep -iE "Max frequency|left unrouted|errors" || true
 

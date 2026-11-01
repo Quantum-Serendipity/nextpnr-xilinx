@@ -178,8 +178,8 @@ arm_static_keepout() {
     fi
 
     printf 'no_such_net_stale_a\nno_such_net_stale_b\n' >"$OUT/m10-stale.nets"
-    NEXTPNR_PARTITION_ROI=$r NEXTPNR_PARTITION_KEEPOUT_EXEMPT=$OUT/m10-stale.nets \
-        NEXTPNR_PARTITION_EXEMPT_NETS=$OUT/m10-stale.nets npnr "$OUT/m10-stale.log" --json "$OUT/placed.json" \
+    NEXTPNR_PARTITION_ROI=$r NEXTPNR_PARTITION_EXEMPT_NETS=$OUT/m10-stale.nets npnr "$OUT/m10-stale.log" \
+        --set knob/partition_keepout_exempt="$OUT/m10-stale.nets" --json "$OUT/placed.json" \
         --no-pack --no-place --write-fixed-routes "$OUT/m10-stale.routes"
     rc=$?
     if [ "$rc" -eq 0 ] && grep -q '0 from .*m10-stale.nets, 2 unresolved)' "$OUT/m10-stale.log" \
@@ -199,7 +199,7 @@ arm_static_keepout() {
         report "FAIL static keepout, --fixed-routes through the rectangle: rc $rc, $inside static pip(s) left in tile ($sx,$sy)"
     fi
 
-    NEXTPNR_PARTITION_ROI=$r NEXTPNR_ROUTE_FIXED_ONLY=1 npnr "$OUT/m10-import.log" --json "$OUT/routed.json" \
+    NEXTPNR_PARTITION_ROI=$r npnr "$OUT/m10-import.log" --set knob/route_fixed_only=1 --json "$OUT/routed.json" \
         --no-pack --no-place
     rc=$?
     if refused_by_keepout_gate "$rc" "$OUT/m10-import.log"; then
@@ -230,7 +230,7 @@ arm_const_containment() {
     local base_in
     base_in=$(geom count "$OUT/all.routes" const "$cx" "$cy" "$cx" "$cy")
 
-    NEXTPNR_PARTITION_ROI=$r NEXTPNR_ROUTE_FIXED_ONLY=1 npnr "$OUT/m12-import.log" --json "$OUT/routed.json" \
+    NEXTPNR_PARTITION_ROI=$r npnr "$OUT/m12-import.log" --set knob/route_fixed_only=1 --json "$OUT/routed.json" \
         --no-pack --no-place
     local rc=$?
     if refused_by_keepout_gate "$rc" "$OUT/m12-import.log" &&
@@ -674,12 +674,12 @@ arm_bel_blacklist_fails_closed() {
 
 arm_skip_failed_arcs_under_a_rectangle() {
     roi "$OUT/far.roi.json" 40 180 44 190
-    NEXTPNR_SKIP_FAILED_ARCS=1 npnr "$OUT/sfa-noroi.log" --json "$OUT/placed.json" --no-pack --no-place
+    npnr "$OUT/sfa-noroi.log" --set knob/skip_failed_arcs=1 --json "$OUT/placed.json" --no-pack --no-place
     local rc0=$?
-    NEXTPNR_PARTITION_ROI=$OUT/far.roi.json NEXTPNR_SKIP_FAILED_ARCS=1 npnr "$OUT/sfa.log" --json "$OUT/placed.json" \
+    NEXTPNR_PARTITION_ROI=$OUT/far.roi.json npnr "$OUT/sfa.log" --set knob/skip_failed_arcs=1 --json "$OUT/placed.json" \
         --no-pack --no-place --write "$OUT/sfa.json"
     local rc=$?
-    if [ "$rc0" -eq 0 ] && [ "$rc" -ne 0 ] && grep -q '^ERROR: NEXTPNR_SKIP_FAILED_ARCS or the router1/skipFailedArcs setting is set and NEXTPNR_PARTITION_ROI is set' "$OUT/sfa.log"; then
+    if [ "$rc0" -eq 0 ] && [ "$rc" -ne 0 ] && grep -q '^ERROR: knob/skip_failed_arcs or the router1/skipFailedArcs setting is set and NEXTPNR_PARTITION_ROI is set' "$OUT/sfa.log"; then
         report "PASS NEXTPNR_SKIP_FAILED_ARCS: rc 0 without a rectangle, refused at rc $rc under one"
     else
         report "FAIL NEXTPNR_SKIP_FAILED_ARCS: rc $rc0 without a rectangle, rc $rc under one: $(grep -m1 '^ERROR' "$OUT/sfa.log")"
@@ -691,9 +691,9 @@ arm_skip_failed_arcs_under_a_rectangle() {
         return
     fi
     NEXTPNR_PARTITION_ROI=$OUT/far.roi.json NEXTPNR_PARTITION_CLAMP=off NEXTPNR_PARTITION_KEEPOUT=off \
-        NEXTPNR_SKIP_FAILED_ARCS=1 npnr "$OUT/sfa-r1.log" --json "$OUT/placed-router1.json" --no-pack --no-place
+        npnr "$OUT/sfa-r1.log" --set knob/skip_failed_arcs=1 --json "$OUT/placed-router1.json" --no-pack --no-place
     rc=$?
-    if [ "$rc" -ne 0 ] && grep -q '^ERROR: NEXTPNR_SKIP_FAILED_ARCS or the router1/skipFailedArcs setting is set and NEXTPNR_PARTITION_ROI is set' "$OUT/sfa-r1.log"; then
+    if [ "$rc" -ne 0 ] && grep -q '^ERROR: knob/skip_failed_arcs or the router1/skipFailedArcs setting is set and NEXTPNR_PARTITION_ROI is set' "$OUT/sfa-r1.log"; then
         report "PASS NEXTPNR_SKIP_FAILED_ARCS with router1 under a rectangle, clamp and keepout off: refused at rc $rc"
     else
         report "FAIL NEXTPNR_SKIP_FAILED_ARCS with router1 under a rectangle, clamp and keepout off: rc $rc: $(grep -m1 '^ERROR' "$OUT/sfa-r1.log")"
@@ -707,7 +707,7 @@ arm_skip_failed_arcs_under_a_rectangle() {
         NEXTPNR_PARTITION_ROI=$OUT/far.roi.json NEXTPNR_PARTITION_CLAMP=off NEXTPNR_PARTITION_KEEPOUT=off \
             npnr "$OUT/sfa-r1s.log" --json "$OUT/placed-router1-skip.json" --no-pack --no-place)
     rc=$?
-    if [ "$rc0" -eq 0 ] && [ "$rc" -ne 0 ] && grep -q '^ERROR: NEXTPNR_SKIP_FAILED_ARCS or the router1/skipFailedArcs setting is set' "$OUT/sfa-r1s.log"; then
+    if [ "$rc0" -eq 0 ] && [ "$rc" -ne 0 ] && grep -q '^ERROR: knob/skip_failed_arcs or the router1/skipFailedArcs setting is set' "$OUT/sfa-r1s.log"; then
         report "PASS router1/skipFailedArcs stored in the input netlist: rc 0 without a rectangle, refused at rc $rc under one"
     else
         report "FAIL router1/skipFailedArcs stored in the input netlist: rc $rc0 without a rectangle, rc $rc under one: $(grep -m1 '^ERROR' "$OUT/sfa-r1s.log")"
@@ -736,9 +736,9 @@ arm_partition_modes_recorded() {
     local rc1b=$?
     printf 'no_such_net_in_this_design\n' >"$OUT/pm-keepout-exempt.nets"
     : >"$OUT/pm-licence.routes"
-    NEXTPNR_PARTITION_ROI=$OUT/far.roi.json NEXTPNR_PARTITION_KEEPOUT_EXEMPT=$OUT/pm-keepout-exempt.nets \
-        NEXTPNR_PARTITION_KEEPOUT_LICENCE=$OUT/pm-licence.routes NEXTPNR_EXCLUDE_STAMPED_BBOX=1 \
-        npnr "$OUT/pm-ko.log" --json "$OUT/placed.json" --no-pack --no-place --write "$OUT/pm-ko.json"
+    NEXTPNR_PARTITION_ROI=$OUT/far.roi.json NEXTPNR_PARTITION_KEEPOUT_LICENCE=$OUT/pm-licence.routes \
+        npnr "$OUT/pm-ko.log" --set knob/partition_keepout_exempt="$OUT/pm-keepout-exempt.nets" \
+        --set knob/exclude_stamped_bbox=1 --json "$OUT/placed.json" --no-pack --no-place --write "$OUT/pm-ko.json"
     local rc3=$?
     (unset NEXTPNR_PARTITION_ROI NEXTPNR_PARTITION_CLAMP NEXTPNR_PARTITION_KEEPOUT NEXTPNR_PARTITION_KEEPOUT_NARROW \
         NEXTPNR_PARTITION_KEEPOUT_LICENCE NEXTPNR_PARTITION_KEEPOUT_EXEMPT NEXTPNR_PARTITION_NETS \
@@ -819,12 +819,12 @@ arm_lut_perm_drop_mode() {
         report "FAIL NEXTPNR_LUT_PERM_DROP: the hook that binds a stray permutation pip into lpd.v's u_x drops nothing (rc $rc0): $(grep -m1 '^ERROR' "$OUT/lpd-warn.log")"
         return
     fi
-    NEXTPNR_LUT_PERM_DROP=fatal npnr "$OUT/lpd-fatal.log" --json "$OUT/lpd-placed.json" --no-pack --no-place \
+    npnr "$OUT/lpd-fatal.log" --set knob/lut_perm_drop=fatal --json "$OUT/lpd-placed.json" --no-pack --no-place \
         --pre-route "$OUT/lpd.py" --write "$OUT/lpd-fatal.json"
     local rc1=$?
-    NEXTPNR_LUT_PERM_DROP=fatal npnr "$OUT/lpd-clean.log" --json "$OUT/lpd-placed.json" --no-pack --no-place
+    npnr "$OUT/lpd-clean.log" --set knob/lut_perm_drop=fatal --json "$OUT/lpd-placed.json" --no-pack --no-place
     local rc2=$?
-    NEXTPNR_LUT_PERM_DROP=FATAL npnr "$OUT/lpd-bad.log" --json "$OUT/lpd-placed.json" --no-pack --no-place
+    npnr "$OUT/lpd-bad.log" --set knob/lut_perm_drop=FATAL --json "$OUT/lpd-placed.json" --no-pack --no-place
     local rc3=$?
     if [ "$rc1" -ne 0 ] && grep -q '^ERROR: LUT permutation rewrite DROPPED' "$OUT/lpd-fatal.log" && [ ! -e "$OUT/lpd-fatal.json" ]; then
         report "PASS NEXTPNR_LUT_PERM_DROP=fatal with $drops dropped LUT input(s): refused at rc $rc1, no netlist written; unset it warns at rc $rc0"
@@ -836,7 +836,7 @@ arm_lut_perm_drop_mode() {
     else
         report "FAIL NEXTPNR_LUT_PERM_DROP=fatal on a route that drops nothing: rc $rc2"
     fi
-    if [ "$rc3" -ne 0 ] && grep -q "^ERROR: NEXTPNR_LUT_PERM_DROP='FATAL' is neither 'fatal' nor 'warn'" "$OUT/lpd-bad.log"; then
+    if [ "$rc3" -ne 0 ] && grep -q "^ERROR: knob/lut_perm_drop='FATAL' is neither 'fatal' nor 'warn'" "$OUT/lpd-bad.log"; then
         report "PASS NEXTPNR_LUT_PERM_DROP with an unknown value: refused at rc $rc3"
     else
         report "FAIL NEXTPNR_LUT_PERM_DROP with an unknown value: rc $rc3"
