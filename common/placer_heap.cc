@@ -2041,8 +2041,13 @@ PlacerHeapCfg::PlacerHeapCfg(Context *ctx)
 {
     alpha = ctx->setting<float>("placerHeap/alpha", 0.1);
     beta = ctx->setting<float>("placerHeap/beta", 0.9);
-    criticalityExponent = ctx->setting<float>("placerHeap/criticalityExponent", 2);
-    timingWeight = ctx->setting<float>("placerHeap/timingWeight", 10);
+    auto int_default = [ctx](const char *key, int value) -> float {
+        if (ctx->settings.count(ctx->id(key)))
+            return ctx->setting<float>(key);
+        return ctx->setting<int>(key, value);
+    };
+    criticalityExponent = int_default("placerHeap/criticalityExponent", 2);
+    timingWeight = int_default("placerHeap/timingWeight", 10);
     timing_driven = ctx->setting<bool>("timing_driven");
     solverTolerance = 1e-5;
     placeAllAtOnce = false;

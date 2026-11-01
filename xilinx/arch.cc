@@ -1088,13 +1088,14 @@ bool Arch::place()
         PlacerHeapCfg cfg(getCtx());
         auto heap_param = [&](const char *key, auto arch_default) {
             using T = decltype(arch_default);
+            const char *given = knobs::user_setting(key);
+            if (given == nullptr)
+                return arch_default;
             T value = arch_default;
-            if (const char *given = knobs::user_setting(key)) {
-                try {
-                    value = boost::lexical_cast<T>(given);
-                } catch (const boost::bad_lexical_cast &) {
-                    log_error("setting %s=%s is not a number\n", key, given);
-                }
+            try {
+                value = boost::lexical_cast<T>(given);
+            } catch (const boost::bad_lexical_cast &) {
+                log_error("setting %s=%s is not a number\n", key, given);
             }
             std::ostringstream echo;
             echo << std::setprecision(7) << value;

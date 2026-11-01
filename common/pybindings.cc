@@ -65,7 +65,12 @@ Context *load_design_shim(std::string filename, ArchArgs args)
     return d;
 }
 
-void knob_unset_shim(std::string key) { knobs::unset(key); }
+void knob_unset_shim(std::string key)
+{
+    if (key != "knob/partition_roi")
+        log_error("knob_unset %s: only knob/partition_roi may be unset from Python\n", key.c_str());
+    knobs::unset(key);
+}
 
 void translate_assertfail(const assertion_failure &e)
 {

@@ -111,6 +111,18 @@ const RemovedKnob removed_table[] = {
          "the mode was deleted because an omitted GND DI delivers VCC through the bypass mux and corrupts the carry"},
 };
 
+struct BannedSetting
+{
+    const char *key;
+    const char *knob;
+    const char *unset_values[2];
+};
+
+const BannedSetting banned_settings[] = {
+        {"router1/skipFailedArcs", "NEXTPNR_SKIP_FAILED_ARCS", {"0", "false"}},
+        {"router1/arcMaxVisitCnt", "NEXTPNR_ARC_MAX_VISIT", {"2147483647", "2147483647"}},
+};
+
 const char *const per_invocation_prefixes[] = {"knob/", "router2/", "router/"};
 
 std::string derived_key(const char *name)
@@ -195,6 +207,10 @@ void init(const std::vector<std::string> &assignments)
         for (const auto &r : removed_table)
             if (key == derived_key(r.name))
                 log_error("--set %s: %s was removed and is refused: %s\n", key.c_str(), r.name, r.instead);
+        for (const auto &b : banned_settings)
+            if (key == b.key)
+                log_error("--set %s is refused: it does what %s (%s) does, and that knob is banned\n", key.c_str(),
+                          b.knob, derived_key(b.knob).c_str());
         Entry *e = s.by_key(key);
         if (e == nullptr && key.rfind("knob/", 0) == 0)
             log_error("--set %s: no knob has that key; --list-knobs prints them\n", key.c_str());
@@ -274,6 +290,16 @@ void apply(Context *ctx)
     std::string list;
     for (auto &kv : ctx->settings) {
         const std::string &key = kv.first.str(ctx);
+        for (const auto &b : banned_settings) {
+            if (key != b.key)
+                continue;
+            const Property &p = kv.second;
+            std::string v = p.is_string ? p.as_string() : std::to_string(p.as_int64());
+            if (v != b.unset_values[0] && v != b.unset_values[1])
+                log_error("the input netlist carries the setting %s=%s, which does what %s (%s) does; that knob is "
+                          "banned, so the netlist is refused\n",
+                          key.c_str(), v.c_str(), b.knob, derived_key(b.knob).c_str());
+        }
         bool per_invocation = false;
         for (const char *prefix : per_invocation_prefixes)
             per_invocation = per_invocation || key.rfind(prefix, 0) == 0;
@@ -335,6 +361,9 @@ void list()
                   << '\n';
     for (auto &r : removed_table)
         std::cout << derived_key(r.name) << '\t' << r.name << '\t' << "removed, refused from the environment and --set"
+                  << '\n';
+    for (auto &b : banned_settings)
+        std::cout << b.key << '\t' << b.knob << '\t' << "plain setting doing what this banned knob does, refused"
                   << '\n';
 }
 
