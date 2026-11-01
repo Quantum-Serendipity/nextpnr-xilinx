@@ -248,7 +248,75 @@ void XilinxPacker::pack_dram()
             }
         }
     }
-    log_info("   Transformed %d tied-low DRAM address inputs to be tied-high\n", inverted_ports);
+    int multiport_bits = 0, multiport_cells = 0;
+    for (auto cell : sorted(ctx->cells)) {
+        CellInfo *ci = cell.second;
+        const std::string &type = ci->type.str(ctx);
+        bool is_64 = (type == "RAM64M");
+        if (!is_64 && type != "RAM32M")
+            continue;
+        int abits = is_64 ? 6 : 5;
+        int words = 1 << abits;
+        int width = is_64 ? 1 : 2;
+        std::vector<Property *> inits;
+        bool init_ok = true;
+        for (auto &param : ci->params) {
+            const std::string &pname = param.first.str(ctx);
+            if (pname.size() != 6 || pname.compare(0, 5, "INIT_") != 0 || pname[5] < 'A' || pname[5] > 'D')
+                continue;
+            if (param.second.is_string || int(param.second.str.size()) > words * width)
+                init_ok = false;
+            inits.push_back(&param.second);
+        }
+        if (!init_ok)
+            continue;
+        std::unordered_map<std::string, PortInfo *> addr_ports;
+        for (auto &port : ci->ports) {
+            const std::string &pname = port.first.str(ctx);
+            if (pname.compare(0, 4, "ADDR") == 0)
+                addr_ports[pname] = &port.second;
+        }
+        int mask = 0;
+        for (int i = 0; i < abits; i++) {
+            bool all_gnd = true;
+            for (int p = 0; p < 4 && all_gnd; p++) {
+                auto found = addr_ports.find(stringf("ADDR%c[%d]", 'A' + p, i));
+                if (found == addr_ports.end() || found->second->net == nullptr ||
+                    found->second->net->name.str(ctx) != "$PACKER_GND_NET")
+                    all_gnd = false;
+            }
+            if (all_gnd)
+                mask |= (1 << i);
+        }
+        if (mask == 0)
+            continue;
+        NetInfo *vcc = ctx->nets[ctx->id("$PACKER_VCC_NET")].get();
+        for (int i = 0; i < abits; i++) {
+            if (!(mask & (1 << i)))
+                continue;
+            for (int p = 0; p < 4; p++) {
+                IdString aport = addr_ports.at(stringf("ADDR%c[%d]", 'A' + p, i))->name;
+                disconnect_port(ctx, ci, aport);
+                connect_port(ctx, vcc, ci, aport);
+            }
+            ++inverted_ports;
+            ++multiport_bits;
+        }
+        ++multiport_cells;
+        for (Property *init : inits) {
+            std::string old_bits = init->str;
+            old_bits.resize(words * width, Property::State::S0);
+            std::string new_bits(words * width, Property::State::S0);
+            for (int a = 0; a < words; a++)
+                for (int j = 0; j < width; j++)
+                    new_bits[(a ^ mask) * width + j] = old_bits[a * width + j];
+            init->str = new_bits;
+            init->update_intval();
+        }
+    }
+    log_info("   Transformed %d tied-low DRAM address inputs to be tied-high (%d address bit(s) of %d RAM32M/RAM64M "
+             "cell(s))\n",
+             inverted_ports, multiport_bits, multiport_cells);
 
     for (auto cell : sorted(ctx->cells)) {
         CellInfo *ci = cell.second;

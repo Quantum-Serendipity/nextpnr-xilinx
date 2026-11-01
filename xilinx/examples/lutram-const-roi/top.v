@@ -10,7 +10,7 @@ module top (
         .WCLK(clk),
         .WE(we),
         .ADDRA({1'b0, a}),
-        .ADDRB({1'b0, a}),
+        .ADDRB({1'b1, a}),
         .ADDRC({1'b0, a}),
         .ADDRD({1'b0, a}),
         .DIA(2'b00),

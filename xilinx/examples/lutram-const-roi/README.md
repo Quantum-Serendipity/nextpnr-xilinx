@@ -1,11 +1,13 @@
 # Constant LUTRAM data inputs under a partition rectangle
 
-Places `top.v`, one `RAM32M` with `DIA` tied to 0 and address bit 4 tied to 0 on every port, on an
-`xc7a100tfgg484`, then routes it with every GND source pip withheld through
+Places `top.v`, one `RAM32M` with `DIA` tied to 0 and address bit 4 tied to 0 on ports A, C and D
+and to 1 on port B, on an `xc7a100tfgg484`, then routes it with every GND source pip withheld through
 `NEXTPNR_PIP_BLACKLIST_TILE`: `GND_WIRE` to `GFAN0`/`GFAN1` in every INT tile and the row-GND pseudo
 pip into each CLB tile's `A` LUT output. The constant fill cannot reach the A-LUT pair's `DI1`
 (`AI`) and `DI2` (`AX`), or the `A5` and `WA5` inputs, so they become holdouts that only a constant
-LUT driver can deliver. Each arm routes that placement under a different partition rectangle.
+LUT driver can deliver. Port B's tie to 1 keeps the packer from rewriting bit 4 to tied-high, which it
+does only when every port ties the bit to 0. Each arm routes that placement under a different
+partition rectangle.
 
 ```
 CHIPDB=/path/to/xc7a100tfgg484.bin YOSYS=yosys NEXTPNR=/path/to/nextpnr-xilinx ./run.sh
