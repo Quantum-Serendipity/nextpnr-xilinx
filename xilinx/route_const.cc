@@ -361,7 +361,7 @@ void Arch::routeConstants(std::function<void()> reroute)
             log_error("routeVcc: %d constant sink(s) could not be bridged and are not delivered by a configuration "
                       "bit (listed above). The design would be written out with undriven constant inputs. "
                       "routeConstants: they could not be routed; the bitstream would be wrong. "
-                      "Pass --allow-const-holdouts (or set NEXTPNR_ALLOW_CONST_HOLDOUTS=1) to build anyway.\n",
+                      "Pass --allow-const-holdouts (or --set knob/allow_const_holdouts=1) to build anyway.\n",
                       int(left.size()));
     };
 

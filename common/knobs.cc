@@ -37,67 +37,81 @@ struct KnobDef
     const char *name;
     const char *key;
     bool env_alias;
+    bool in_partition_modes;
 };
 
 const KnobDef knob_table[] = {
-        {"DBG_CARRYFF", nullptr, false},
-        {"DBG_CARRYO", nullptr, false},
-        {"DBG_DIFEED", nullptr, false},
-        {"NEXTPNR_ALLOW_CO_5FF_CONTENTION", nullptr, false},
-        {"NEXTPNR_ALLOW_CONST_HOLDOUTS", nullptr, false},
-        {"NEXTPNR_ARC_EXPORT", nullptr, false},
-        {"NEXTPNR_ARC_MAX_VISIT", nullptr, false},
-        {"NEXTPNR_ASYNC_GROUPS", nullptr, false},
-        {"NEXTPNR_BEL_BLACKLIST", nullptr, true},
-        {"NEXTPNR_BUFG_CONST_DISCONNECT", nullptr, false},
-        {"NEXTPNR_CARRY_COUNTER_FIX", nullptr, false},
-        {"NEXTPNR_CONST_FENCE_WALK_BUDGET", nullptr, false},
-        {"NEXTPNR_CONST_HOLDOUT_PASSES", nullptr, false},
-        {"NEXTPNR_CRIT_EXPORT", nullptr, false},
-        {"NEXTPNR_CRIT_PATH_REPORT", nullptr, true},
-        {"NEXTPNR_DBG_CONSTR", nullptr, false},
-        {"NEXTPNR_DBG_SHORTROUTE", nullptr, false},
-        {"NEXTPNR_DUMP_INVALID_TILE", nullptr, false},
-        {"NEXTPNR_EXCLUDE_STAMPED_BBOX", nullptr, false},
-        {"NEXTPNR_FIXEDROUTES_HOOK", nullptr, false},
-        {"NEXTPNR_FIXEDROUTES_NO_PINSWAP", nullptr, false},
-        {"NEXTPNR_FIXEDROUTES_NOSWAP", nullptr, false},
-        {"NEXTPNR_FIXEDROUTES_PINSWAP", nullptr, false},
-        {"NEXTPNR_GND_HOLDOUT_FILE", nullptr, false},
-        {"NEXTPNR_GND_NO_RIPUP", nullptr, false},
-        {"NEXTPNR_GT_CLK_BODGE", nullptr, false},
-        {"NEXTPNR_HOLD_EXPORT", nullptr, false},
-        {"NEXTPNR_LUT_PERM_DROP", nullptr, false},
-        {"NEXTPNR_NO_CARRY_COUNTER_FIX", nullptr, false},
-        {"NEXTPNR_NO_CARRY_O_RELOC", nullptr, false},
-        {"NEXTPNR_NO_CONST_LUT_DRIVERS", nullptr, false},
-        {"NEXTPNR_NO_LONGLINES", nullptr, false},
-        {"NEXTPNR_PARTITION_CLAMP", nullptr, true},
-        {"NEXTPNR_PARTITION_EXEMPT_NETS", nullptr, true},
-        {"NEXTPNR_PARTITION_KEEPOUT", nullptr, true},
-        {"NEXTPNR_PARTITION_KEEPOUT_EXEMPT", nullptr, false},
-        {"NEXTPNR_PARTITION_KEEPOUT_LICENCE", nullptr, true},
-        {"NEXTPNR_PARTITION_KEEPOUT_NARROW", nullptr, true},
-        {"NEXTPNR_PARTITION_NETS", nullptr, true},
-        {"NEXTPNR_PARTITION_ROI", nullptr, true},
-        {"NEXTPNR_PIP_BLACKLIST", nullptr, false},
-        {"NEXTPNR_PIP_BLACKLIST_TILE", nullptr, true},
-        {"NEXTPNR_PLACER_ALPHA", "placerHeap/alpha", true},
-        {"NEXTPNR_PLACER_BETA", "placerHeap/beta", true},
-        {"NEXTPNR_POST_ROUTE_TIMING", nullptr, true},
-        {"NEXTPNR_ROUTE_FIXED_ONLY", nullptr, false},
-        {"NEXTPNR_ROUTER2_MAX_ITER", nullptr, false},
-        {"NEXTPNR_ROUTER2_MAX_STALL", nullptr, false},
-        {"NEXTPNR_RX_PLAIN_LVCMOS", nullptr, false},
-        {"NEXTPNR_SETUP_EXPORT", nullptr, true},
-        {"NEXTPNR_SETUP_EXPORT_START", nullptr, false},
-        {"NEXTPNR_SKIP_FAILED_ARCS", nullptr, false},
-        {"NEXTPNR_SPREAD_SCALE_X", "placerHeap/spreadScaleX", true},
-        {"NEXTPNR_SPREAD_SCALE_Y", "placerHeap/spreadScaleY", true},
-        {"NEXTPNR_TIMING_ONLY", nullptr, true},
-        {"NPNR_ROUTER1_RECHECK", nullptr, false},
-        {"XC7_LEGACY_CARRY4_SPLIT", nullptr, true},
+        {"DBG_CARRYFF", nullptr, false, false},
+        {"DBG_CARRYO", nullptr, false, false},
+        {"DBG_DIFEED", nullptr, false, false},
+        {"NEXTPNR_ALLOW_CO_5FF_CONTENTION", nullptr, false, false},
+        {"NEXTPNR_ALLOW_CONST_HOLDOUTS", nullptr, false, false},
+        {"NEXTPNR_ARC_EXPORT", nullptr, false, false},
+        {"NEXTPNR_ARC_MAX_VISIT", nullptr, false, false},
+        {"NEXTPNR_BEL_BLACKLIST", nullptr, true, true},
+        {"NEXTPNR_BUFG_CONST_DISCONNECT", nullptr, false, false},
+        {"NEXTPNR_CARRY_COUNTER_FIX", nullptr, false, false},
+        {"NEXTPNR_CONST_FENCE_WALK_BUDGET", nullptr, false, false},
+        {"NEXTPNR_CONST_HOLDOUT_PASSES", nullptr, false, false},
+        {"NEXTPNR_CRIT_EXPORT", nullptr, false, false},
+        {"NEXTPNR_CRIT_PATH_REPORT", nullptr, true, false},
+        {"NEXTPNR_DBG_CONSTR", nullptr, false, false},
+        {"NEXTPNR_DBG_SHORTROUTE", nullptr, false, false},
+        {"NEXTPNR_DUMP_INVALID_TILE", nullptr, false, false},
+        {"NEXTPNR_EXCLUDE_STAMPED_BBOX", nullptr, false, true},
+        {"NEXTPNR_FIXEDROUTES_HOOK", nullptr, false, false},
+        {"NEXTPNR_FIXEDROUTES_NO_PINSWAP", nullptr, false, false},
+        {"NEXTPNR_FIXEDROUTES_NOSWAP", nullptr, false, false},
+        {"NEXTPNR_FIXEDROUTES_PINSWAP", nullptr, false, false},
+        {"NEXTPNR_GND_HOLDOUT_FILE", nullptr, false, false},
+        {"NEXTPNR_GND_NO_RIPUP", nullptr, false, false},
+        {"NEXTPNR_GT_CLK_BODGE", nullptr, false, false},
+        {"NEXTPNR_HOLD_EXPORT", nullptr, false, false},
+        {"NEXTPNR_LUT_PERM_DROP", nullptr, false, true},
+        {"NEXTPNR_NO_CARRY_COUNTER_FIX", nullptr, false, false},
+        {"NEXTPNR_NO_CARRY_O_RELOC", nullptr, false, false},
+        {"NEXTPNR_NO_CONST_LUT_DRIVERS", nullptr, false, false},
+        {"NEXTPNR_NO_LONGLINES", nullptr, false, false},
+        {"NEXTPNR_PARTITION_CLAMP", nullptr, true, true},
+        {"NEXTPNR_PARTITION_EXEMPT_NETS", nullptr, true, true},
+        {"NEXTPNR_PARTITION_KEEPOUT", nullptr, true, true},
+        {"NEXTPNR_PARTITION_KEEPOUT_EXEMPT", nullptr, false, true},
+        {"NEXTPNR_PARTITION_KEEPOUT_LICENCE", nullptr, true, true},
+        {"NEXTPNR_PARTITION_KEEPOUT_NARROW", nullptr, true, true},
+        {"NEXTPNR_PARTITION_NETS", nullptr, true, true},
+        {"NEXTPNR_PARTITION_ROI", nullptr, true, true},
+        {"NEXTPNR_PIP_BLACKLIST", nullptr, false, true},
+        {"NEXTPNR_PIP_BLACKLIST_TILE", nullptr, true, true},
+        {"NEXTPNR_PLACER_ALPHA", "placerHeap/alpha", true, false},
+        {"NEXTPNR_PLACER_BETA", "placerHeap/beta", true, false},
+        {"NEXTPNR_POST_ROUTE_TIMING", nullptr, true, false},
+        {"NEXTPNR_ROUTE_FIXED_ONLY", nullptr, false, false},
+        {"NEXTPNR_ROUTER2_MAX_ITER", nullptr, false, false},
+        {"NEXTPNR_ROUTER2_MAX_STALL", nullptr, false, false},
+        {"NEXTPNR_RX_PLAIN_LVCMOS", nullptr, false, false},
+        {"NEXTPNR_SETUP_EXPORT", nullptr, true, false},
+        {nullptr, "knob/setup_export_start", false, false},
+        {"NEXTPNR_SKIP_FAILED_ARCS", nullptr, false, true},
+        {"NEXTPNR_SPREAD_SCALE_X", "placerHeap/spreadScaleX", true, false},
+        {"NEXTPNR_SPREAD_SCALE_Y", "placerHeap/spreadScaleY", true, false},
+        {"NEXTPNR_TIMING_ONLY", nullptr, true, false},
+        {"NPNR_ROUTER1_RECHECK", nullptr, false, false},
+        {"XC7_LEGACY_CARRY4_SPLIT", nullptr, true, false},
 };
+
+struct RemovedKnob
+{
+    const char *name;
+    const char *instead;
+};
+
+const RemovedKnob removed_table[] = {
+        {"NEXTPNR_ASYNC_GROUPS", "declare the crossing with set_clock_groups in an XDC"},
+        {"NEXTPNR_CARRY_OMIT_GND_DI",
+         "the mode was deleted because an omitted GND DI delivers VCC through the bypass mux and corrupts the carry"},
+};
+
+const char *const per_invocation_prefixes[] = {"knob/", "router2/", "router/"};
 
 std::string derived_key(const char *name)
 {
@@ -125,13 +139,14 @@ struct Store
     bool initialised = false;
     std::vector<Entry> entries;
     std::map<std::string, std::string> plain_settings;
+    std::map<std::string, std::string> recorded;
 
     Entry *by_name(const char *name)
     {
         for (auto &e : entries)
-            if (std::strcmp(e.def->name, name) == 0)
+            if (e.def->name != nullptr && std::strcmp(e.def->name, name) == 0)
                 return &e;
-        return nullptr;
+        return by_key(name);
     }
     Entry *by_key(const std::string &key)
     {
@@ -162,6 +177,11 @@ void init(const std::vector<std::string> &assignments)
         e.origin.clear();
     }
     s.plain_settings.clear();
+    s.recorded.clear();
+
+    for (const auto &r : removed_table)
+        if (std::getenv(r.name) != nullptr)
+            log_error("%s was removed and is refused: %s\n", r.name, r.instead);
 
     for (const auto &a : assignments) {
         auto eq = a.find('=');
@@ -172,6 +192,9 @@ void init(const std::vector<std::string> &assignments)
             log_error("--set %s: the seed is read before the netlist; use --seed\n", key.c_str());
         if (value.empty())
             log_error("--set %s=: the value is empty; omit the option instead\n", key.c_str());
+        for (const auto &r : removed_table)
+            if (key == derived_key(r.name))
+                log_error("--set %s: %s was removed and is refused: %s\n", key.c_str(), r.name, r.instead);
         Entry *e = s.by_key(key);
         if (e == nullptr && key.rfind("knob/", 0) == 0)
             log_error("--set %s: no knob has that key; --list-knobs prints them\n", key.c_str());
@@ -189,6 +212,8 @@ void init(const std::vector<std::string> &assignments)
     }
 
     for (auto &e : s.entries) {
+        if (e.def->name == nullptr)
+            continue;
         const char *env = std::getenv(e.def->name);
         if (env == nullptr)
             continue;
@@ -238,42 +263,79 @@ const char *user_setting(const std::string &key)
     return e != nullptr && e->has_value ? e->value.c_str() : nullptr;
 }
 
+void record(const std::string &key, const std::string &value) { store().recorded[key] = value; }
+
 void apply(Context *ctx)
 {
     Store &s = store();
     if (!s.initialised)
         init({});
-    std::vector<std::string> carried;
-    for (auto &e : s.entries) {
-        if (e.key.rfind("knob/", 0) != 0)
+    std::vector<IdString> carried;
+    std::string list;
+    for (auto &kv : ctx->settings) {
+        const std::string &key = kv.first.str(ctx);
+        bool per_invocation = false;
+        for (const char *prefix : per_invocation_prefixes)
+            per_invocation = per_invocation || key.rfind(prefix, 0) == 0;
+        if (!per_invocation)
             continue;
-        IdString k = ctx->id(e.key);
-        auto found = ctx->settings.find(k);
-        if (found != ctx->settings.end() && !e.has_value)
-            carried.push_back(e.key);
-        if (found != ctx->settings.end())
-            ctx->settings.erase(found);
+        carried.push_back(kv.first);
     }
-    if (!carried.empty()) {
-        std::string list;
-        for (auto &c : carried)
-            list += (list.empty() ? "" : ", ") + c;
-        log_info("knob settings carried by the input netlist are not re-applied (knobs act per invocation): %s\n",
+    std::sort(carried.begin(), carried.end(), [ctx](IdString a, IdString b) { return a.str(ctx) < b.str(ctx); });
+    for (IdString k : carried) {
+        const std::string &key = k.str(ctx);
+        if (!s.plain_settings.count(key))
+            list += (list.empty() ? "" : ", ") + key;
+        ctx->settings.erase(k);
+    }
+    if (!list.empty())
+        log_info("settings carried by the input netlist under knob/, router2/ and router/ are stripped, not re-applied "
+                 "(they act per invocation; pass --set to set them again): %s\n",
                  list.c_str());
-    }
-    for (auto &e : s.entries)
-        if (e.has_value)
-            ctx->settings[ctx->id(e.key)] = e.value;
     for (auto &p : s.plain_settings)
         ctx->settings[ctx->id(p.first)] = p.second;
+}
+
+void echo(Context *ctx)
+{
+    Store &s = store();
+    if (!s.initialised)
+        init({});
+    for (auto &e : s.entries)
+        if (e.has_value && e.key.rfind("knob/", 0) == 0 && !e.def->in_partition_modes)
+            ctx->settings[ctx->id(e.key)] = e.value;
+    for (auto &r : s.recorded)
+        ctx->settings[ctx->id(r.first)] = r.second;
+}
+
+void unset(const std::string &key)
+{
+    Store &s = store();
+    if (!s.initialised)
+        init({});
+    Entry *e = s.by_key(key);
+    if (e == nullptr)
+        log_error("knob_unset %s: no knob has that key; --list-knobs prints them\n", key.c_str());
+    if (e->has_value)
+        log_info("knob %s unset (was %s from %s); contexts and passes that read it from now on see it unset\n",
+                 key.c_str(), e->value.c_str(), e->origin.c_str());
+    e->has_value = false;
+    e->value.clear();
+    e->origin.clear();
 }
 
 void list()
 {
     Store &s = store();
     for (auto &e : s.entries)
-        std::cout << e.key << '\t' << e.def->name << '\t'
-                  << (e.def->env_alias ? "environment alias read (deprecated)" : "environment not read") << '\n';
+        std::cout << e.key << '\t' << (e.def->name != nullptr ? e.def->name : "-") << '\t'
+                  << (e.def->name == nullptr ? "no environment name"
+                      : e.def->env_alias     ? "environment alias read (deprecated)"
+                                             : "environment not read")
+                  << '\n';
+    for (auto &r : removed_table)
+        std::cout << derived_key(r.name) << '\t' << r.name << '\t' << "removed, refused from the environment and --set"
+                  << '\n';
 }
 
 } // namespace knobs

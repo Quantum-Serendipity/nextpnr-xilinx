@@ -626,7 +626,7 @@ void Arch::setup_pip_blacklist()
                     blacklist_pips[td.type].insert(j);
             }
         }
-        // EXPERIMENT (NEXTPNR_PIP_BLACKLIST=<file>): forbid an explicit list
+        // EXPERIMENT (--set knob/pip_blacklist=<file>): forbid an explicit list
         // of pip types, one "TILETYPE.DST.SRC" per line -- the generic knob
         // for bisecting suspected-misencoded pips against hardware.
         if (const char *blf = knobs::get("NEXTPNR_PIP_BLACKLIST")) {
@@ -649,7 +649,7 @@ void Arch::setup_pip_blacklist()
                     blacklist_pips[td.type].insert(j);
             }
         }
-        // EXPERIMENT (NEXTPNR_NO_LONGLINES=1): avoid the LV/LH/LVB long
+        // EXPERIMENT (--set knob/no_longlines=1): avoid the LV/LH/LVB long
         // lines entirely.  They are non-directional pips whose reverse-
         // orientation segbits were never validated by a working Vivado
         // design (golden ibex/ethsoc drive long lines forward only) --
@@ -1098,11 +1098,11 @@ bool Arch::place()
             }
             std::ostringstream echo;
             echo << std::setprecision(7) << value;
-            settings[id(key)] = echo.str();
+            knobs::record(key, echo.str());
             return value;
         };
-        cfg.criticalityExponent = heap_param("placerHeap/criticalityExponent", 7);
-        cfg.timingWeight = heap_param("placerHeap/timingWeight", 10);
+        cfg.criticalityExponent = heap_param("placerHeap/criticalityExponent", 7.0f);
+        cfg.timingWeight = heap_param("placerHeap/timingWeight", 10.0f);
         cfg.alpha = heap_param("placerHeap/alpha", 0.08f);
         cfg.beta = heap_param("placerHeap/beta", 0.4f);
         cfg.spread_scale_x = heap_param("placerHeap/spreadScaleX", 2);
@@ -1125,7 +1125,7 @@ bool Arch::place()
         cfg.cellGroups.back().insert(id_SLICE_FFX);
         if (!xc7)
             cfg.cellGroups.back().insert(id_CARRY8);
-        else if (bool_or_default(settings, id("placerHeap/carry4Group"), false))
+        else if (heap_param("placerHeap/carry4Group", 0) != 0)
             cfg.cellGroups.back().insert(id("CARRY4"));
         if (!placer_heap(getCtx(), cfg))
             return false;
@@ -1476,7 +1476,7 @@ void Arch::routeBufhcePassthroughCE()
 //   CK_IN_R<k> (HROW of the GT region, Y26) -> CASCO<L> -> CASCIN/CASCO
 //   cascade up Y78/Y130/Y182 -> CK_MUXED<L> -> BUFGCTRL<L/2>_I0 (tile Y204),
 // with lane L in {2,6,12}.  The sink BUFGCTRL is moved to the lane's site.
-// Hardcoded for xc7vx485t bottom-right; enable with NEXTPNR_GT_CLK_BODGE=1.
+// Hardcoded for xc7vx485t bottom-right; enable with --set knob/gt_clk_bodge=1.
 bool Arch::gtClockTemplateRoute(NetInfo *clk_net, PortRef &usr, int &conflicts)
 {
     if (!knobs::get("NEXTPNR_GT_CLK_BODGE"))
@@ -2162,7 +2162,7 @@ void Arch::applyFixedRoutes(const std::string &filename, std::function<void()> r
     // authoritative and there is nothing to reconcile.  The template exists for
     // the opposite case (our own placement fed by a foreign route), and it
     // re-permutes INIT along with the ports, which is the known-buggy path
-    // noted above.  Skip it entirely; set NEXTPNR_FIXEDROUTES_PINSWAP=1 to force
+    // noted above.  Skip it entirely; --set knob/fixedroutes_pinswap=1 to force
     // the old behaviour for comparison.
     // Two INDEPENDENT switches: skipping the pin swap must NOT imply skipping
     // the router.  The intra-site last mile (xFFMUX / xOUTMUX / input crossbar)
@@ -2307,7 +2307,7 @@ void Arch::applyFixedRoutes(const std::string &filename, std::function<void()> r
         log_info("    fixed-routes: %d LUT-pin template swaps\n", pin_swaps);
     if (noswap_env)
         log_info("    fixed-routes: 0 LUT-pin template swaps (alignment swap disabled by "
-                 "NEXTPNR_FIXEDROUTES_NOSWAP)\n");
+                 "knob/fixedroutes_noswap)\n");
     if (swap_lut_pins)
         log_info("    fixed-routes: LUT input belpins locked %d (aligned %d, moved %d, not on this cell %d, "
                  "no locked net %d)\n",
@@ -2318,7 +2318,7 @@ void Arch::applyFixedRoutes(const std::string &filename, std::function<void()> r
     // than marking them globally unavailable), router2 completes each macro
     // net's site-pin last-mile itself with a real maze route -- so the old
     // external BFS "hook" (which GUESSED wires and failed ~386 arcs on the
-    // golden macro) is disabled by default.  Set NEXTPNR_FIXEDROUTES_HOOK=1
+    // golden macro) is disabled by default.  --set knob/fixedroutes_hook=1
     // to re-enable the legacy hooking for comparison.
     if (knobs::get("NEXTPNR_FIXEDROUTES_HOOK") == nullptr) {
         log_info("    fixed-routes: last-mile left to router2 (reserved-net contract)\n");
@@ -2996,7 +2996,7 @@ void Arch::findSourceSinkLocations()
 bool Arch::route()
 {
     dsp48e1CacheDrive();
-    estimate_nearest_wire = bool_or_default(settings, id("router/estimateNearestWire"), false);
+    estimate_nearest_wire = getCtx()->setting_if_present<bool>("router/estimateNearestWire", false);
     if (estimate_nearest_wire)
         log_info("estimateDelay: a nodal source is placed at its single tile wire nearest the sink\n");
     assign_budget(getCtx(), true);
@@ -3016,7 +3016,7 @@ bool Arch::route()
         else
             applyFixedRoutes(fixed, [&]() { routeClock(); });
     }
-    // NEXTPNR_ROUTE_FIXED_ONLY=1: treat the IMPORTED routing AS the routing and
+    // --set knob/route_fixed_only=1: treat the IMPORTED routing AS the routing and
     // run no general router at all.  Replaying a complete external route (e.g.
     // a Vivado implementation via dcp2routes) leaves router2 nothing useful to
     // do -- every inter-site pip is already bound and LOCKED -- while it still
@@ -3068,9 +3068,9 @@ bool Arch::route()
                            : p.as_int64() != 0;
     };
     if (roi_active() && (knobs::get("NEXTPNR_SKIP_FAILED_ARCS") != nullptr || router1_skip_setting()))
-        log_error("NEXTPNR_SKIP_FAILED_ARCS or the router1/skipFailedArcs setting is set and NEXTPNR_PARTITION_ROI is "
+        log_error("knob/skip_failed_arcs or the router1/skipFailedArcs setting is set and NEXTPNR_PARTITION_ROI is "
                   "set; the router would accept a partial route and this run would write it as routed under a "
-                  "partition rectangle. Unset NEXTPNR_SKIP_FAILED_ARCS and remove router1/skipFailedArcs from the "
+                  "partition rectangle. Drop --set knob/skip_failed_arcs and remove router1/skipFailedArcs from the "
                   "input netlist's settings.\n");
     auto run_router = [&]() {
         if (router == "router1") {
@@ -4907,7 +4907,7 @@ std::unordered_set<IdString> Arch::load_keepout_exempt_nets() const
     if (f != nullptr) {
         std::ifstream in(f);
         if (!in)
-            log_error("NEXTPNR_PARTITION_KEEPOUT_EXEMPT: cannot open '%s'\n", f);
+            log_error("knob/partition_keepout_exempt: cannot open '%s'\n", f);
         std::string ln;
         while (std::getline(in, ln)) {
             while (!ln.empty() && (ln.back() == '\r' || ln.back() == ' ' || ln.back() == '\t'))
@@ -4916,7 +4916,7 @@ std::unordered_set<IdString> Arch::load_keepout_exempt_nets() const
                 continue;
             IdString nn = id_if_interned(ln);
             if (nn == IdString() || !nets.count(nn)) {
-                log_warning("NEXTPNR_PARTITION_KEEPOUT_EXEMPT: '%s' names net '%s', which does not exist in this "
+                log_warning("knob/partition_keepout_exempt: '%s' names net '%s', which does not exist in this "
                             "design\n",
                             f, ln.c_str());
                 miss++;

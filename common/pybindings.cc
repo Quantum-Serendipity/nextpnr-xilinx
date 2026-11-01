@@ -23,6 +23,7 @@
 #include "pybindings.h"
 #include "arch_pybindings.h"
 #include "json_frontend.h"
+#include "knobs.h"
 #include "log.h"
 #include "nextpnr.h"
 
@@ -63,6 +64,8 @@ Context *load_design_shim(std::string filename, ArchArgs args)
     parse_json_shim(filename, *d);
     return d;
 }
+
+void knob_unset_shim(std::string key) { knobs::unset(key); }
 
 void translate_assertfail(const assertion_failure &e)
 {
@@ -224,6 +227,7 @@ BOOST_PYTHON_MODULE(MODULE_NAME)
 
     def("parse_json", parse_json_shim);
     def("load_design", load_design_shim, return_value_policy<manage_new_object>());
+    def("knob_unset", knob_unset_shim);
 
     auto region_cls = class_<ContextualWrapper<Region &>>("Region", no_init);
     readwrite_wrapper<Region &, decltype(&Region::name), &Region::name, conv_to_str<IdString>,

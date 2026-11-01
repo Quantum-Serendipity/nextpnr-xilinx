@@ -640,7 +640,7 @@ struct Router2
                     "recover it. The census line above reports how many arcs fell back to the no-bounding-box "
                     "retry: if that is 0 the search was never box-limited, so widening the box is not the repair. "
                     "If the rectangles are whole, the remaining repairs are a corridor between them or an entry in "
-                    "NEXTPNR_PARTITION_KEEPOUT_EXEMPT. If a rectangle above is narrowed, the locked pips listed "
+                    "knob/partition_keepout_exempt. If a rectangle above is narrowed, the locked pips listed "
                     "beside it are the only ones this net may bind there; NEXTPNR_PARTITION_KEEPOUT_NARROW=off "
                     "restores the whole-rectangle licence and separates a narrow refusal from a keepout one.\n");
     }
@@ -852,17 +852,23 @@ struct Router2
     void refresh_criticalities()
     {
         const bool feedback = cfg.crit_weight || cfg.tmg_ripup_iters > 0;
-        if (feedback)
-            ctx->route_delay_override = [this](const NetInfo *ni, const PortRef &pr, bool min_delay, delay_t &d) {
-                if (ni->udata < 0 || ni->udata >= int(nets_by_udata.size()) || nets_by_udata.at(ni->udata) != ni)
+        {
+            struct OverrideGuard
+            {
+                Context *ctx;
+                ~OverrideGuard() { ctx->route_delay_override = nullptr; }
+            } guard{ctx};
+            if (feedback)
+                ctx->route_delay_override = [this](const NetInfo *ni, const PortRef &pr, bool min_delay, delay_t &d) {
+                    if (ni->udata < 0 || ni->udata >= int(nets_by_udata.size()) || nets_by_udata.at(ni->udata) != ni)
+                        return false;
+                    for (size_t i = 0; i < ni->users.size(); i++)
+                        if (ni->users.at(i).cell == pr.cell && ni->users.at(i).port == pr.port)
+                            return arc_routed_delay(ni, i, min_delay, d);
                     return false;
-                for (size_t i = 0; i < ni->users.size(); i++)
-                    if (ni->users.at(i).cell == pr.cell && ni->users.at(i).port == pr.port)
-                        return arc_routed_delay(ni, i, min_delay, d);
-                return false;
-            };
-        get_criticalities(ctx, &net_crit);
-        ctx->route_delay_override = nullptr;
+                };
+            get_criticalities(ctx, &net_crit);
+        }
         for (size_t n = 0; n < nets_by_udata.size(); n++) {
             auto &net = nets.at(n);
             net.max_crit = 0;
@@ -2609,9 +2615,9 @@ Router2Cfg::Router2Cfg(Context *ctx)
     curr_cong_mult = ctx->setting<float>("router2/currCongWeightMult", 2.0f);
     estimate_weight = ctx->setting<float>("router2/estimateWeight", 1.75f);
     perf_profile = ctx->setting<float>("router2/perfProfile", false);
-    crit_weight = ctx->setting<bool>("router2/critWeight", false);
-    tmg_ripup_iters = ctx->setting<int>("router2/tmgRipupIters", 0);
-    revisit_lower_delay = ctx->setting<bool>("router2/revisitLowerDelay", false);
+    crit_weight = ctx->setting_if_present<bool>("router2/critWeight", false);
+    tmg_ripup_iters = ctx->setting_if_present<int>("router2/tmgRipupIters", 0);
+    revisit_lower_delay = ctx->setting_if_present<bool>("router2/revisitLowerDelay", false);
 }
 
 NEXTPNR_NAMESPACE_END

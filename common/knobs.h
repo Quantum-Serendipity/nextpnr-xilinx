@@ -32,7 +32,10 @@ void init(const std::vector<std::string> &assignments);
 const char *get(const char *name);
 inline bool is_set(const char *name) { return get(name) != nullptr; }
 const char *user_setting(const std::string &key);
+void record(const std::string &key, const std::string &value);
 void apply(Context *ctx);
+void echo(Context *ctx);
+void unset(const std::string &key);
 void list();
 
 } // namespace knobs

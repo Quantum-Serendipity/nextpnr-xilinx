@@ -841,7 +841,7 @@ class SAPlacer
 
     // Find a random Bel of the correct type for a cell, within the specified
     // diameter
-    // Exclusion bbox (NEXTPNR_EXCLUDE_STAMPED_BBOX=1): unstamped cells stay
+    // Exclusion bbox (--set knob/exclude_stamped_bbox=1): unstamped cells stay
     // out of the bounding box of pre-placed (BEL-attr) fabric cells -- i.e.
     // the frozen macro's region, whose routing is LOCKED so densely that
     // arcs into it are unroutable for foreign logic.

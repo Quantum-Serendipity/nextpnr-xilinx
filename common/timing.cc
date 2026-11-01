@@ -1125,8 +1125,6 @@ struct Timing
         }
         if (ctx->timing_ignore_nets)
             ignore_attr = ctx->id("NEXTPNR_TIMING_IGNORE");
-        if (knobs::get("NEXTPNR_ASYNC_GROUPS"))
-            log_error("NEXTPNR_ASYNC_GROUPS is no longer read; declare the crossing with set_clock_groups in an XDC\n");
         if (!ctx->timing_io_delays.empty())
             resolve_io_delays();
         if (export_setup) {
@@ -1134,7 +1132,7 @@ struct Timing
                 setup_export.open(sf);
                 if (!setup_export)
                     log_error("cannot open NEXTPNR_SETUP_EXPORT file '%s' for writing\n", sf);
-                setup_export_start = knobs::is_set("NEXTPNR_SETUP_EXPORT_START");
+                setup_export_start = knobs::is_set("knob/setup_export_start");
                 setup_export << "cell\tport\tslack_ns\tnet\tnet_delay_ns\tdriver_arrival_ns\tsetup_ns\tperiod_ns\tlaunch_"
                                 "clk\tcapture_clk\tpath_len\tdelay_source\tlaunch_clk_delay_ns\tcapture_clk_delay_"
                                 "ns\trequirement_source"
@@ -1143,7 +1141,7 @@ struct Timing
             if (const char *hf = knobs::get("NEXTPNR_HOLD_EXPORT")) {
                 hold_export.open(hf);
                 if (!hold_export)
-                    log_error("cannot open NEXTPNR_HOLD_EXPORT file '%s' for writing\n", hf);
+                    log_error("cannot open knob/hold_export file '%s' for writing\n", hf);
                 hold_export << "cell\tport\thold_slack_ns\tnet\tnet_delay_min_ns\tdriver_min_arrival_ns\thold_ns\thold_"
                                "req_ns\tcapture_clk_delay_ns\tlaunch_clk\tcapture_clk\tdelay_"
                                "source\tlaunch_clk_delay_ns\trequirement_source\tcppr_ns\n";
@@ -2281,7 +2279,7 @@ void export_cell_arcs(Context *ctx, const char *path)
 {
     std::ofstream out(path);
     if (!out)
-        log_error("cannot open NEXTPNR_ARC_EXPORT file '%s' for writing\n", path);
+        log_error("cannot open knob/arc_export file '%s' for writing\n", path);
     out << "cell\ttype\tbel\tfrom\tto\tmax_ns\tmin_ns\n";
     std::vector<IdString> names;
     for (auto &cell : ctx->cells)

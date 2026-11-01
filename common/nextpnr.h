@@ -996,6 +996,18 @@ struct Context : Arch, DeterministicRNG
         return defaultValue;
     }
 
+    template <typename T> T setting_if_present(const char *name, T defaultValue) const
+    {
+        IdString key = id_if_interned(name);
+        if (key == IdString())
+            return defaultValue;
+        auto found = settings.find(key);
+        if (found == settings.end())
+            return defaultValue;
+        return boost::lexical_cast<T>(found->second.is_string ? found->second.as_string()
+                                                              : std::to_string(found->second.as_int64()));
+    }
+
     template <typename T> T setting(const char *name) const
     {
         IdString new_id = id(name);

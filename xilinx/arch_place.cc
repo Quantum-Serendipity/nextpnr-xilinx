@@ -2056,7 +2056,7 @@ void Arch::fixupRouting()
         if (m == "fatal")
             lut_perm_drop_fatal = true;
         else if (m != "warn")
-            log_error("NEXTPNR_LUT_PERM_DROP='%s' is neither 'fatal' nor 'warn'\n", pdm);
+            log_error("knob/lut_perm_drop='%s' is neither 'fatal' nor 'warn'\n", pdm);
     }
     std::string perm_dropped_first;
 
@@ -2210,7 +2210,7 @@ void Arch::fixupRouting()
     if (perm_dropped_nets > 0) {
         if (lut_perm_drop_fatal)
             log_error("LUT permutation rewrite DROPPED %d LUT input connection(s) (first: %s). The written "
-                      "netlist would no longer match the design [NEXTPNR_LUT_PERM_DROP=fatal].\n",
+                      "netlist would no longer match the design [knob/lut_perm_drop=fatal].\n",
                       perm_dropped_nets, perm_dropped_first.c_str());
         log_warning("LUT permutation rewrite DROPPED %d LUT input connection(s) (first: %s). The written "
                     "netlist no longer matches the design; the FASM is unaffected, so this is invisible to a "

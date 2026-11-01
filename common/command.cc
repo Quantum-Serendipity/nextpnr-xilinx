@@ -294,7 +294,6 @@ void CommandHandler::setupContext(Context *ctx)
     ctx->settings[ctx->id("arch.name")] = std::string(ctx->archId().c_str(ctx));
     ctx->settings[ctx->id("arch.type")] = std::string(ctx->archArgsToId(ctx->archArgs()).c_str(ctx));
     ctx->settings[ctx->id("seed")] = ctx->rngstate;
-    knobs::apply(ctx);
 }
 
 int CommandHandler::executeMain(std::unique_ptr<Context> ctx)
@@ -400,6 +399,7 @@ int CommandHandler::executeMain(std::unique_ptr<Context> ctx)
     if (vm.count("write")) {
         std::string filename = vm["write"].as<std::string>();
         std::ofstream f(filename);
+        knobs::echo(ctx.get());
         if (!write_json_file(f, filename, ctx.get()))
             log_error("Saving design failed.\n");
     }
