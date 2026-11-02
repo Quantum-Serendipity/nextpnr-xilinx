@@ -4808,6 +4808,7 @@ void Arch::load_partition_roi() const
     const char *f = knobs::get("NEXTPNR_PARTITION_ROI");
     if (f == nullptr)
         return;
+    roi_source = knobs::source("NEXTPNR_PARTITION_ROI");
     std::ifstream in(f);
     if (!in)
         log_error("NEXTPNR_PARTITION_ROI: cannot open '%s'\n", f);

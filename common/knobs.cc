@@ -145,6 +145,7 @@ struct Entry
     bool has_value = false;
     std::string value;
     std::string origin;
+    std::string source;
 };
 
 struct Store
@@ -188,6 +189,7 @@ void init(const std::vector<std::string> &assignments)
         e.has_value = false;
         e.value.clear();
         e.origin.clear();
+        e.source.clear();
     }
     s.plain_settings.clear();
     s.recorded.clear();
@@ -226,6 +228,7 @@ void init(const std::vector<std::string> &assignments)
         e->has_value = true;
         e->value = value;
         e->origin = "--set";
+        e->source = e->key;
     }
 
     for (auto &e : s.entries) {
@@ -247,6 +250,7 @@ void init(const std::vector<std::string> &assignments)
         e.has_value = true;
         e.value = env;
         e.origin = std::string("environment ") + e.def->name + ", a deprecated alias";
+        e.source = e.def->name;
     }
 
     for (auto &e : s.entries)
@@ -257,7 +261,7 @@ void init(const std::vector<std::string> &assignments)
     s.initialised = true;
 }
 
-const char *get(const char *name)
+static const Entry &registered(const char *name)
 {
     Store &s = store();
     if (!s.initialised)
@@ -265,7 +269,19 @@ const char *get(const char *name)
     Entry *e = s.by_name(name);
     if (e == nullptr)
         log_error("internal: knob %s is not registered in common/knobs.cc\n", name);
-    return e->has_value ? e->value.c_str() : nullptr;
+    return *e;
+}
+
+const char *get(const char *name)
+{
+    const Entry &e = registered(name);
+    return e.has_value ? e.value.c_str() : nullptr;
+}
+
+const char *source(const char *name)
+{
+    const Entry &e = registered(name);
+    return e.has_value ? e.source.c_str() : nullptr;
 }
 
 const char *user_setting(const std::string &key)
@@ -349,6 +365,7 @@ void unset(const std::string &key)
     e->has_value = false;
     e->value.clear();
     e->origin.clear();
+    e->source.clear();
 }
 
 void list()

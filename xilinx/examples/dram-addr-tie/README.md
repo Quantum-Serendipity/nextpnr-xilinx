@@ -40,10 +40,12 @@ leaves its outputs in `$OUT` (a fresh `mktemp -d` by default).
 | knob-off-explicit | `--set knob/dram_tie_unread_di=off`: no data-input tie line, and the packed netlist equals the unset run's once the one echoed setting is set aside |
 | contents-knob-on, count-knob-on | as contents and count, over the knob-on run |
 | unread-data-on | knob on: the tie line counts five, and exactly the data inputs the table moves are on VCC |
-| stripped-knob-off | knob unset: `stripped.v`'s port A `DI1`/`DI2` stay on GND |
+| stripped-knob-off | knob unset: `stripped.v` packs at rc 0 and its port A `DI1`/`DI2` stay on GND |
 | stripped-knob-on-refused | knob on: the `stripped.v` netlist is refused, and packing stops with `knob/dram_tie_unread_di=on is refused: the netlist has no top-level ports` |
-| roi-knob-on-refused | knob on with `NEXTPNR_PARTITION_ROI` set: the netlist is refused, and packing stops with the refusal that names the ROI |
-| roi-knob-unset-packs | with `NEXTPNR_PARTITION_ROI` set, the knob unset and `=off` each pack at rc 0 with no tie line, so the ROI refusal turns on the knob and not on the ROI alone |
+| roi-knob-on-refused | knob on with the rectangle given through the environment alias `NEXTPNR_PARTITION_ROI`: the netlist is refused, and packing stops with `knob/dram_tie_unread_di=on is refused: NEXTPNR_PARTITION_ROI is set` |
+| roi-set-knob-on-refused | knob on with the rectangle given as `--set knob/partition_roi`: the netlist is refused, and packing stops with `knob/dram_tie_unread_di=on is refused: knob/partition_roi is set` |
+| roi-knob-unset-packs | with the rectangle given through `NEXTPNR_PARTITION_ROI`, the knob unset and `=off` each pack at rc 0, the log names the ROI as read from that environment alias and shows it active, and there is no tie line, so the ROI refusal turns on the knob and not on the ROI alone |
+| roi-set-knob-unset-packs | as roi-knob-unset-packs, with the rectangle given as `--set knob/partition_roi` and the log naming it as from `--set` |
 | mutant-no-permute | the contents check reds when `r_both`'s packed `INIT` is replaced by the unpermuted lanes |
 | mutant-driven-bit | the contents check reds when `r_mixed`'s bit 4, which port A drives, is moved to VCC with its `INIT` permuted |
 | mutant-skip-port-d | the contents check reds when `r_dfree`'s bit 4, which only `ADDRD` drives, is moved to VCC with its `INIT` permuted, as a packer that tested ports A to C alone would |

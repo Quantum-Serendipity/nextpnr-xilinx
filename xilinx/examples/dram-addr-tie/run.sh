@@ -63,10 +63,8 @@ for run in off on offx; do
         exit 1
     fi
 done
-if ! pack "$OUT/stripped.json" "$OUT/stripped-off"; then
-    echo "FAIL pack stripped knob off: $(grep -m1 '^ERROR' "$OUT/stripped-off.log")"
-    exit 1
-fi
+stripped_rc=0
+pack "$OUT/stripped.json" "$OUT/stripped-off" || stripped_rc=$?
 
 check() {
     local arm=$1 mode=$2 pre=$3 run=$4 knob=$5 out
@@ -99,7 +97,11 @@ check knob-off-explicit same-as-unset packed-off packed-offx off
 check contents-knob-on contents top packed-on on
 check count-knob-on count top packed-on on
 check unread-data-on data top packed-on on
-check stripped-knob-off stripped stripped stripped-off off
+if [ "$stripped_rc" -eq 0 ]; then
+    check stripped-knob-off stripped stripped stripped-off off
+else
+    report "FAIL stripped-knob-off: the knob-unset pack stopped at rc $stripped_rc: $(grep -m1 '^ERROR' "$OUT/stripped-off.log")"
+fi
 check mutant-no-permute mutant-no-permute top packed-off off
 check mutant-driven-bit mutant-driven-bit top packed-off off
 check mutant-skip-port-d mutant-skip-port-d top packed-off off
@@ -111,30 +113,46 @@ printf '{"info": {"GRID_X_MIN": 10, "GRID_X_MAX": 28, "GRID_Y_MIN": 105, "GRID_Y
 NEXTPNR_PARTITION_ROI="$OUT/roi.json" refused roi-knob-on-refused "$OUT/packed-roi" \
     "knob/dram_tie_unread_di=on is refused: NEXTPNR_PARTITION_ROI is set" \
     "$OUT/top.json" "$OUT/packed-roi" --xdc "$HERE/top.xdc" "${KNOB_ON[@]}"
+refused roi-set-knob-on-refused "$OUT/packed-roi-set" \
+    "knob/dram_tie_unread_di=on is refused: knob/partition_roi is set" \
+    "$OUT/top.json" "$OUT/packed-roi-set" --xdc "$HERE/top.xdc" --set knob/partition_roi="$OUT/roi.json" \
+    "${KNOB_ON[@]}"
+TIE_RE='Tied [0-9]+ tied-low RAM32M/RAM64M data inputs high'
 roi_unset_packs() {
-    local run knob rc why=""
+    local arm=$1 via=$2 run knob roi=() from base rc why=""
+    if [ "$via" = env ]; then
+        from="environment NEXTPNR_PARTITION_ROI"
+    else
+        from="--set"
+        roi=(--set knob/partition_roi="$OUT/roi.json")
+    fi
     for run in unset off; do
         knob=()
         [ "$run" = off ] && knob=(--set knob/dram_tie_unread_di=off)
-        NEXTPNR_PARTITION_ROI="$OUT/roi.json" pack "$OUT/top.json" "$OUT/packed-roi-$run" --xdc "$HERE/top.xdc" \
-            ${knob[@]+"${knob[@]}"}
+        base="$OUT/packed-roi-$via-$run"
+        (
+            [ "$via" = env ] && export NEXTPNR_PARTITION_ROI="$OUT/roi.json"
+            pack "$OUT/top.json" "$base" --xdc "$HERE/top.xdc" ${roi[@]+"${roi[@]}"} ${knob[@]+"${knob[@]}"}
+        )
         rc=$?
         if [ "$rc" -ne 0 ]; then
-            why="$why knob $run: rc $rc: $(grep -m1 '^ERROR' "$OUT/packed-roi-$run.log");"
-        elif ! grep -q 'knob knob/partition_roi=' "$OUT/packed-roi-$run.log"; then
-            why="$why knob $run: the log names no partition ROI;"
-        elif grep -qE "$TIE_RE" "$OUT/packed-roi-$run.log"; then
+            why="$why knob $run: rc $rc: $(grep -m1 '^ERROR' "$base.log");"
+        elif ! grep -qF "knob knob/partition_roi=$OUT/roi.json (from $from" "$base.log"; then
+            why="$why knob $run: the log does not name the partition ROI from $from;"
+        elif ! grep -qF "partition ROI: grid (10,105)-(28,155)" "$base.log"; then
+            why="$why knob $run: the log shows no active partition ROI;"
+        elif grep -qE "$TIE_RE" "$base.log"; then
             why="$why knob $run: a data-input tie line;"
         fi
     done
     if [ -z "$why" ]; then
-        report "PASS roi-knob-unset-packs: with NEXTPNR_PARTITION_ROI set, the knob unset and =off each pack at rc 0 with no tie line"
+        report "PASS $arm: with the ROI from $from, the knob unset and =off each pack at rc 0 with no tie line"
     else
-        report "FAIL roi-knob-unset-packs:$why"
+        report "FAIL $arm:$why"
     fi
 }
-TIE_RE='Tied [0-9]+ tied-low RAM32M/RAM64M data inputs high'
-roi_unset_packs
+roi_unset_packs roi-knob-unset-packs env
+roi_unset_packs roi-set-knob-unset-packs set
 
 value_refused() {
     local v rc why="" n=0

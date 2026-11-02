@@ -255,8 +255,9 @@ void XilinxPacker::pack_dram()
                   "port-stripped region netlist, where a RAM output with no reader here can still be read outside "
                   "it\n");
     if (tie_unread_di && ctx->roi_active())
-        log_error("knob/dram_tie_unread_di=on is refused: NEXTPNR_PARTITION_ROI is set, and a partition run's "
-                  "netlist need not hold every reader of a RAM output\n");
+        log_error("knob/dram_tie_unread_di=on is refused: %s is set, and a partition run's netlist need not hold "
+                  "every reader of a RAM output\n",
+                  ctx->roi_source.c_str());
     for (auto cell : sorted(ctx->cells)) {
         CellInfo *ci = cell.second;
         const std::string &type = ci->type.str(ctx);

@@ -965,6 +965,7 @@ struct Arch : BaseCtx
 
     mutable int roi_x0 = -1, roi_y0 = -1, roi_x1 = -1, roi_y1 = -1;
     mutable bool roi_loaded = false;
+    mutable std::string roi_source;
     void load_partition_roi() const;
 
     struct RoiRect
