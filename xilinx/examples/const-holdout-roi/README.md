@@ -11,7 +11,7 @@ CHIPDB=/path/to/xc7a100tfgg484.bin YOSYS=yosys NEXTPNR=/path/to/nextpnr-xilinx .
 
 `PRJXRAY_DB` names the prjxray-db root (default: this fork's `xilinx/external/prjxray-db`
 submodule); `run.sh` reads `artix7/xc7a100t/tilegrid.json` and `artix7/ppips_int_*.db` from it.
-`RADIUS` (default 1000 tiles, wider than the device) bounds the bels the blacklist arms withhold, so they withhold every free LUT bel outside the kept class and do not depend on the binary's own search radius. `NPNR_TIMEOUT` bounds each nextpnr run in seconds. `run.sh` exits
+`RADIUS` (default 1000 tiles, wider than the device) bounds the bels the blacklist arms withhold, so they withhold every free LUT bel outside the kept class and do not depend on the binary's own search radius. `run.sh` unsets `NEXTPNR_PARTITION_ROI` before its first run, so a rectangle in the caller's environment reaches no arm; an arm that uses the alias sets it on its own command. `NPNR_TIMEOUT` bounds each nextpnr run in seconds. `run.sh` exits
 non-zero if any arm fails and leaves its outputs in `$OUT` (a fresh `mktemp -d` by default).
 
 | arm | passes when |

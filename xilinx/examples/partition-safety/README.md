@@ -11,7 +11,7 @@ CHIPDB=/path/to/xc7a100tfgg484.bin YOSYS=yosys NEXTPNR=/path/to/nextpnr-xilinx .
 The rectangles are chosen from the base route, so `run.sh` reads prjxray-db's
 `artix7/xc7a100t/tilegrid.json` to turn tile names into grid coordinates. `PRJXRAY_DB` names the
 database root; the default is this fork's `xilinx/external/prjxray-db` submodule. `geom.py` does the
-lookups. The pre-place arms need a nextpnr built with Python. `NPNR_TIMEOUT` bounds each nextpnr run in seconds (default 600). `run.sh` exits non-zero if any arm
+lookups. The pre-place arms need a nextpnr built with Python. `run.sh` unsets `NEXTPNR_PARTITION_ROI` before its first run, so a rectangle in the caller's environment reaches no arm; an arm that uses the alias sets it on its own command. `NPNR_TIMEOUT` bounds each nextpnr run in seconds (default 600). `run.sh` exits non-zero if any arm
 fails and leaves its outputs in `$OUT` (a fresh `mktemp -d` by default). `CHIPDB_OTHER` names a second
 chipdb whose pip naming differs from `CHIPDB`'s (another chipdb revision); unset, the arm that needs it
 prints `SKIP` and does not count.

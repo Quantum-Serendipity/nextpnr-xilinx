@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -uo pipefail
+unset NEXTPNR_PARTITION_ROI
 
 abspath() {
     case $1 in

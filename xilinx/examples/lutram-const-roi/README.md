@@ -15,7 +15,7 @@ CHIPDB=/path/to/xc7a100tfgg484.bin YOSYS=yosys NEXTPNR=/path/to/nextpnr-xilinx .
 
 `PRJXRAY_DB` names the prjxray-db root (default: this fork's `xilinx/external/prjxray-db`
 submodule); `run.sh` reads only `artix7/xc7a100t/tilegrid.json` from it and nothing else outside
-this directory. `NPNR_TIMEOUT` bounds each nextpnr run in seconds. `run.sh` exits non-zero if any
+this directory. `run.sh` unsets `NEXTPNR_PARTITION_ROI` before its first run, so a rectangle in the caller's environment reaches no arm; an arm that uses the alias sets it on its own command. `NPNR_TIMEOUT` bounds each nextpnr run in seconds. `run.sh` exits non-zero if any
 arm fails and leaves its outputs in `$OUT` (a fresh `mktemp -d` by default).
 
 | arm | passes when |

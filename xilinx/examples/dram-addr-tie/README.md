@@ -28,7 +28,7 @@ netlist, so with the knob on the netlist is refused.
 CHIPDB=/path/to/xc7a100tfgg484.bin YOSYS=yosys NEXTPNR=/path/to/nextpnr-xilinx ./run.sh
 ```
 
-`NPNR_TIMEOUT` bounds each nextpnr run in seconds. `run.sh` exits non-zero if any arm fails and
+`run.sh` unsets `NEXTPNR_PARTITION_ROI` before its first run, so a rectangle in the caller's environment reaches no arm; an arm that uses the alias sets it on its own command. `NPNR_TIMEOUT` bounds each nextpnr run in seconds. `run.sh` exits non-zero if any arm fails and
 leaves its outputs in `$OUT` (a fresh `mktemp -d` by default).
 
 | arm | passes when |
@@ -52,11 +52,11 @@ leaves its outputs in `$OUT` (a fresh `mktemp -d` by default).
 | roi-set-key-refused | the same file given as `--set knob/partition_roi` stops the run with `knob/partition_roi: '<file>' carries key "bogus"` |
 | roi-grid-refused | a rectangle with `GRID_X_MAX` 9999, given through `NEXTPNR_PARTITION_ROI`, stops the run with `NEXTPNR_PARTITION_ROI: '<file>' rectangle grid (10,105)-(9999,155) does not fit the device grid` |
 | roi-set-grid-refused | the same file given as `--set knob/partition_roi` stops the run with the same refusal naming `knob/partition_roi` |
-
-Every run that passes the rectangle as `--set knob/partition_roi` runs with `NEXTPNR_PARTITION_ROI` removed from its
-environment, so it reads the rectangle through the knob or not at all.
 | mutant-no-permute | the contents check reds when `r_both`'s packed `INIT` is replaced by the unpermuted lanes |
 | mutant-driven-bit | the contents check reds when `r_mixed`'s bit 4, which port A drives, is moved to VCC with its `INIT` permuted |
 | mutant-skip-port-d | the contents check reds when `r_dfree`'s bit 4, which only `ADDRD` drives, is moved to VCC with its `INIT` permuted, as a packer that tested ports A to C alone would |
 | knob-value-refused | each of `maybe`, `0`, `1`, `ON`, `Off` and `on1` stops the run with `is neither on nor off`; the value is matched as lowercase `on` or `off` and nothing else |
 | knob-value-refused-no-pack | the same value stops a `--no-pack --no-place --no-route` run over the packed netlist |
+
+Every run that passes the rectangle as `--set knob/partition_roi` runs with `NEXTPNR_PARTITION_ROI` removed from its
+environment, so it reads the rectangle through the knob or not at all.
