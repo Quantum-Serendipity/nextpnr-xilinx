@@ -20,6 +20,9 @@
       devShell = forAllSystems (system:
         let nixpkgs = nixpkgsFor.${system};
           in nixpkgs.mkShell {
+          nativeBuildInputs = (with nixpkgsFor.${system}; [
+              pkg-config
+           ]);
           buildInputs = (with nixpkgsFor.${system}; [
               findutils
               gnused
