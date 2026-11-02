@@ -22,7 +22,7 @@ skip. Every cell has a distinct non-zero `INIT_A` to `INIT_D`:
 `stripped.v` is a RAM32M with `INIT_A` all ones, `DIA` tied to 0 and `DOA` on a top output,
 synthesised with `-noiopad -noclkbuf`; `check.py strip` then empties the module's ports, which is what
 a port-stripped region netlist looks like. `DOA` is read in the design but has no reader in that
-netlist.
+netlist, so the knob is refused for it.
 
 ```
 CHIPDB=/path/to/xc7a100tfgg484.bin YOSYS=yosys NEXTPNR=/path/to/nextpnr-xilinx ./run.sh
@@ -41,8 +41,10 @@ leaves its outputs in `$OUT` (a fresh `mktemp -d` by default).
 | contents-knob-on, count-knob-on | as contents and count, over the knob-on run |
 | unread-data-on | knob on: the tie line counts five, and exactly the data inputs the table moves are on VCC |
 | stripped-knob-off | knob unset: `stripped.v`'s port A `DI1`/`DI2` stay on GND |
-| stripped-knob-on | knob on: the same pins are on VCC, which is the write corruption the knob causes in a netlist that does not hold every reader; it passes to record that the knob is unsafe there |
+| stripped-knob-on-refused | knob on: packing `stripped.v` stops with `knob/dram_tie_unread_di=on is refused: the netlist has no top-level ports` |
+| roi-knob-on-refused | knob on with `NEXTPNR_PARTITION_ROI` set: packing stops with the refusal that names it |
 | mutant-no-permute | the contents check reds when `r_both`'s packed `INIT` is replaced by the unpermuted lanes |
 | mutant-driven-bit | the contents check reds when `r_mixed`'s bit 4, which port A drives, is moved to VCC with its `INIT` permuted |
 | mutant-skip-port-d | the contents check reds when `r_dfree`'s bit 4, which only `ADDRD` drives, is moved to VCC with its `INIT` permuted, as a packer that tested ports A to C alone would |
 | knob-value-refused | `--set knob/dram_tie_unread_di=maybe` stops the run and names `on` and `off` |
+| knob-value-refused-no-pack | the same value stops a `--no-pack --no-place --no-route` run over the packed netlist |

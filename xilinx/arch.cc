@@ -82,6 +82,16 @@ static bool env_says_off(const char *name)
     return v != nullptr && std::string(v) == "off";
 }
 
+bool Arch::dram_tie_unread_di() const
+{
+    const char *v = knobs::get("knob/dram_tie_unread_di");
+    if (v == nullptr || std::string(v) == "off")
+        return false;
+    if (std::string(v) != "on")
+        log_error("knob/dram_tie_unread_di=%s is refused: the value is on or off\n", v);
+    return true;
+}
+
 Arch::Arch(ArchArgs args) : args(args)
 {
     try {

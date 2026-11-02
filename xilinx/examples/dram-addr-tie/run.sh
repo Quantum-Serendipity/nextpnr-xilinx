@@ -54,20 +54,17 @@ fi
 echo "INFO $(cat "$OUT/edit.txt"); stripped.v: $(cat "$OUT/strip.txt")"
 
 KNOB_ON=(--set knob/dram_tie_unread_di=on)
-for run in off on; do
+for run in off on offx; do
     knob=()
     [ "$run" = on ] && knob=("${KNOB_ON[@]}")
+    [ "$run" = offx ] && knob=(--set knob/dram_tie_unread_di=off)
     if ! pack "$OUT/top.json" "$OUT/packed-$run" --xdc "$HERE/top.xdc" ${knob[@]+"${knob[@]}"}; then
         echo "FAIL pack knob $run: $(grep -m1 '^ERROR' "$OUT/packed-$run.log")"
         exit 1
     fi
-    if ! pack "$OUT/stripped.json" "$OUT/stripped-$run" ${knob[@]+"${knob[@]}"}; then
-        echo "FAIL pack stripped knob $run: $(grep -m1 '^ERROR' "$OUT/stripped-$run.log")"
-        exit 1
-    fi
 done
-if ! pack "$OUT/top.json" "$OUT/packed-offx" --xdc "$HERE/top.xdc" --set knob/dram_tie_unread_di=off; then
-    echo "FAIL pack knob off explicit: $(grep -m1 '^ERROR' "$OUT/packed-offx.log")"
+if ! pack "$OUT/stripped.json" "$OUT/stripped-off"; then
+    echo "FAIL pack stripped knob off: $(grep -m1 '^ERROR' "$OUT/stripped-off.log")"
     exit 1
 fi
 
@@ -81,6 +78,19 @@ check() {
     fi
 }
 
+refused() {
+    local arm=$1 base=$2 want=$3
+    shift 3
+    local rc
+    pack "$@"
+    rc=$?
+    if [ "$rc" -ne 0 ] && grep -qF "ERROR: $want" "$base.log"; then
+        report "PASS $arm: rc $rc, $want"
+    else
+        report "FAIL $arm: rc $rc: $(grep -m1 '^ERROR' "$base.log")"
+    fi
+}
+
 check contents contents top packed-off off
 check count count top packed-off off
 check skip-init skip-init top packed-off off
@@ -90,17 +100,26 @@ check contents-knob-on contents top packed-on on
 check count-knob-on count top packed-on on
 check unread-data-on data top packed-on on
 check stripped-knob-off stripped stripped stripped-off off
-check stripped-knob-on stripped stripped stripped-on on
 check mutant-no-permute mutant-no-permute top packed-off off
 check mutant-driven-bit mutant-driven-bit top packed-off off
 check mutant-skip-port-d mutant-skip-port-d top packed-off off
 
-pack "$OUT/top.json" "$OUT/packed-bad" --xdc "$HERE/top.xdc" --set knob/dram_tie_unread_di=maybe
-rc=$?
-if [ "$rc" -ne 0 ] && grep -q '^ERROR: knob/dram_tie_unread_di=maybe is refused: the value is on or off' "$OUT/packed-bad.log"; then
-    report "PASS knob-value-refused: --set knob/dram_tie_unread_di=maybe stops the run at rc $rc and names the two values"
+refused stripped-knob-on-refused "$OUT/stripped-on" \
+    "knob/dram_tie_unread_di=on is refused: the netlist has no top-level ports" \
+    "$OUT/stripped.json" "$OUT/stripped-on" "${KNOB_ON[@]}"
+printf '{"info": {"GRID_X_MIN": 10, "GRID_X_MAX": 28, "GRID_Y_MIN": 105, "GRID_Y_MAX": 155}}\n' >"$OUT/roi.json"
+NEXTPNR_PARTITION_ROI="$OUT/roi.json" refused roi-knob-on-refused "$OUT/packed-roi" \
+    "knob/dram_tie_unread_di=on is refused: NEXTPNR_PARTITION_ROI is set" \
+    "$OUT/top.json" "$OUT/packed-roi" --xdc "$HERE/top.xdc" "${KNOB_ON[@]}"
+refused knob-value-refused "$OUT/packed-bad" "knob/dram_tie_unread_di=maybe is refused: the value is on or off" \
+    "$OUT/top.json" "$OUT/packed-bad" --xdc "$HERE/top.xdc" --set knob/dram_tie_unread_di=maybe
+rc=0
+timeout "$NPNR_TIMEOUT" "$NEXTPNR" --chipdb "$CHIPDB" --json "$OUT/packed-off.json" --no-pack --no-place --no-route \
+    --set knob/dram_tie_unread_di=maybe --log "$OUT/nopack-bad.log" -q >/dev/null 2>&1 || rc=$?
+if [ "$rc" -ne 0 ] && grep -qF "ERROR: knob/dram_tie_unread_di=maybe is refused: the value is on or off" "$OUT/nopack-bad.log"; then
+    report "PASS knob-value-refused-no-pack: --no-pack --no-place --no-route with =maybe stops at rc $rc"
 else
-    report "FAIL knob-value-refused: rc $rc: $(grep -m1 '^ERROR' "$OUT/packed-bad.log")"
+    report "FAIL knob-value-refused-no-pack: rc $rc: $(grep -m1 '^ERROR' "$OUT/nopack-bad.log")"
 fi
 
 echo "outputs in $OUT"

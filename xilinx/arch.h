@@ -999,6 +999,8 @@ struct Arch : BaseCtx
     mutable int64_t roi_veto_cell = 0;
     mutable int64_t roi_veto_loc = 0;
 
+    bool dram_tie_unread_di() const;
+
     bool roi_active() const
     {
         if (!roi_loaded)

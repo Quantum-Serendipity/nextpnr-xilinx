@@ -25,7 +25,6 @@
 #include "cells.h"
 #include "chain_utils.h"
 #include "design_utils.h"
-#include "knobs.h"
 #include "log.h"
 #include "nextpnr.h"
 #include "pack.h"
@@ -250,13 +249,14 @@ void XilinxPacker::pack_dram()
         }
     }
     int multiport_bits = 0, multiport_cells = 0, unread_data_inputs = 0;
-    bool tie_unread_di = false;
-    if (const char *v = knobs::get("knob/dram_tie_unread_di")) {
-        if (std::string(v) == "on")
-            tie_unread_di = true;
-        else if (std::string(v) != "off")
-            log_error("knob/dram_tie_unread_di=%s is refused: the value is on or off\n", v);
-    }
+    bool tie_unread_di = ctx->dram_tie_unread_di();
+    if (tie_unread_di && ctx->ports.empty())
+        log_error("knob/dram_tie_unread_di=on is refused: the netlist has no top-level ports, the shape of a "
+                  "port-stripped region netlist, where a RAM output with no reader here can still be read outside "
+                  "it\n");
+    if (tie_unread_di && ctx->roi_active())
+        log_error("knob/dram_tie_unread_di=on is refused: NEXTPNR_PARTITION_ROI is set, and a partition run's "
+                  "netlist need not hold every reader of a RAM output\n");
     for (auto cell : sorted(ctx->cells)) {
         CellInfo *ci = cell.second;
         const std::string &type = ci->type.str(ctx);

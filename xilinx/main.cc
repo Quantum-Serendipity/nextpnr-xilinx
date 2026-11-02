@@ -147,6 +147,7 @@ void UspCommandHandler::customAfterLoad(Context *ctx)
         if (vm.count("no-pack"))
             ctx->apply_generated_clocks();
     }
+    (void)ctx->dram_tie_unread_di();
     ctx->snapshot_rm_cells();
     if (vm.count("no-pack") && !vm.count("pack-only"))
         ctx->warn_prepacked_x9_parity();
