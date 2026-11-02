@@ -46,6 +46,8 @@ leaves its outputs in `$OUT` (a fresh `mktemp -d` by default).
 | roi-set-knob-on-refused | knob on with the rectangle given as `--set knob/partition_roi`: the netlist is refused, and packing stops with `knob/dram_tie_unread_di=on is refused: knob/partition_roi is set` |
 | roi-knob-unset-packs | with the rectangle given through `NEXTPNR_PARTITION_ROI`, the knob unset and `=off` each pack at rc 0, the log names the ROI as read from that environment alias and shows it active, and there is no tie line, so the ROI refusal turns on the knob and not on the ROI alone |
 | roi-set-knob-unset-packs | as roi-knob-unset-packs, with the rectangle given as `--set knob/partition_roi` and the log naming it as from `--set` |
+| roi-file-refused | a rectangle file that does not exist, given through `NEXTPNR_PARTITION_ROI`, stops the run with `NEXTPNR_PARTITION_ROI: cannot open` |
+| roi-set-file-refused | the same file given as `--set knob/partition_roi` stops the run with `knob/partition_roi: cannot open` |
 | mutant-no-permute | the contents check reds when `r_both`'s packed `INIT` is replaced by the unpermuted lanes |
 | mutant-driven-bit | the contents check reds when `r_mixed`'s bit 4, which port A drives, is moved to VCC with its `INIT` permuted |
 | mutant-skip-port-d | the contents check reds when `r_dfree`'s bit 4, which only `ADDRD` drives, is moved to VCC with its `INIT` permuted, as a packer that tested ports A to C alone would |

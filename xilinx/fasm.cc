@@ -5756,7 +5756,7 @@ void Arch::writeFasm(const std::string &filename, bool region_only)
         FasmBackend be(getCtx(), out);
         if (region_only) {
             if (!roi_active())
-                log_error("--region-only needs a partition rectangle; set NEXTPNR_PARTITION_ROI\n");
+                log_error("--region-only needs a partition rectangle; pass --set knob/partition_roi=<file>\n");
             be.region_filter = true;
             be.rx0 = roi_x0;
             be.ry0 = roi_y0;

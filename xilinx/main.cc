@@ -62,7 +62,7 @@ po::options_description UspCommandHandler::getArchOptions()
     specific.add_options()("write-fixed-routes", po::value<std::string>(),
                            "after routing, dump fabric routing in --fixed-routes format");
     specific.add_options()("region-only",
-                           "restrict --fasm and --write-fixed-routes output to the NEXTPNR_PARTITION_ROI rectangle");
+                           "restrict --fasm and --write-fixed-routes output to the knob/partition_roi rectangle");
     specific.add_options()("allow-const-holdouts",
                            "only warn when a constant (GND/VCC) sink cannot be driven; the pin's silicon "
                            "value is then undefined (default: error).  Does not cover a constant driver "

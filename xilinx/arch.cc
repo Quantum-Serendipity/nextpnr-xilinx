@@ -1851,10 +1851,9 @@ void Arch::applyFixedRoutes(const std::string &filename, std::function<void()> r
                           "different pips here\n",
                           filename.c_str(), file_identity.c_str(), mine.c_str());
             if (!have_identity && index_form > 0 && roi_active())
-                log_error("fixed-routes: '%s' carries %d index-form pip line(s) and no '%s' line, and "
-                          "NEXTPNR_PARTITION_ROI is set; nothing says these indices were cut against this chipdb "
-                          "('%s')\n",
-                          filename.c_str(), index_form, id_tag.c_str(), mine.c_str());
+                log_error("fixed-routes: '%s' carries %d index-form pip line(s) and no '%s' line, and %s is "
+                          "set; nothing says these indices were cut against this chipdb ('%s')\n",
+                          filename.c_str(), index_form, id_tag.c_str(), roi_source.c_str(), mine.c_str());
             if (have_identity)
                 log_info("    fixed-routes: chipdb identity '%s' matches\n", mine.c_str());
         }
@@ -2591,7 +2590,7 @@ void Arch::writeFileReplacing(const std::string &filename, const char *what,
 void Arch::writeFixedRoutes(const std::string &filename, bool region_only) const
 {
     if (region_only && !roi_active())
-        log_error("--region-only needs a partition rectangle; set NEXTPNR_PARTITION_ROI\n");
+        log_error("--region-only needs a partition rectangle; pass --set knob/partition_roi=<file>\n");
     if (region_only && partition_nets().empty())
         log_error("--region-only: the partition rectangle governs no nets, so --write-fixed-routes would cut every "
                   "net at the rectangle edge with nothing checked; an RM partial needs an RM cell set, which a placed "
@@ -3120,19 +3119,20 @@ bool Arch::route()
                            : p.as_int64() != 0;
     };
     if (roi_active() && (knobs::get("NEXTPNR_SKIP_FAILED_ARCS") != nullptr || router1_skip_setting()))
-        log_error("knob/skip_failed_arcs or the router1/skipFailedArcs setting is set and NEXTPNR_PARTITION_ROI is "
-                  "set; the router would accept a partial route and this run would write it as routed under a "
-                  "partition rectangle. Drop --set knob/skip_failed_arcs and remove router1/skipFailedArcs from the "
-                  "input netlist's settings.\n");
+        log_error("knob/skip_failed_arcs or the router1/skipFailedArcs setting is set and %s is set; the router "
+                  "would accept a partial route and this run would write it as routed under a partition rectangle. "
+                  "Drop --set knob/skip_failed_arcs and remove router1/skipFailedArcs from the input netlist's "
+                  "settings.\n",
+                  roi_source.c_str());
     auto run_router = [&]() {
         if (router == "router1") {
             if (roi_active()) {
                 if (!env_says_off("NEXTPNR_PARTITION_CLAMP") || !env_says_off("NEXTPNR_PARTITION_KEEPOUT"))
-                    log_error("router1 has neither the partition route clamp nor the static keepout, and "
-                              "NEXTPNR_PARTITION_ROI is set. Route with router2; the router may also come from a "
-                              "'router' setting stored in the input netlist. Running router1 under a rectangle "
-                              "needs NEXTPNR_PARTITION_CLAMP=off and NEXTPNR_PARTITION_KEEPOUT=off, which say that "
-                              "neither mechanism is wanted.\n");
+                    log_error("router1 has neither the partition route clamp nor the static keepout, and %s is "
+                              "set. Route with router2; the router may also come from a 'router' setting stored in "
+                              "the input netlist. Running router1 under a rectangle needs NEXTPNR_PARTITION_CLAMP=off "
+                              "and NEXTPNR_PARTITION_KEEPOUT=off, which say that neither mechanism is wanted.\n",
+                              roi_source.c_str());
                 log_warning("partition route clamp and static keepout: both DISABLED, routing with router1\n");
             }
             result = router1(getCtx(), Router1Cfg(getCtx()));
@@ -4607,6 +4607,7 @@ struct RoiJsonScan
 {
     const std::string &s;
     const char *fn;
+    const char *src;
     size_t p = 0;
 
     std::map<std::string, std::set<std::string>> containers;
@@ -4617,7 +4618,7 @@ struct RoiJsonScan
 
     std::map<std::string, size_t> value_at;
 
-    RoiJsonScan(const std::string &str, const char *file) : s(str), fn(file) {}
+    RoiJsonScan(const std::string &str, const char *file, const char *source) : s(str), fn(file), src(source) {}
 
     void ws()
     {
@@ -4627,8 +4628,7 @@ struct RoiJsonScan
 
     void bad(const std::string &why) const
     {
-        log_error("NEXTPNR_PARTITION_ROI: '%s' is not a well-formed ROI object: %s (at byte %d)\n", fn, why.c_str(),
-                  int(p));
+        log_error("%s: '%s' is not a well-formed ROI object: %s (at byte %d)\n", src, fn, why.c_str(), int(p));
     }
 
     std::string str_lit()
@@ -4751,20 +4751,19 @@ struct RoiJsonScan
                 std::string allowed;
                 for (const std::string &k : legal)
                     allowed += (allowed.empty() ? "" : ", ") + k;
-                log_error("NEXTPNR_PARTITION_ROI: '%s' carries key \"%s\", which this ROI parser does not act on. "
+                log_error("%s: '%s' carries key \"%s\", which this ROI parser does not act on. "
                           "Refusing rather than ignoring it: a key nextpnr does not read cannot influence placement, "
                           "so accepting it would silently build a rectangle that is not the one the file describes. "
                           "Legal %s: %s\n",
-                          fn, full.c_str(),
+                          src, fn, full.c_str(),
                           legal_path.empty() ? "top-level keys" : ("keys inside \"" + legal_path + "\"").c_str(),
                           allowed.c_str());
             }
 
             size_t val = p;
             if (!value_at.emplace(full, val).second)
-                log_error("NEXTPNR_PARTITION_ROI: '%s' names \"%s\" more than once; the rectangle it describes is "
-                          "ambiguous\n",
-                          fn, full.c_str());
+                log_error("%s: '%s' names \"%s\" more than once; the rectangle it describes is ambiguous\n", src, fn,
+                          full.c_str());
 
             if (skip_subtree.count(legal_full)) {
                 skip_value();
@@ -4773,11 +4772,11 @@ struct RoiJsonScan
                         char d = s[q];
                         if (d == '[' || d == ']' || d == ' ' || d == '\t' || d == '\n' || d == '\r')
                             continue;
-                        log_error("NEXTPNR_PARTITION_ROI: '%s' has a non-empty \"%s\". nextpnr does not act on it, "
+                        log_error("%s: '%s' has a non-empty \"%s\". nextpnr does not act on it, "
                                   "and unlike an empty one it is not inert: it makes a claim about the same "
                                   "rectangle this run is placing into that the placer cannot see. Refusing rather "
                                   "than ignoring it\n",
-                                  fn, full.c_str());
+                                  src, fn, full.c_str());
                     }
                 }
             } else if (array_of_objects.count(legal_full)) {
@@ -4811,7 +4810,7 @@ void Arch::load_partition_roi() const
     roi_source = knobs::source("NEXTPNR_PARTITION_ROI");
     std::ifstream in(f);
     if (!in)
-        log_error("NEXTPNR_PARTITION_ROI: cannot open '%s'\n", f);
+        log_error("%s: cannot open '%s'\n", roi_source.c_str(), f);
     std::string all((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
 
     const std::pair<const char *, int *> consumed[] = {
@@ -4821,7 +4820,7 @@ void Arch::load_partition_roi() const
             {"info.GRID_Y_MAX", &roi_y1},
     };
 
-    RoiJsonScan scan(all, f);
+    RoiJsonScan scan(all, f, roi_source.c_str());
     for (const auto &c : consumed) {
         std::string path(c.first);
         size_t dot = path.rfind('.');
@@ -4846,7 +4845,7 @@ void Arch::load_partition_roi() const
     scan.walk_object("");
     scan.ws();
     if (scan.p != all.size())
-        log_error("NEXTPNR_PARTITION_ROI: '%s' has trailing content after the ROI object (at byte %d)\n", f,
+        log_error("%s: '%s' has trailing content after the ROI object (at byte %d)\n", roi_source.c_str(), f,
                   int(scan.p));
 
     auto read_rect = [&](const std::string &prefix, int &x0, int &y0, int &x1, int &y1) {
@@ -4859,20 +4858,18 @@ void Arch::load_partition_roi() const
             std::string key = prefix + std::string(c.first).substr(std::string(c.first).find('.'));
             auto it = scan.value_at.find(key);
             if (it == scan.value_at.end())
-                log_error("NEXTPNR_PARTITION_ROI: '%s' has no \"%s\" key\n", f, key.c_str());
+                log_error("%s: '%s' has no \"%s\" key\n", roi_source.c_str(), f, key.c_str());
             const char *v = all.c_str() + it->second;
             if (!(isdigit((unsigned char)*v) || (*v == '-' && isdigit((unsigned char)v[1]))))
-                log_error("NEXTPNR_PARTITION_ROI: '%s' key \"%s\" is not an integer\n", f, key.c_str());
+                log_error("%s: '%s' key \"%s\" is not an integer\n", roi_source.c_str(), f, key.c_str());
             *dst = int(strtol(v, nullptr, 10));
         }
         if (x0 < 0 || y0 < 0 || x1 < x0 || y1 < y0)
-            log_error("NEXTPNR_PARTITION_ROI: '%s' gives an empty or inverted rectangle "
-                      "grid (%d,%d)-(%d,%d)\n",
-                      f, x0, y0, x1, y1);
+            log_error("%s: '%s' gives an empty or inverted rectangle grid (%d,%d)-(%d,%d)\n", roi_source.c_str(), f, x0,
+                      y0, x1, y1);
         if (x1 >= chip_info->width || y1 >= chip_info->height)
-            log_error("NEXTPNR_PARTITION_ROI: '%s' rectangle grid (%d,%d)-(%d,%d) does not fit the "
-                      "device grid %dx%d\n",
-                      f, x0, y0, x1, y1, int(chip_info->width), int(chip_info->height));
+            log_error("%s: '%s' rectangle grid (%d,%d)-(%d,%d) does not fit the device grid %dx%d\n",
+                      roi_source.c_str(), f, x0, y0, x1, y1, int(chip_info->width), int(chip_info->height));
     };
     read_rect("info", roi_x0, roi_y0, roi_x1, roi_y1);
 
@@ -4886,9 +4883,9 @@ void Arch::load_partition_roi() const
         for (int b = a + 1; b < roi_rect_count(); b++) {
             const RoiRect ra = roi_rect(a), rb = roi_rect(b);
             if (ra.x0 <= rb.x1 && rb.x0 <= ra.x1 && ra.y0 <= rb.y1 && rb.y0 <= ra.y1)
-                log_error("NEXTPNR_PARTITION_ROI: '%s' rectangles %d (%d,%d)-(%d,%d) and %d (%d,%d)-(%d,%d) "
-                          "overlap; a net inside both has no unambiguous rectangle to be confined to\n",
-                          f, a, ra.x0, ra.y0, ra.x1, ra.y1, b, rb.x0, rb.y0, rb.x1, rb.y1);
+                log_error("%s: '%s' rectangles %d (%d,%d)-(%d,%d) and %d (%d,%d)-(%d,%d) overlap; a net inside "
+                          "both has no unambiguous rectangle to be confined to\n",
+                          roi_source.c_str(), f, a, ra.x0, ra.y0, ra.x1, ra.y1, b, rb.x0, rb.y0, rb.x1, rb.y1);
         }
 
     int inside = 0, outside = 0;
@@ -4900,9 +4897,9 @@ void Arch::load_partition_roi() const
             inside++;
     }
     if (outside == 0)
-        log_error("NEXTPNR_PARTITION_ROI: '%s' rectangle grid (%d,%d)-(%d,%d) covers every bel on "
-                  "the device -- it would confine nothing\n",
-                  f, roi_x0, roi_y0, roi_x1, roi_y1);
+        log_error("%s: '%s' rectangle grid (%d,%d)-(%d,%d) covers every bel on the device -- it would confine "
+                  "nothing\n",
+                  roi_source.c_str(), f, roi_x0, roi_y0, roi_x1, roi_y1);
     log_info("partition ROI: grid (%d,%d)-(%d,%d) from %s; %d bel(s) reserved outside, %d inside\n", roi_x0, roi_y0,
              roi_x1, roi_y1, f, outside, inside);
     for (size_t i = 0; i < roi_siblings.size(); i++)

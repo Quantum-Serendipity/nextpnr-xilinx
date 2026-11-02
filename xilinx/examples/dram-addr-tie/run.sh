@@ -153,6 +153,10 @@ roi_unset_packs() {
 }
 roi_unset_packs roi-knob-unset-packs env
 roi_unset_packs roi-set-knob-unset-packs set
+NEXTPNR_PARTITION_ROI="$OUT/absent.roi.json" refused roi-file-refused "$OUT/roi-absent-env" \
+    "NEXTPNR_PARTITION_ROI: cannot open '$OUT/absent.roi.json'" "$OUT/top.json" "$OUT/roi-absent-env"
+refused roi-set-file-refused "$OUT/roi-absent-set" "knob/partition_roi: cannot open '$OUT/absent.roi.json'" \
+    "$OUT/top.json" "$OUT/roi-absent-set" --set knob/partition_roi="$OUT/absent.roi.json"
 
 value_refused() {
     local v rc why="" n=0

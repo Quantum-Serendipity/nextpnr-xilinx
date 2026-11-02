@@ -367,19 +367,20 @@ void Arch::routeConstants(std::function<void()> reroute)
 
     std::set<std::pair<IdString, IdString>> given_up; // (cell, port) already reported
     std::vector<std::pair<ConstHoldout, const char *>> given_up_list;
-    const char *why_unplaced =
-            rm_build ? "constant LUT drivers disabled under NEXTPNR_PARTITION_ROI in a build with reconfigurable cells"
+    const std::string under_roi = " under " + roi_source;
+    const std::string why_unplaced =
+            rm_build     ? "constant LUT drivers disabled" + under_roi + " in a build with reconfigurable cells"
             : no_drivers ? "constant LUT drivers disabled"
-            : partition_rect_active
-                    ? "no route, or no free LUT bel outside every partition rectangle under NEXTPNR_PARTITION_ROI"
-                    : "no route or no free LUT bel";
-    const char *why_in_rect = "constant LUT drivers disabled for a sink inside a partition rectangle under "
-                              "NEXTPNR_PARTITION_ROI";
-    const char *why_fenced = "constant LUT drivers disabled for a sink whose interconnect lies only inside a "
-                             "partition rectangle under NEXTPNR_PARTITION_ROI";
-    const char *why_walk_exhausted = "constant LUT drivers disabled for a sink whose interconnect search exhausted its "
-                                     "budget before reaching an interconnect pip outside every partition rectangle "
-                                     "under NEXTPNR_PARTITION_ROI";
+            : partition_rect_active ? "no route, or no free LUT bel outside every partition rectangle" + under_roi
+                                    : "no route or no free LUT bel";
+    const std::string why_in_rect = "constant LUT drivers disabled for a sink inside a partition rectangle" + under_roi;
+    const std::string why_fenced =
+            "constant LUT drivers disabled for a sink whose interconnect lies only inside a partition rectangle" +
+            under_roi;
+    const std::string why_walk_exhausted = "constant LUT drivers disabled for a sink whose interconnect search "
+                                           "exhausted its budget before reaching an interconnect pip outside every "
+                                           "partition rectangle" +
+                                           under_roi;
     int fence_walk_budget = 512;
     if (const char *b = knobs::get("NEXTPNR_CONST_FENCE_WALK_BUDGET"))
         fence_walk_budget = atoi(b);
@@ -459,16 +460,16 @@ void Arch::routeConstants(std::function<void()> reroute)
             }
             const bool sink_in_partition_rect = partition_rect_at(getBelLocation(h.cell->bel)) >= 0;
             if (sink_in_partition_rect) {
-                give_up(h, why_in_rect);
+                give_up(h, why_in_rect.c_str());
                 continue;
             }
             const SinkReach reach = partition_rect_active ? interconnect_outside_rects(sink) : SinkReach::Outside;
             if (reach == SinkReach::Fenced) {
-                give_up(h, why_fenced);
+                give_up(h, why_fenced.c_str());
                 continue;
             }
             if (reach == SinkReach::Exhausted) {
-                give_up(h, why_walk_exhausted);
+                give_up(h, why_walk_exhausted.c_str());
                 continue;
             }
             real.push_back(h);
@@ -478,14 +479,14 @@ void Arch::routeConstants(std::function<void()> reroute)
             break;
         if (no_drivers) {
             for (auto &h : real)
-                give_up(h, why_unplaced);
+                give_up(h, why_unplaced.c_str());
             break;
         }
         const bool out_of_passes = pass >= max_passes;
         if (out_of_passes) {
             log_warning("constant holdouts remain after %d re-route pass(es)\n", pass);
             for (auto &h : real)
-                give_up(h, why_unplaced);
+                give_up(h, why_unplaced.c_str());
             break;
         }
         log_info("Constant fill left %d sink(s) unreached; driving them from local constant LUTs (pass %d)\n",
@@ -493,7 +494,7 @@ void Arch::routeConstants(std::function<void()> reroute)
         std::vector<ConstHoldout> unplaced;
         drivers += insertConstDrivers(real, unplaced);
         for (auto &h : unplaced)
-            give_up(h, why_unplaced);
+            give_up(h, why_unplaced.c_str());
         const bool nothing_placed = unplaced.size() == real.size();
         if (nothing_placed)
             break; // nothing changed, re-routing would not help

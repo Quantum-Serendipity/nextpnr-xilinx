@@ -174,20 +174,28 @@ arm_only_driver_inside_rect() {
 }
 
 arm_sink_inside_rect() {
-    local log=$OUT/sink-inside.log
+    local log=$OUT/sink-inside.log log_set=$OUT/sink-inside-set.log
     roi "$OUT/sink-rect.json" $((SX - 2)) $((SY - 2)) $((SX + 2)) $((SY + 2))
     NEXTPNR_PIP_BLACKLIST_TILE=$OUT/vcc-block.pips NEXTPNR_PARTITION_ROI=$OUT/sink-rect.json \
         timeout "$NPNR_TIMEOUT" "$NEXTPNR" --chipdb "$CHIPDB" --log "$log" -q --json "$OUT/placed.json" \
         --no-pack --no-place --write "$OUT/sink-inside-routed.json" >/dev/null 2>&1
     local rc=$?
+    NEXTPNR_PIP_BLACKLIST_TILE=$OUT/vcc-block.pips \
+        timeout "$NPNR_TIMEOUT" "$NEXTPNR" --chipdb "$CHIPDB" --log "$log_set" -q \
+        --set knob/partition_roi="$OUT/sink-rect.json" --json "$OUT/placed.json" \
+        --no-pack --no-place --write "$OUT/sink-inside-set-routed.json" >/dev/null 2>&1
+    local rc_set=$?
+    local why="constant LUT drivers disabled for a sink inside a partition rectangle under"
     if [ "$rc" -eq 0 ]; then
         report "FAIL sink inside a rectangle: rc 0 ($(geom holdouts "$OUT/sink-inside-routed.json" | head -1))"
     elif ! grep -qF "constant VCC not delivered to $SRL.WE" "$log"; then
         report "FAIL sink inside a rectangle: rc $rc but $SRL.WE is not the refused sink: $(grep -m1 '^ERROR' "$log")"
-    elif ! grep -q "not delivered to $SRL.WE .*constant LUT drivers disabled for a sink inside a partition rectangle" "$log"; then
+    elif ! grep -q "not delivered to $SRL.WE .*$why NEXTPNR_PARTITION_ROI" "$log"; then
         report "FAIL sink inside a rectangle: rc $rc for another reason: $(grep -m1 "not delivered to $SRL.WE" "$log")"
+    elif [ "$rc_set" -eq 0 ] || ! grep -q "not delivered to $SRL.WE .*$why knob/partition_roi" "$log_set"; then
+        report "FAIL sink inside a rectangle: with --set knob/partition_roi, rc $rc_set: $(grep -m1 "not delivered to $SRL.WE" "$log_set" || grep -m1 '^ERROR' "$log_set")"
     else
-        report "PASS sink inside a rectangle: refused, no driver for a sink inside it"
+        report "PASS sink inside a rectangle: refused, no driver for a sink inside it, naming NEXTPNR_PARTITION_ROI and, with --set, knob/partition_roi"
     fi
 }
 
@@ -265,31 +273,48 @@ arm_reconfigurable_cells() {
         timeout "$NPNR_TIMEOUT" "$NEXTPNR" --chipdb "$CHIPDB" --log "$log" -q --json "$OUT/rm-input.json" \
         --no-pack --seed 1 --write "$OUT/rm-routed.json" >/dev/null 2>&1
     local rc=$?
+    local log_set=$OUT/rm-set.log
+    NEXTPNR_PIP_BLACKLIST_TILE=$OUT/vcc-block-rm.pips NEXTPNR_PARTITION_NETS=warn NEXTPNR_PARTITION_CLAMP=off \
+        timeout "$NPNR_TIMEOUT" "$NEXTPNR" --chipdb "$CHIPDB" --log "$log_set" -q \
+        --set knob/partition_roi="$OUT/rm-rect.json" --json "$OUT/rm-input.json" \
+        --no-pack --seed 1 --write "$OUT/rm-set-routed.json" >/dev/null 2>&1
+    local rc_set=$?
     local n
     n=$(sed -n 's/^Info: partition RM set: \([0-9]*\) reconfigurable cell.*/\1/p' "$log" | head -1)
+    local why_a="constant LUT drivers disabled under" why_b="in a build with reconfigurable cells"
     if [ "${n:-0}" -eq 0 ]; then
         report "FAIL reconfigurable cells: the RM set is empty, so the arm tests a static build: $(grep -m1 '^ERROR' "$log")"
     elif [ "$rc" -eq 0 ]; then
         report "FAIL reconfigurable cells: rc 0 with $n RM cell(s) ($(geom holdouts "$OUT/rm-routed.json" | head -1))"
-    elif ! grep -q "not delivered to $srl.WE .*constant LUT drivers disabled under NEXTPNR_PARTITION_ROI in a build with reconfigurable cells" "$log"; then
+    elif ! grep -q "not delivered to $srl.WE .*$why_a NEXTPNR_PARTITION_ROI $why_b" "$log"; then
         report "FAIL reconfigurable cells: rc $rc for another reason: $(grep -m1 "not delivered to $srl.WE" "$log" || grep -m1 '^ERROR' "$log")"
+    elif [ "$rc_set" -eq 0 ] || ! grep -q "not delivered to $srl.WE .*$why_a knob/partition_roi $why_b" "$log_set"; then
+        report "FAIL reconfigurable cells: with --set knob/partition_roi, rc $rc_set: $(grep -m1 "not delivered to $srl.WE" "$log_set" || grep -m1 '^ERROR' "$log_set")"
     else
-        report "PASS reconfigurable cells: $srl.WE refused at rc $rc with $n RM cell(s), no driver added"
+        report "PASS reconfigurable cells: $srl.WE refused at rc $rc with $n RM cell(s), no driver added, naming NEXTPNR_PARTITION_ROI and, with --set, knob/partition_roi"
     fi
 }
 
 arm_walk_budget_exhausted() {
-    local log=$OUT/walk.log
+    local log=$OUT/walk.log log_set=$OUT/walk-set.log
     NEXTPNR_PIP_BLACKLIST_TILE=$OUT/vcc-block.pips NEXTPNR_PARTITION_ROI=$OUT/rect.json \
         timeout "$NPNR_TIMEOUT" "$NEXTPNR" --set knob/const_fence_walk_budget=0 --chipdb "$CHIPDB" --log "$log" -q --json "$OUT/placed.json" \
         --no-pack --no-place --write "$OUT/walk-routed.json" >/dev/null 2>&1
     local rc=$?
+    NEXTPNR_PIP_BLACKLIST_TILE=$OUT/vcc-block.pips \
+        timeout "$NPNR_TIMEOUT" "$NEXTPNR" --set knob/const_fence_walk_budget=0 --set knob/partition_roi="$OUT/rect.json" \
+        --chipdb "$CHIPDB" --log "$log_set" -q --json "$OUT/placed.json" \
+        --no-pack --no-place --write "$OUT/walk-set-routed.json" >/dev/null 2>&1
+    local rc_set=$?
+    local why="interconnect search exhausted its budget before reaching an interconnect pip outside every partition rectangle under"
     if [ "$rc" -eq 0 ]; then
         report "FAIL interconnect search out of budget: rc 0 ($(geom holdouts "$OUT/walk-routed.json" | head -1))"
-    elif ! grep -q "not delivered to $SRL.WE .*interconnect search exhausted its budget" "$log"; then
+    elif ! grep -q "not delivered to $SRL.WE .*$why NEXTPNR_PARTITION_ROI" "$log"; then
         report "FAIL interconnect search out of budget: rc $rc for another reason: $(grep -m1 "not delivered to $SRL.WE" "$log" || grep -m1 '^ERROR' "$log")"
+    elif [ "$rc_set" -eq 0 ] || ! grep -q "not delivered to $SRL.WE .*$why knob/partition_roi" "$log_set"; then
+        report "FAIL interconnect search out of budget: with --set knob/partition_roi, rc $rc_set: $(grep -m1 "not delivered to $SRL.WE" "$log_set" || grep -m1 '^ERROR' "$log_set")"
     else
-        report "PASS interconnect search out of budget: $SRL.WE refused as out of budget, not as fenced"
+        report "PASS interconnect search out of budget: $SRL.WE refused as out of budget, not as fenced, naming NEXTPNR_PARTITION_ROI and, with --set, knob/partition_roi"
     fi
 }
 

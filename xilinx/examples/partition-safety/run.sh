@@ -81,7 +81,7 @@ arm_region_only_keeps_output() {
         >/dev/null 2>&1
     local rc=$?
     local refused
-    refused=$(grep -c 'region-only needs a partition rectangle' "$OUT/l29.log")
+    refused=$(grep -c 'region-only needs a partition rectangle; pass --set knob/partition_roi=' "$OUT/l29.log")
     if [ "$rc" -ne 0 ] && [ "$refused" -gt 0 ] && [ "$(cksum <"$f")" = "$want" ]; then
         report "PASS write-fixed-routes --region-only without a rectangle: refused at rc $rc, output left as it was"
     else
@@ -122,12 +122,16 @@ arm_router1_refused_under_a_rectangle() {
     NEXTPNR_PARTITION_ROI=$OUT/far.roi.json npnr "$OUT/l24.log" --json "$OUT/placed-router1.json" --no-pack \
         --no-place
     local rc=$?
-    local refused
-    refused=$(grep -c 'router1 has neither the partition route clamp nor the static keepout' "$OUT/l24.log")
-    if [ "$rc" -ne 0 ] && [ "$refused" -eq 1 ]; then
-        report "PASS router1 under a rectangle: refused at rc $rc"
+    npnr "$OUT/l24-set.log" --set knob/partition_roi="$OUT/far.roi.json" --json "$OUT/placed-router1.json" \
+        --no-pack --no-place
+    local rc_set=$?
+    local want='router1 has neither the partition route clamp nor the static keepout, and' refused refused_set
+    refused=$(grep -c "$want NEXTPNR_PARTITION_ROI is set" "$OUT/l24.log")
+    refused_set=$(grep -c "$want knob/partition_roi is set" "$OUT/l24-set.log")
+    if [ "$rc" -ne 0 ] && [ "$refused" -eq 1 ] && [ "$rc_set" -ne 0 ] && [ "$refused_set" -eq 1 ]; then
+        report "PASS router1 under a rectangle: refused at rc $rc naming NEXTPNR_PARTITION_ROI and at rc $rc_set naming knob/partition_roi"
     else
-        report "FAIL router1 under a rectangle: rc $rc, $refused refusal line(s)"
+        report "FAIL router1 under a rectangle: environment alias rc $rc, $refused refusal line(s); --set rc $rc_set, $refused_set refusal line(s)"
     fi
     NEXTPNR_PARTITION_ROI=$OUT/far.roi.json NEXTPNR_PARTITION_CLAMP=off NEXTPNR_PARTITION_KEEPOUT=off \
         npnr "$OUT/l24-off.log" --json "$OUT/placed-router1.json" --no-pack --no-place
@@ -679,10 +683,15 @@ arm_skip_failed_arcs_under_a_rectangle() {
     NEXTPNR_PARTITION_ROI=$OUT/far.roi.json npnr "$OUT/sfa.log" --set knob/skip_failed_arcs=1 --json "$OUT/placed.json" \
         --no-pack --no-place --write "$OUT/sfa.json"
     local rc=$?
-    if [ "$rc0" -eq 0 ] && [ "$rc" -ne 0 ] && grep -q '^ERROR: knob/skip_failed_arcs or the router1/skipFailedArcs setting is set and NEXTPNR_PARTITION_ROI is set' "$OUT/sfa.log"; then
-        report "PASS NEXTPNR_SKIP_FAILED_ARCS: rc 0 without a rectangle, refused at rc $rc under one"
+    npnr "$OUT/sfa-set.log" --set knob/partition_roi="$OUT/far.roi.json" --set knob/skip_failed_arcs=1 \
+        --json "$OUT/placed.json" --no-pack --no-place
+    local rc_set=$?
+    local sfa='^ERROR: knob/skip_failed_arcs or the router1/skipFailedArcs setting is set and'
+    if [ "$rc0" -eq 0 ] && [ "$rc" -ne 0 ] && grep -q "$sfa NEXTPNR_PARTITION_ROI is set" "$OUT/sfa.log" &&
+            [ "$rc_set" -ne 0 ] && grep -q "$sfa knob/partition_roi is set" "$OUT/sfa-set.log"; then
+        report "PASS NEXTPNR_SKIP_FAILED_ARCS: rc 0 without a rectangle, refused under one at rc $rc naming NEXTPNR_PARTITION_ROI and at rc $rc_set naming knob/partition_roi"
     else
-        report "FAIL NEXTPNR_SKIP_FAILED_ARCS: rc $rc0 without a rectangle, rc $rc under one: $(grep -m1 '^ERROR' "$OUT/sfa.log")"
+        report "FAIL NEXTPNR_SKIP_FAILED_ARCS: rc $rc0 without a rectangle, rc $rc under one: $(grep -m1 '^ERROR' "$OUT/sfa.log"); --set rc $rc_set: $(grep -m1 '^ERROR' "$OUT/sfa-set.log")"
     fi
     if [ ! -f "$OUT/placed-router1.json" ] &&
             ! npnr "$OUT/sfa-r1-place.log" --xdc "$HERE/top.xdc" --json "$OUT/top.json" \
@@ -927,10 +936,15 @@ arm_fixed_routes_chipdb_identity() {
     NEXTPNR_PARTITION_ROI=$OUT/far.roi.json npnr "$OUT/id-none-roi.log" --json "$OUT/placed.json" --no-pack --no-place \
         --fixed-routes "$OUT/id-none.routes"
     rc=$?
-    if [ "$rc" -ne 0 ] && grep -q "^ERROR: fixed-routes: .* index-form pip line(s) and no '# nextpnr-xilinx chipdb:' line" "$OUT/id-none-roi.log"; then
-        report "PASS fixed-routes with no chipdb line under a rectangle: refused at rc $rc"
+    npnr "$OUT/id-none-roi-set.log" --set knob/partition_roi="$OUT/far.roi.json" --json "$OUT/placed.json" --no-pack \
+        --no-place --fixed-routes "$OUT/id-none.routes"
+    local rc_set=$?
+    local idx="^ERROR: fixed-routes: .* index-form pip line(s) and no '# nextpnr-xilinx chipdb:' line, and"
+    if [ "$rc" -ne 0 ] && grep -q "$idx NEXTPNR_PARTITION_ROI is set" "$OUT/id-none-roi.log" &&
+            [ "$rc_set" -ne 0 ] && grep -q "$idx knob/partition_roi is set" "$OUT/id-none-roi-set.log"; then
+        report "PASS fixed-routes with no chipdb line under a rectangle: refused at rc $rc naming NEXTPNR_PARTITION_ROI and at rc $rc_set naming knob/partition_roi"
     else
-        report "FAIL fixed-routes with no chipdb line under a rectangle: rc $rc, $(grep -o 'bound [0-9]*/[0-9]* pips' "$OUT/id-none-roi.log" | head -1)"
+        report "FAIL fixed-routes with no chipdb line under a rectangle: rc $rc, $(grep -o 'bound [0-9]*/[0-9]* pips' "$OUT/id-none-roi.log" | head -1); --set rc $rc_set: $(grep -m1 '^ERROR' "$OUT/id-none-roi-set.log")"
     fi
     if [ -n "${CHIPDB_OTHER:-}" ]; then
         timeout "$NPNR_TIMEOUT" "$NEXTPNR" --chipdb "$CHIPDB_OTHER" --log "$OUT/id-real-stamp.log" -q \
