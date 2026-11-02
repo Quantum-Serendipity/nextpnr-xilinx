@@ -122,8 +122,9 @@ arm_router1_refused_under_a_rectangle() {
     NEXTPNR_PARTITION_ROI=$OUT/far.roi.json npnr "$OUT/l24.log" --json "$OUT/placed-router1.json" --no-pack \
         --no-place
     local rc=$?
-    npnr "$OUT/l24-set.log" --set knob/partition_roi="$OUT/far.roi.json" --json "$OUT/placed-router1.json" \
-        --no-pack --no-place
+    env -u NEXTPNR_PARTITION_ROI timeout "$NPNR_TIMEOUT" "$NEXTPNR" --chipdb "$CHIPDB" --log "$OUT/l24-set.log" -q \
+        --set knob/partition_roi="$OUT/far.roi.json" --json "$OUT/placed-router1.json" --no-pack --no-place \
+        >/dev/null 2>&1
     local rc_set=$?
     local want='router1 has neither the partition route clamp nor the static keepout, and' refused refused_set
     refused=$(grep -c "$want NEXTPNR_PARTITION_ROI is set" "$OUT/l24.log")
@@ -683,8 +684,9 @@ arm_skip_failed_arcs_under_a_rectangle() {
     NEXTPNR_PARTITION_ROI=$OUT/far.roi.json npnr "$OUT/sfa.log" --set knob/skip_failed_arcs=1 --json "$OUT/placed.json" \
         --no-pack --no-place --write "$OUT/sfa.json"
     local rc=$?
-    npnr "$OUT/sfa-set.log" --set knob/partition_roi="$OUT/far.roi.json" --set knob/skip_failed_arcs=1 \
-        --json "$OUT/placed.json" --no-pack --no-place
+    env -u NEXTPNR_PARTITION_ROI timeout "$NPNR_TIMEOUT" "$NEXTPNR" --chipdb "$CHIPDB" --log "$OUT/sfa-set.log" -q \
+        --set knob/partition_roi="$OUT/far.roi.json" --set knob/skip_failed_arcs=1 --json "$OUT/placed.json" \
+        --no-pack --no-place >/dev/null 2>&1
     local rc_set=$?
     local sfa='^ERROR: knob/skip_failed_arcs or the router1/skipFailedArcs setting is set and'
     if [ "$rc0" -eq 0 ] && [ "$rc" -ne 0 ] && grep -q "$sfa NEXTPNR_PARTITION_ROI is set" "$OUT/sfa.log" &&
@@ -936,8 +938,9 @@ arm_fixed_routes_chipdb_identity() {
     NEXTPNR_PARTITION_ROI=$OUT/far.roi.json npnr "$OUT/id-none-roi.log" --json "$OUT/placed.json" --no-pack --no-place \
         --fixed-routes "$OUT/id-none.routes"
     rc=$?
-    npnr "$OUT/id-none-roi-set.log" --set knob/partition_roi="$OUT/far.roi.json" --json "$OUT/placed.json" --no-pack \
-        --no-place --fixed-routes "$OUT/id-none.routes"
+    env -u NEXTPNR_PARTITION_ROI timeout "$NPNR_TIMEOUT" "$NEXTPNR" --chipdb "$CHIPDB" --log "$OUT/id-none-roi-set.log" \
+        -q --set knob/partition_roi="$OUT/far.roi.json" --json "$OUT/placed.json" --no-pack --no-place \
+        --fixed-routes "$OUT/id-none.routes" >/dev/null 2>&1
     local rc_set=$?
     local idx="^ERROR: fixed-routes: .* index-form pip line(s) and no '# nextpnr-xilinx chipdb:' line, and"
     if [ "$rc" -ne 0 ] && grep -q "$idx NEXTPNR_PARTITION_ROI is set" "$OUT/id-none-roi.log" &&

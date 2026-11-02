@@ -337,10 +337,10 @@ void Arch::routeConstants(std::function<void()> reroute)
     const bool no_drivers = knobs::get("NEXTPNR_NO_CONST_LUT_DRIVERS") != nullptr || rm_build;
 
     // Fatal by default: an unrouted constant sink reads as 1 in silicon.
-    auto report = [&](const std::vector<std::pair<ConstHoldout, const char *>> &left) {
+    auto report = [&](const std::vector<std::pair<ConstHoldout, std::string>> &left) {
         for (auto &e : left) {
             const ConstHoldout &h = e.first;
-            const char *why = e.second;
+            const char *why = e.second.c_str();
             PortRef pr;
             pr.cell = h.cell;
             pr.port = h.port;
@@ -366,7 +366,7 @@ void Arch::routeConstants(std::function<void()> reroute)
     };
 
     std::set<std::pair<IdString, IdString>> given_up; // (cell, port) already reported
-    std::vector<std::pair<ConstHoldout, const char *>> given_up_list;
+    std::vector<std::pair<ConstHoldout, std::string>> given_up_list;
     const std::string under_roi = " under " + roi_source;
     const std::string why_unplaced =
             rm_build     ? "constant LUT drivers disabled" + under_roi + " in a build with reconfigurable cells"
@@ -418,7 +418,7 @@ void Arch::routeConstants(std::function<void()> reroute)
         }
         return SinkReach::Fenced;
     };
-    auto give_up = [&](const ConstHoldout &h, const char *why) {
+    auto give_up = [&](const ConstHoldout &h, const std::string &why) {
         given_up.insert(std::make_pair(h.cell->name, h.port));
         given_up_list.push_back(std::make_pair(h, why));
     };
@@ -460,16 +460,16 @@ void Arch::routeConstants(std::function<void()> reroute)
             }
             const bool sink_in_partition_rect = partition_rect_at(getBelLocation(h.cell->bel)) >= 0;
             if (sink_in_partition_rect) {
-                give_up(h, why_in_rect.c_str());
+                give_up(h, why_in_rect);
                 continue;
             }
             const SinkReach reach = partition_rect_active ? interconnect_outside_rects(sink) : SinkReach::Outside;
             if (reach == SinkReach::Fenced) {
-                give_up(h, why_fenced.c_str());
+                give_up(h, why_fenced);
                 continue;
             }
             if (reach == SinkReach::Exhausted) {
-                give_up(h, why_walk_exhausted.c_str());
+                give_up(h, why_walk_exhausted);
                 continue;
             }
             real.push_back(h);
@@ -479,14 +479,14 @@ void Arch::routeConstants(std::function<void()> reroute)
             break;
         if (no_drivers) {
             for (auto &h : real)
-                give_up(h, why_unplaced.c_str());
+                give_up(h, why_unplaced);
             break;
         }
         const bool out_of_passes = pass >= max_passes;
         if (out_of_passes) {
             log_warning("constant holdouts remain after %d re-route pass(es)\n", pass);
             for (auto &h : real)
-                give_up(h, why_unplaced.c_str());
+                give_up(h, why_unplaced);
             break;
         }
         log_info("Constant fill left %d sink(s) unreached; driving them from local constant LUTs (pass %d)\n",
@@ -494,7 +494,7 @@ void Arch::routeConstants(std::function<void()> reroute)
         std::vector<ConstHoldout> unplaced;
         drivers += insertConstDrivers(real, unplaced);
         for (auto &h : unplaced)
-            give_up(h, why_unplaced.c_str());
+            give_up(h, why_unplaced);
         const bool nothing_placed = unplaced.size() == real.size();
         if (nothing_placed)
             break; // nothing changed, re-routing would not help

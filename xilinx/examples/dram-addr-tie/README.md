@@ -48,6 +48,13 @@ leaves its outputs in `$OUT` (a fresh `mktemp -d` by default).
 | roi-set-knob-unset-packs | as roi-knob-unset-packs, with the rectangle given as `--set knob/partition_roi` and the log naming it as from `--set` |
 | roi-file-refused | a rectangle file that does not exist, given through `NEXTPNR_PARTITION_ROI`, stops the run with `NEXTPNR_PARTITION_ROI: cannot open` |
 | roi-set-file-refused | the same file given as `--set knob/partition_roi` stops the run with `knob/partition_roi: cannot open` |
+| roi-key-refused | a rectangle file with a top-level key `bogus`, given through `NEXTPNR_PARTITION_ROI`, stops the run with `NEXTPNR_PARTITION_ROI: '<file>' carries key "bogus"` |
+| roi-set-key-refused | the same file given as `--set knob/partition_roi` stops the run with `knob/partition_roi: '<file>' carries key "bogus"` |
+| roi-grid-refused | a rectangle with `GRID_X_MAX` 9999, given through `NEXTPNR_PARTITION_ROI`, stops the run with `NEXTPNR_PARTITION_ROI: '<file>' rectangle grid (10,105)-(9999,155) does not fit the device grid` |
+| roi-set-grid-refused | the same file given as `--set knob/partition_roi` stops the run with the same refusal naming `knob/partition_roi` |
+
+Every run that passes the rectangle as `--set knob/partition_roi` runs with `NEXTPNR_PARTITION_ROI` removed from its
+environment, so it reads the rectangle through the knob or not at all.
 | mutant-no-permute | the contents check reds when `r_both`'s packed `INIT` is replaced by the unpermuted lanes |
 | mutant-driven-bit | the contents check reds when `r_mixed`'s bit 4, which port A drives, is moved to VCC with its `INIT` permuted |
 | mutant-skip-port-d | the contents check reds when `r_dfree`'s bit 4, which only `ADDRD` drives, is moved to VCC with its `INIT` permuted, as a packer that tested ports A to C alone would |

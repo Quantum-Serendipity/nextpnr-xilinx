@@ -39,9 +39,14 @@ synth() {
 }
 
 pack() {
+    local pre=()
+    if [ "$1" = --no-roi-alias ]; then
+        pre=(env -u NEXTPNR_PARTITION_ROI)
+        shift
+    fi
     local json=$1 base=$2
     shift 2
-    timeout "$NPNR_TIMEOUT" "$NEXTPNR" --chipdb "$CHIPDB" "$@" --json "$json" --pack-only \
+    ${pre[@]+"${pre[@]}"} timeout "$NPNR_TIMEOUT" "$NEXTPNR" --chipdb "$CHIPDB" "$@" --json "$json" --pack-only \
         --write "$base.json" --log "$base.log" -q >/dev/null 2>&1
 }
 
@@ -115,25 +120,24 @@ NEXTPNR_PARTITION_ROI="$OUT/roi.json" refused roi-knob-on-refused "$OUT/packed-r
     "$OUT/top.json" "$OUT/packed-roi" --xdc "$HERE/top.xdc" "${KNOB_ON[@]}"
 refused roi-set-knob-on-refused "$OUT/packed-roi-set" \
     "knob/dram_tie_unread_di=on is refused: knob/partition_roi is set" \
-    "$OUT/top.json" "$OUT/packed-roi-set" --xdc "$HERE/top.xdc" --set knob/partition_roi="$OUT/roi.json" \
-    "${KNOB_ON[@]}"
+    --no-roi-alias "$OUT/top.json" "$OUT/packed-roi-set" --xdc "$HERE/top.xdc" \
+    --set knob/partition_roi="$OUT/roi.json" "${KNOB_ON[@]}"
 TIE_RE='Tied [0-9]+ tied-low RAM32M/RAM64M data inputs high'
 roi_unset_packs() {
-    local arm=$1 via=$2 run knob roi=() from base rc why=""
-    if [ "$via" = env ]; then
-        from="environment NEXTPNR_PARTITION_ROI"
-    else
-        from="--set"
-        roi=(--set knob/partition_roi="$OUT/roi.json")
-    fi
+    local arm=$1 via=$2 run knob from base rc why=""
+    from="--set"
+    [ "$via" = env ] && from="environment NEXTPNR_PARTITION_ROI"
     for run in unset off; do
         knob=()
         [ "$run" = off ] && knob=(--set knob/dram_tie_unread_di=off)
         base="$OUT/packed-roi-$via-$run"
-        (
-            [ "$via" = env ] && export NEXTPNR_PARTITION_ROI="$OUT/roi.json"
-            pack "$OUT/top.json" "$base" --xdc "$HERE/top.xdc" ${roi[@]+"${roi[@]}"} ${knob[@]+"${knob[@]}"}
-        )
+        if [ "$via" = env ]; then
+            NEXTPNR_PARTITION_ROI="$OUT/roi.json" pack "$OUT/top.json" "$base" --xdc "$HERE/top.xdc" \
+                ${knob[@]+"${knob[@]}"}
+        else
+            pack --no-roi-alias "$OUT/top.json" "$base" --xdc "$HERE/top.xdc" \
+                --set knob/partition_roi="$OUT/roi.json" ${knob[@]+"${knob[@]}"}
+        fi
         rc=$?
         if [ "$rc" -ne 0 ]; then
             why="$why knob $run: rc $rc: $(grep -m1 '^ERROR' "$base.log");"
@@ -156,7 +160,19 @@ roi_unset_packs roi-set-knob-unset-packs set
 NEXTPNR_PARTITION_ROI="$OUT/absent.roi.json" refused roi-file-refused "$OUT/roi-absent-env" \
     "NEXTPNR_PARTITION_ROI: cannot open '$OUT/absent.roi.json'" "$OUT/top.json" "$OUT/roi-absent-env"
 refused roi-set-file-refused "$OUT/roi-absent-set" "knob/partition_roi: cannot open '$OUT/absent.roi.json'" \
-    "$OUT/top.json" "$OUT/roi-absent-set" --set knob/partition_roi="$OUT/absent.roi.json"
+    --no-roi-alias "$OUT/top.json" "$OUT/roi-absent-set" --set knob/partition_roi="$OUT/absent.roi.json"
+printf '{"info": {"GRID_X_MIN": 10, "GRID_X_MAX": 28, "GRID_Y_MIN": 105, "GRID_Y_MAX": 155}, "bogus": 1}\n' \
+    >"$OUT/roi-key.json"
+printf '{"info": {"GRID_X_MIN": 10, "GRID_X_MAX": 9999, "GRID_Y_MIN": 105, "GRID_Y_MAX": 155}}\n' >"$OUT/roi-grid.json"
+NEXTPNR_PARTITION_ROI="$OUT/roi-key.json" refused roi-key-refused "$OUT/roi-key-env" \
+    "NEXTPNR_PARTITION_ROI: '$OUT/roi-key.json' carries key \"bogus\"" "$OUT/top.json" "$OUT/roi-key-env"
+refused roi-set-key-refused "$OUT/roi-key-set" "knob/partition_roi: '$OUT/roi-key.json' carries key \"bogus\"" \
+    --no-roi-alias "$OUT/top.json" "$OUT/roi-key-set" --set knob/partition_roi="$OUT/roi-key.json"
+GRID_WANT="rectangle grid (10,105)-(9999,155) does not fit the device grid"
+NEXTPNR_PARTITION_ROI="$OUT/roi-grid.json" refused roi-grid-refused "$OUT/roi-grid-env" \
+    "NEXTPNR_PARTITION_ROI: '$OUT/roi-grid.json' $GRID_WANT" "$OUT/top.json" "$OUT/roi-grid-env"
+refused roi-set-grid-refused "$OUT/roi-grid-set" "knob/partition_roi: '$OUT/roi-grid.json' $GRID_WANT" \
+    --no-roi-alias "$OUT/top.json" "$OUT/roi-grid-set" --set knob/partition_roi="$OUT/roi-grid.json"
 
 value_refused() {
     local v rc why="" n=0

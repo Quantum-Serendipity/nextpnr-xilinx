@@ -180,7 +180,7 @@ arm_sink_inside_rect() {
         timeout "$NPNR_TIMEOUT" "$NEXTPNR" --chipdb "$CHIPDB" --log "$log" -q --json "$OUT/placed.json" \
         --no-pack --no-place --write "$OUT/sink-inside-routed.json" >/dev/null 2>&1
     local rc=$?
-    NEXTPNR_PIP_BLACKLIST_TILE=$OUT/vcc-block.pips \
+    NEXTPNR_PIP_BLACKLIST_TILE=$OUT/vcc-block.pips env -u NEXTPNR_PARTITION_ROI \
         timeout "$NPNR_TIMEOUT" "$NEXTPNR" --chipdb "$CHIPDB" --log "$log_set" -q \
         --set knob/partition_roi="$OUT/sink-rect.json" --json "$OUT/placed.json" \
         --no-pack --no-place --write "$OUT/sink-inside-set-routed.json" >/dev/null 2>&1
@@ -275,7 +275,7 @@ arm_reconfigurable_cells() {
     local rc=$?
     local log_set=$OUT/rm-set.log
     NEXTPNR_PIP_BLACKLIST_TILE=$OUT/vcc-block-rm.pips NEXTPNR_PARTITION_NETS=warn NEXTPNR_PARTITION_CLAMP=off \
-        timeout "$NPNR_TIMEOUT" "$NEXTPNR" --chipdb "$CHIPDB" --log "$log_set" -q \
+        env -u NEXTPNR_PARTITION_ROI timeout "$NPNR_TIMEOUT" "$NEXTPNR" --chipdb "$CHIPDB" --log "$log_set" -q \
         --set knob/partition_roi="$OUT/rm-rect.json" --json "$OUT/rm-input.json" \
         --no-pack --seed 1 --write "$OUT/rm-set-routed.json" >/dev/null 2>&1
     local rc_set=$?
@@ -301,7 +301,7 @@ arm_walk_budget_exhausted() {
         timeout "$NPNR_TIMEOUT" "$NEXTPNR" --set knob/const_fence_walk_budget=0 --chipdb "$CHIPDB" --log "$log" -q --json "$OUT/placed.json" \
         --no-pack --no-place --write "$OUT/walk-routed.json" >/dev/null 2>&1
     local rc=$?
-    NEXTPNR_PIP_BLACKLIST_TILE=$OUT/vcc-block.pips \
+    NEXTPNR_PIP_BLACKLIST_TILE=$OUT/vcc-block.pips env -u NEXTPNR_PARTITION_ROI \
         timeout "$NPNR_TIMEOUT" "$NEXTPNR" --set knob/const_fence_walk_budget=0 --set knob/partition_roi="$OUT/rect.json" \
         --chipdb "$CHIPDB" --log "$log_set" -q --json "$OUT/placed.json" \
         --no-pack --no-place --write "$OUT/walk-set-routed.json" >/dev/null 2>&1
