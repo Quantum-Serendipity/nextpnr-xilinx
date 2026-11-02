@@ -1,7 +1,7 @@
 # Tied-low RAM32M/RAM64M address bits rewritten to tied-high
 
-Packs `top.v` on an `xc7a100tfgg484` with `--pack-only`, once with `knob/dram_tie_unread_di` unset and
-once with it `on`, and grades each packed netlist against the synthesised one. `check.py edit` first
+Packs `top.v` on an `xc7a100tfgg484` with `--pack-only` with `knob/dram_tie_unread_di` unset, `off` and
+`on`, and grades each packed netlist against the synthesised one. `check.py edit` first
 widens `r_wide`'s `INIT_A` to 65 bits and makes `r64s`'s a string, the two shapes the packer must
 skip. Every cell has a distinct non-zero `INIT_A` to `INIT_D`:
 
@@ -37,6 +37,7 @@ leaves its outputs in `$OUT` (a fresh `mktemp -d` by default).
 | count | knob unset: the transform line names the expected bit and cell counts, and the packed `A`/`WA` pins show exactly the bits in the table above moved from GND to VCC |
 | skip-init | knob unset: `r_wide` and `r64s` keep their tied-low address bits on GND |
 | unread-data-off | knob unset: no data-input tie line, and every tied-low data input is still on GND |
+| knob-off-explicit | `--set knob/dram_tie_unread_di=off`: no data-input tie line, and the packed netlist equals the unset run's once the one echoed setting is set aside |
 | contents-knob-on, count-knob-on | as contents and count, over the knob-on run |
 | unread-data-on | knob on: the tie line counts five, and exactly the data inputs the table moves are on VCC |
 | stripped-knob-off | knob unset: `stripped.v`'s port A `DI1`/`DI2` stay on GND |

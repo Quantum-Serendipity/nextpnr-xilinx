@@ -18,6 +18,7 @@ TIED_DI_WHEN_ON = {
     ("r64u/DPR0", "DI1"): VCC, ("r64u/DPR1", "DI1"): GND,
 }
 STRIPPED_PORT_A = [("ram/DPR0_0", "DI1"), ("ram/DPR0_1", "DI2")]
+KNOB_KEY = "knob/dram_tie_unread_di"
 TIE_LINE = r"Tied (\d+) tied-low RAM32M/RAM64M data inputs high whose outputs nothing reads"
 
 
@@ -228,7 +229,8 @@ def tie_count(log):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("mode", choices=["edit", "strip", "contents", "count", "skip-init", "data", "stripped",
-                                     "mutant-no-permute", "mutant-driven-bit", "mutant-skip-port-d"])
+                                     "same-as-unset", "mutant-no-permute", "mutant-driven-bit",
+                                     "mutant-skip-port-d"])
     ap.add_argument("pre")
     ap.add_argument("packed")
     ap.add_argument("--log")
@@ -247,6 +249,33 @@ def main():
             print("emptied %d top port(s): %s" % (len(mod["ports"]), " ".join(sorted(mod["ports"]))))
             mod["ports"] = {}
         json.dump(doc, open(a.packed, "w"))
+        return 0
+
+    if a.mode == "same-as-unset":
+        unset = json.load(open(a.pre))
+        explicit = json.load(open(a.packed))
+        removed = []
+
+        def drop(node, path):
+            if isinstance(node, dict):
+                for k in list(node):
+                    if k == KNOB_KEY:
+                        removed.append("%s=%s" % ("/".join(path + [k]), node.pop(k)))
+                    else:
+                        drop(node[k], path + [k])
+            elif isinstance(node, list):
+                for i, v in enumerate(node):
+                    drop(v, path + [str(i)])
+
+        drop(explicit, [])
+        n = tie_count(a.log)
+        values = [r.rsplit("=", 1)[1] for r in removed]
+        if n is not None or values != ["off"] or explicit != unset:
+            print("tie line count %s; echoed key(s) %s; packed netlists %s apart from them"
+                  % (n, removed or "none", "equal" if explicit == unset else "DIFFER"))
+            return 1
+        print("--set %s=off: no tie line, and the packed netlist equals the unset run's once the one echoed "
+              "setting (%s) is set aside" % (KNOB_KEY, removed[0]))
         return 0
 
     if a.mode == "stripped":

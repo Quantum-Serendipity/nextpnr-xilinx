@@ -66,6 +66,10 @@ for run in off on; do
         exit 1
     fi
 done
+if ! pack "$OUT/top.json" "$OUT/packed-offx" --xdc "$HERE/top.xdc" --set knob/dram_tie_unread_di=off; then
+    echo "FAIL pack knob off explicit: $(grep -m1 '^ERROR' "$OUT/packed-offx.log")"
+    exit 1
+fi
 
 check() {
     local arm=$1 mode=$2 pre=$3 run=$4 knob=$5 out
@@ -81,6 +85,7 @@ check contents contents top packed-off off
 check count count top packed-off off
 check skip-init skip-init top packed-off off
 check unread-data-off data top packed-off off
+check knob-off-explicit same-as-unset packed-off packed-offx off
 check contents-knob-on contents top packed-on on
 check count-knob-on count top packed-on on
 check unread-data-on data top packed-on on
