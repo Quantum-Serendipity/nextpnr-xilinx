@@ -111,12 +111,53 @@ printf '{"info": {"GRID_X_MIN": 10, "GRID_X_MAX": 28, "GRID_Y_MIN": 105, "GRID_Y
 NEXTPNR_PARTITION_ROI="$OUT/roi.json" refused roi-knob-on-refused "$OUT/packed-roi" \
     "knob/dram_tie_unread_di=on is refused: NEXTPNR_PARTITION_ROI is set" \
     "$OUT/top.json" "$OUT/packed-roi" --xdc "$HERE/top.xdc" "${KNOB_ON[@]}"
-refused knob-value-refused "$OUT/packed-bad" "knob/dram_tie_unread_di=maybe is refused: the value is on or off" \
-    "$OUT/top.json" "$OUT/packed-bad" --xdc "$HERE/top.xdc" --set knob/dram_tie_unread_di=maybe
+roi_unset_packs() {
+    local run knob rc why=""
+    for run in unset off; do
+        knob=()
+        [ "$run" = off ] && knob=(--set knob/dram_tie_unread_di=off)
+        NEXTPNR_PARTITION_ROI="$OUT/roi.json" pack "$OUT/top.json" "$OUT/packed-roi-$run" --xdc "$HERE/top.xdc" \
+            ${knob[@]+"${knob[@]}"}
+        rc=$?
+        if [ "$rc" -ne 0 ]; then
+            why="$why knob $run: rc $rc: $(grep -m1 '^ERROR' "$OUT/packed-roi-$run.log");"
+        elif ! grep -q 'knob knob/partition_roi=' "$OUT/packed-roi-$run.log"; then
+            why="$why knob $run: the log names no partition ROI;"
+        elif grep -qE "$TIE_RE" "$OUT/packed-roi-$run.log"; then
+            why="$why knob $run: a data-input tie line;"
+        fi
+    done
+    if [ -z "$why" ]; then
+        report "PASS roi-knob-unset-packs: with NEXTPNR_PARTITION_ROI set, the knob unset and =off each pack at rc 0 with no tie line"
+    else
+        report "FAIL roi-knob-unset-packs:$why"
+    fi
+}
+TIE_RE='Tied [0-9]+ tied-low RAM32M/RAM64M data inputs high'
+roi_unset_packs
+
+value_refused() {
+    local v rc why="" n=0
+    for v in maybe 0 1 ON Off on1; do
+        pack "$OUT/top.json" "$OUT/packed-bad-$v" --xdc "$HERE/top.xdc" --set knob/dram_tie_unread_di="$v"
+        rc=$?
+        n=$((n + 1))
+        if [ "$rc" -eq 0 ] || ! grep -qF "ERROR: knob/dram_tie_unread_di=$v is refused: the value is neither on nor off" \
+                "$OUT/packed-bad-$v.log"; then
+            why="$why =$v: rc $rc: $(grep -m1 '^ERROR' "$OUT/packed-bad-$v.log");"
+        fi
+    done
+    if [ -z "$why" ]; then
+        report "PASS knob-value-refused: each of $n value(s) (maybe 0 1 ON Off on1) stops the run and is named neither on nor off"
+    else
+        report "FAIL knob-value-refused:$why"
+    fi
+}
+value_refused
 rc=0
 timeout "$NPNR_TIMEOUT" "$NEXTPNR" --chipdb "$CHIPDB" --json "$OUT/packed-off.json" --no-pack --no-place --no-route \
     --set knob/dram_tie_unread_di=maybe --log "$OUT/nopack-bad.log" -q >/dev/null 2>&1 || rc=$?
-if [ "$rc" -ne 0 ] && grep -qF "ERROR: knob/dram_tie_unread_di=maybe is refused: the value is on or off" "$OUT/nopack-bad.log"; then
+if [ "$rc" -ne 0 ] && grep -qF "ERROR: knob/dram_tie_unread_di=maybe is refused: the value is neither on nor off" "$OUT/nopack-bad.log"; then
     report "PASS knob-value-refused-no-pack: --no-pack --no-place --no-route with =maybe stops at rc $rc"
 else
     report "FAIL knob-value-refused-no-pack: rc $rc: $(grep -m1 '^ERROR' "$OUT/nopack-bad.log")"

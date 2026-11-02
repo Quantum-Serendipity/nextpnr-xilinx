@@ -88,7 +88,7 @@ bool Arch::dram_tie_unread_di() const
     if (v == nullptr || std::string(v) == "off")
         return false;
     if (std::string(v) != "on")
-        log_error("knob/dram_tie_unread_di=%s is refused: the value is on or off\n", v);
+        log_error("knob/dram_tie_unread_di=%s is refused: the value is neither on nor off\n", v);
     return true;
 }
 
